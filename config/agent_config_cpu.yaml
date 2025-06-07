@@ -1,0 +1,143 @@
+# Configuration de l'Agent RL pour ADAN - Profil CPU (ressources limitées)
+
+# Paramètres généraux de l'agent
+agent:
+  # Algorithme RL: 'ppo', 'a2c', 'sac', 'td3'
+  algorithm: "ppo"
+  # Type de politique: 'MlpPolicy', 'CnnPolicy', 'MultiInputPolicy'
+  policy_type: "MultiInputPolicy"
+  # Nombre total d'étapes d'entraînement (réduit pour CPU)
+  total_timesteps: 200000
+  # Graine aléatoire pour la reproductibilité
+  seed: 42
+  # Niveau de verbosité: 0 (silencieux), 1 (entraînement), 2 (debug)
+  verbose: 1
+  # Activer/désactiver le mode déterministe pour l'inférence
+  deterministic_inference: true
+  # Fréquence des logs personnalisés (en nombre de rollouts)
+  custom_log_freq_rollouts: 1
+  # Fréquence d'évaluation (en nombre de timesteps)
+  eval_freq: 10000
+  # Fréquence de sauvegarde des checkpoints (en nombre de timesteps)
+  checkpoint_freq: 50000
+  # Nombre d'environnements parallèles pour l'entraînement
+  n_envs: 1
+  
+  # Configuration de l'extracteur de features CNN (version légère pour CPU)
+  features_extractor_kwargs:
+    features_dim: 32  # Dimension de sortie de l'extracteur de features (réduite)
+    num_input_channels: 1  # Nombre de canaux d'entrée pour le CNN
+    cnn_config:
+      conv_layers:
+        - {out_channels: 16, kernel_size: 3, stride: 1, padding: 1}  # Réduit de 32 à 16
+        - {out_channels: 32, kernel_size: 3, stride: 1, padding: 1}  # Réduit de 64 à 32
+      pool_layers:
+        - {kernel_size: 2, stride: 2}
+        - {kernel_size: 2, stride: 2}
+      activation: "relu"
+      dropout: 0.2
+      fc_layers: [64]  # Réduit de 128 à 64
+
+# Hyperparamètres communs
+policy:
+  # Architecture du réseau de neurones (réduite pour CPU)
+  net_arch:
+    pi: [64, 32]  # Réseau de politique (actor) - réduit de [128, 64] à [64, 32]
+    vf: [64, 32]  # Réseau de valeur (critic) - réduit de [128, 64] à [64, 32]
+  # Fonction d'activation: 'tanh', 'relu', 'elu'
+  activation_fn: "tanh"
+  # Facteur de dépréciation des récompenses futures
+  gamma: 0.99
+  # Taux d'apprentissage
+  learning_rate: 0.0003
+  # Planificateur de taux d'apprentissage: 'constant', 'linear'
+  lr_schedule: "constant"
+  # Nombre d'environnements parallèles
+  n_envs: 1
+  # Normalisation des observations
+  normalize_observations: false
+  # Normalisation des récompenses
+  normalize_rewards: false
+
+# Hyperparamètres spécifiques à PPO
+ppo:
+  # Nombre d'étapes de collecte avant mise à jour (réduit pour CPU)
+  n_steps: 1024  # Réduit de 2048 à 1024
+  # Taille du batch pour l'optimisation
+  batch_size: 64
+  # Nombre d'époques d'optimisation par mise à jour
+  n_epochs: 10
+  # Paramètre GAE-Lambda pour l'estimation d'avantage
+  gae_lambda: 0.95
+  # Paramètre de clipping pour PPO
+  clip_range: 0.2
+  # Clipping de la fonction de valeur
+  clip_range_vf: null
+  # Coefficient d'entropie
+  ent_coef: 0.01
+  # Coefficient de la fonction de valeur
+  vf_coef: 0.5
+  # Norme maximale du gradient
+  max_grad_norm: 0.5
+  # Utiliser la normalisation d'avantage
+  use_sde: false
+  # Fréquence de reset pour SDE
+  sde_sample_freq: -1
+  # Utiliser le reparamétrage du gradient
+  use_reparameterization: true
+
+# Hyperparamètres spécifiques à A2C (si utilisé)
+a2c:
+  # Nombre d'étapes de collecte avant mise à jour
+  n_steps: 5
+  # Normalisation de la fonction de valeur
+  normalize_advantage: true
+  # Taux d'apprentissage RMSProp
+  rms_prop_eps: 1e-5
+  # Utiliser RMS Prop
+  use_rms_prop: true
+  # Paramètre GAE-Lambda pour l'estimation d'avantage
+  gae_lambda: 1.0
+  # Coefficient d'entropie
+  ent_coef: 0.01
+  # Coefficient de la fonction de valeur
+  vf_coef: 0.5
+  # Norme maximale du gradient
+  max_grad_norm: 0.5
+  # Utiliser la normalisation d'avantage
+  use_sde: false
+  # Fréquence de reset pour SDE
+  sde_sample_freq: -1
+  # Utiliser le reparamétrage du gradient
+  use_reparameterization: true
+
+# Hyperparamètres spécifiques à SAC (si utilisé)
+sac:
+  # Taille du buffer de replay
+  buffer_size: 1000000
+  # Taille du batch pour l'optimisation
+  batch_size: 256
+  # Taux d'apprentissage
+  learning_rate: 0.0003
+  # Facteur de dépréciation des récompenses futures
+  gamma: 0.99
+  # Taux d'apprentissage pour l'entropie
+  learning_rate_alpha: 0.0003
+  # Température d'entropie
+  alpha: 0.2
+  # Ajustement automatique de l'entropie
+  auto_alpha: true
+  # Entropie cible
+  target_entropy: "auto"
+  # Fréquence de mise à jour du réseau cible
+  target_update_interval: 1
+  # Taux de mise à jour du réseau cible
+  tau: 0.005
+  # Nombre de mises à jour de gradient par étape
+  gradient_steps: 1
+  # Utiliser la normalisation d'avantage
+  use_sde: false
+  # Fréquence de reset pour SDE
+  sde_sample_freq: -1
+  # Utiliser le reparamétrage du gradient
+  use_reparameterization: true

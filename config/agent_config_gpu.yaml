@@ -1,0 +1,145 @@
+# Configuration de l'Agent RL pour ADAN - Profil GPU (GTX 1650 4GB VRAM)
+
+# Paramètres généraux de l'agent
+agent:
+  # Algorithme RL: 'ppo', 'a2c', 'sac', 'td3'
+  algorithm: "ppo"
+  # Type de politique: 'MlpPolicy', 'CnnPolicy', 'MultiInputPolicy'
+  policy_type: "MultiInputPolicy"
+  # Nombre total d'étapes d'entraînement (maximisé pour location GPU)
+  total_timesteps: 2000000
+  # Graine aléatoire pour la reproductibilité
+  seed: 42
+  # Niveau de verbosité: 0 (silencieux), 1 (entraînement), 2 (debug)
+  verbose: 1
+  # Activer/désactiver le mode déterministe pour l'inférence
+  deterministic_inference: true
+  # Fréquence des logs personnalisés (en nombre de rollouts)
+  custom_log_freq_rollouts: 1
+  # Fréquence d'évaluation (en nombre de timesteps)
+  eval_freq: 50000
+  # Fréquence de sauvegarde des checkpoints (en nombre de timesteps)
+  checkpoint_freq: 200000
+  # Nombre d'environnements parallèles pour l'entraînement (plus élevé pour GPU)
+  n_envs: 8
+  
+  # Configuration de l'extracteur de features CNN (optimisé pour GPU + 32GB RAM)
+  features_extractor_kwargs:
+    features_dim: 256  # Dimension de sortie de l'extracteur de features (maximisée)
+    num_input_channels: 1  # Nombre de canaux d'entrée pour le CNN
+    cnn_config:
+      conv_layers:
+        - {out_channels: 32, kernel_size: 3, stride: 1, padding: 1}
+        - {out_channels: 64, kernel_size: 3, stride: 1, padding: 1}
+        - {out_channels: 128, kernel_size: 3, stride: 1, padding: 1}  # Couche supplémentaire
+      pool_layers:
+        - {kernel_size: 2, stride: 2}
+        - {kernel_size: 2, stride: 2}
+        - {kernel_size: 2, stride: 2}  # Pool supplémentaire
+      activation: "relu"
+      dropout: 0.2
+      fc_layers: [512, 256]  # Couches optimisées pour 32GB RAM
+
+# Hyperparamètres communs
+policy:
+  # Architecture du réseau de neurones (maximisée pour GPU + 32GB RAM)
+  net_arch:
+    pi: [512, 256, 128]  # Réseau de politique (actor) - maximisé pour ressources
+    vf: [512, 256, 128]  # Réseau de valeur (critic) - maximisé pour ressources
+  # Fonction d'activation: 'tanh', 'relu', 'elu'
+  activation_fn: "tanh"
+  # Facteur de dépréciation des récompenses futures
+  gamma: 0.99
+  # Taux d'apprentissage
+  learning_rate: 0.0003
+  # Planificateur de taux d'apprentissage: 'constant', 'linear'
+  lr_schedule: "constant"
+  # Nombre d'environnements parallèles (maximisé pour 12 cœurs CPU)
+  n_envs: 8
+  # Normalisation des observations
+  normalize_observations: false
+  # Normalisation des récompenses
+  normalize_rewards: false
+
+# Hyperparamètres spécifiques à PPO
+ppo:
+  # Nombre d'étapes de collecte avant mise à jour (optimisé pour 8 workers)
+  n_steps: 4096
+  # Taille du batch pour l'optimisation (maximisée pour 32GB RAM + GTX 1650)
+  batch_size: 512  # Maximisé grâce à 8 workers et 32GB RAM
+  # Nombre d'époques d'optimisation par mise à jour
+  n_epochs: 10
+  # Paramètre GAE-Lambda pour l'estimation d'avantage
+  gae_lambda: 0.95
+  # Paramètre de clipping pour PPO
+  clip_range: 0.2
+  # Clipping de la fonction de valeur
+  clip_range_vf: null
+  # Coefficient d'entropie
+  ent_coef: 0.01
+  # Coefficient de la fonction de valeur
+  vf_coef: 0.5
+  # Norme maximale du gradient
+  max_grad_norm: 0.5
+  # Utiliser la normalisation d'avantage
+  use_sde: false
+  # Fréquence de reset pour SDE
+  sde_sample_freq: -1
+  # Utiliser le reparamétrage du gradient
+  use_reparameterization: true
+
+# Hyperparamètres spécifiques à A2C (si utilisé)
+a2c:
+  # Nombre d'étapes de collecte avant mise à jour
+  n_steps: 5
+  # Normalisation de la fonction de valeur
+  normalize_advantage: true
+  # Taux d'apprentissage RMSProp
+  rms_prop_eps: 1e-5
+  # Utiliser RMS Prop
+  use_rms_prop: true
+  # Paramètre GAE-Lambda pour l'estimation d'avantage
+  gae_lambda: 1.0
+  # Coefficient d'entropie
+  ent_coef: 0.01
+  # Coefficient de la fonction de valeur
+  vf_coef: 0.5
+  # Norme maximale du gradient
+  max_grad_norm: 0.5
+  # Utiliser la normalisation d'avantage
+  use_sde: false
+  # Fréquence de reset pour SDE
+  sde_sample_freq: -1
+  # Utiliser le reparamétrage du gradient
+  use_reparameterization: true
+
+# Hyperparamètres spécifiques à SAC (si utilisé)
+sac:
+  # Taille du buffer de replay
+  buffer_size: 1000000
+  # Taille du batch pour l'optimisation
+  batch_size: 256
+  # Taux d'apprentissage
+  learning_rate: 0.0003
+  # Facteur de dépréciation des récompenses futures
+  gamma: 0.99
+  # Taux d'apprentissage pour l'entropie
+  learning_rate_alpha: 0.0003
+  # Température d'entropie
+  alpha: 0.2
+  # Ajustement automatique de l'entropie
+  auto_alpha: true
+  # Entropie cible
+  target_entropy: "auto"
+  # Fréquence de mise à jour du réseau cible
+  target_update_interval: 1
+  # Taux de mise à jour du réseau cible
+  tau: 0.005
+  # Nombre de mises à jour de gradient par étape
+  gradient_steps: 1
+  # Utiliser la normalisation d'avantage
+  use_sde: false
+  # Fréquence de reset pour SDE
+  sde_sample_freq: -1
+  # Utiliser le reparamétrage du gradient
+  use_reparameterization: true

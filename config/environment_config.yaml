@@ -1,0 +1,81 @@
+# config/environment_config.yaml
+
+# 1. Pénalités pour guider l'agent
+penalties:
+  # Réduire les pénalités pour éviter les valeurs extrêmes
+  invalid_order_base: -0.3         # Pénalité pour action illégale de base (ex: ordre trop petit < absolu, max_positions atteint, etc.)
+  time_step: -0.0005           # Légère pénalité à chaque pas (réduite pour plus de stabilité)
+  order_expiry: -0.1          # Pénalité si un ordre (LIMIT, STOP) expire sans exécution
+  out_of_funds: -0.5          # Pénalité si tentative de dépenser plus que capital (réduite pour éviter les valeurs extrêmes)
+  # Pénalité pour ordre entre min_value_absolute et min_value_tolerable si non ajustable
+  order_below_tolerable_if_not_adjusted: -0.3
+  # Pénalité proportionnelle à la différence avec le seuil minimal
+  order_below_tolerable_scaled: "delta * 0.05"  # Réduit de 0.1 à 0.05 pour plus de stabilité
+  # Pénalité si le nombre maximum de positions est atteint
+  max_positions_reached: -0.1
+  # Pénalité si le prix n'est pas disponible pour un actif
+  price_not_available: -0.05
+  # Pénalité si on essaie de vendre un actif qu'on ne possède pas
+  no_position_to_sell: -0.3
+
+# 2. Règles d'ordre
+order_rules:
+  min_value_tolerable: 10.0   # Si ordre < tolerable mais >= absolute, tenter d'ajuster à 10.0 ou appliquer pénalité spécifique
+  min_value_absolute: 10.0    # Tout ordre < 10.0 est rejeté avec pénalité 'invalid_order_base'
+  default_expiry_steps: 24    # Nb de pas avant expiration ordre avancé
+
+# 3. Reward shaping et clipping
+reward_shaping:
+  log_return_multiplier: 10.0 # Réduit de 100.0 à 10.0 pour plus de stabilité
+  clip_min: -2.0  # Limites plus strictes pour éviter les valeurs extrêmes
+  clip_max: 2.0
+
+# 4. Paramètres de transaction
+transaction:
+  fee_percent: 0.001             # 0.1 % (0.1 / 100)
+  fixed_fee: 0.0               # Supposons 0 pour l'instant, à ajouter si besoin
+
+# 5. Gestion du capital et des positions (les paliers géreront l'allocation)
+# Ces valeurs peuvent servir de fallback ou pour des stratégies sans paliers
+# Pour l'instant, on se concentre sur les paliers pour l'allocation.
+# La logique de Stop Loss / Take Profit automatique sera gérée via les ordres avancés.
+# Si l'agent doit les créer lui-même, cela nécessitera des actions supplémentaires.
+# Pour l'instant, on suppose que l'agent émet des ordres MARKET, ou crée des LIMIT/STOP/TP
+# via des actions dédiées (si on étend l'espace d'action) ou via des paramètres d'ordre.
+# Les valeurs SL/TP ici pourraient informer la création de ces ordres par l'agent.
+
+# Paliers de capital (structure de base, à compléter/adapter)
+# Sera utilisé par reward_calculator et order_manager/multi_asset_env pour max_positions, allocation.
+tiers:
+  - threshold: 0     # 0-10$
+    max_positions: 1
+    allocation_frac_per_pos: 0.95 # 95% du capital (1 position max)
+    reward_pos_mult: 1.5  # Multiplicateur pour les récompenses positives
+    reward_neg_mult: 0.8  # Multiplicateur pour les récompenses négatives (atténue les pertes)
+  - threshold: 10    # 10-30$
+    max_positions: 1
+    allocation_frac_per_pos: 0.95 # 95% du capital (1 position max)
+    reward_pos_mult: 1.0
+    reward_neg_mult: 1.0
+  - threshold: 30    # 30-100$
+    max_positions: 2
+    allocation_frac_per_pos: 0.45 # 45% par position (max 90% total)
+    reward_pos_mult: 1.1
+    reward_neg_mult: 1.1
+  - threshold: 100   # 100-500$
+    max_positions: 3
+    allocation_frac_per_pos: 0.30 # 30% par position (max 90% total)
+    reward_pos_mult: 1.2
+    reward_neg_mult: 1.2
+  - threshold: 500   # 500$+
+    max_positions: 4
+    allocation_frac_per_pos: 0.10 # 10% par position (max 40% total)
+    reward_pos_mult: 1.3
+    reward_neg_mult: 1.3
+
+# Capital initial et autres paramètres d'environnement général
+initial_capital: 15.0
+
+# Paramètres d'affichage et d'export
+export_history: false  # Désactiver l'affichage des tables par défaut pour l'entraînement
+export_dir: null       # Répertoire d'export (null = pas d'export)

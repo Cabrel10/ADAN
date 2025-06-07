@@ -1,0 +1,285 @@
+# Configuration des Données pour ADAN
+
+# Liste des actifs à trader
+assets: ["DOGEUSDT", "XRPUSDT", "LTCUSDT", "SOLUSDT", "ADAUSDT"]
+
+# Timeframes à utiliser
+timeframes: ["1m", "1h", "1d"]
+
+# Configuration du CNN
+cnn_input_window_size: 20  # Taille de la fenêtre temporelle pour le CNN
+
+# Configuration détaillée du CNN pour l'extracteur de caractéristiques
+cnn_config:
+  features_dim: 64  # Dimension de sortie de l'extracteur de caractéristiques
+  num_input_channels: 1  # Nombre de canaux d'entrée (1 pour données 2D)
+  conv_layers:  # Configuration des couches convolutives
+    - out_channels: 32
+      kernel_size: 3
+      stride: 1
+      padding: 1
+    - out_channels: 64
+      kernel_size: 3
+      stride: 1
+      padding: 1
+  pool_layers:  # Configuration des couches de pooling
+    - kernel_size: 2
+      stride: 2
+    - kernel_size: 2
+      stride: 2
+  activation: "relu"  # Fonction d'activation (relu, leaky_relu, etc.)
+  dropout: 0.2  # Taux de dropout pour régularisation
+  fc_layers: [128]  # Couches fully connected avant la sortie
+
+# Timeframe principal pour l'entraînement
+training_timeframe: "1h"  # Timeframe à utiliser pour l'entraînement (1m, 1h, 1d)
+
+# Liste des timeframes à traiter
+timeframes_to_process: ["1m", "1h", "1d"]
+
+# Liste des features de base (avant suffixe _ASSET) pour le timeframe d'entraînement
+# Cette liste sera utilisée par StateBuilder et le CNN
+# IMPORTANT: Ces noms doivent correspondre exactement aux noms des colonnes dans les fichiers fusionnés
+# (sans le suffixe _ASSET qui est ajouté par merge_processed_data.py)
+base_market_features: [
+  "open", "high", "low", "close", "volume", 
+  "rsi_14", "ema_20", "ema_50", "macd", "macd_signal", "macd_hist",
+  "bbl_20_2.0", "bbm_20_2.0", "bbu_20_2.0", "bbb_20_2.0", "bbp_20_2.0", "atr_14"
+  # Suppression des features avec suffixe _1h qui ne sont pas présentes dans les données
+  # "sma_50_1h", "sma_200_1h", "ema_20_1h", "rsi_14_1h", "macd_1h", "macd_signal_1h", "macd_hist_1h", "bbl_20_2.0_1h", "bbm_20_2.0_1h", "bbu_20_2.0_1h", "atr_14_1h"
+]
+
+# Périodes de téléchargement par timeframe
+timeframe_periods:
+  "1m":
+    start_date: "2024-10-01"
+    end_date: "2025-05-25"
+  "1h":
+    start_date: "2023-05-05"
+    end_date: "2025-05-25"
+  "1d":
+    start_date: "2022-01-01"
+    end_date: "2025-05-25"
+
+# Date de début par défaut pour le téléchargement des données
+default_fetch_start_date: "2022-01-01"
+
+# Répertoires de données
+raw_data_dir: "raw"
+processed_data_dir: "processed"
+scalers_encoders_dir: "scalers_encoders"
+
+# Split des données pour l'entraînement/validation/test par timeframe
+data_split:
+  "1m":
+    train_start_date: "2024-10-01"
+    train_end_date: "2025-04-15"
+    validation_start_date: "2025-04-16"
+    validation_end_date: "2025-05-10"
+    test_start_date: "2025-05-11"
+    test_end_date: "2025-05-25"
+  "1h":
+    train_start_date: "2023-05-05"
+    train_end_date: "2025-02-28"
+    validation_start_date: "2025-03-01"
+    validation_end_date: "2025-04-30"
+    test_start_date: "2025-05-01"
+    test_end_date: "2025-05-25"
+  "1d":
+    train_start_date: "2022-01-01"
+    train_end_date: "2024-09-30"
+    validation_start_date: "2024-10-01"
+    validation_end_date: "2025-03-31"
+    test_start_date: "2025-04-01"
+    test_end_date: "2025-05-25"
+  validation_percentage: 0.2
+
+# Prétraitement des données
+preprocessing:
+  # Gestion des valeurs manquantes: 'drop', 'fill_forward', 'interpolate'
+  missing_values: "fill_forward"
+  # Détection et traitement des valeurs aberrantes: 'none', 'clip', 'remove'
+  outlier_treatment: "clip"
+  # Seuil pour la détection des valeurs aberrantes (en écarts-types)
+  outlier_threshold: 3.0
+  # Alignement temporel des différentes paires
+  time_alignment: true
+  # Resampling des données: 'none', 'upsampling', 'downsampling'
+  resampling: "none"
+  # Période de resampling (si applicable)
+  resampling_period: "1h"
+
+# Indicateurs techniques par timeframe (format compatible avec pandas_ta)
+indicators_by_timeframe:
+  # Indicateurs pour le timeframe 1m
+  "1m":
+    - name: "EMA Court"
+      function: "ema"
+      params:
+        length: 5
+      output_col_name: "ema_5_1m"
+    
+    - name: "EMA Moyen"
+      function: "ema"
+      params:
+        length: 8
+      output_col_name: "ema_8_1m"
+    
+    - name: "EMA Long"
+      function: "ema"
+      params:
+        length: 13
+      output_col_name: "ema_13_1m"
+    
+    - name: "RSI"
+      function: "rsi"
+      params:
+        length: 14
+      output_col_name: "rsi_14_1m"
+  
+  # Indicateurs pour le timeframe 1h
+  "1h":
+    - name: "SMA Court"
+      function: "sma"
+      params:
+        length: 50
+      output_col_name: "sma_50_1h"
+    
+    - name: "SMA Long"
+      function: "sma"
+      params:
+        length: 200
+      output_col_name: "sma_200_1h"
+    
+    - name: "EMA"
+      function: "ema"
+      params:
+        length: 20
+      output_col_name: "ema_20_1h"
+    
+    - name: "RSI"
+      function: "rsi"
+      params:
+        length: 14
+      output_col_name: "rsi_14_1h"
+    
+    - name: "MACD"
+      function: "macd"
+      params:
+        fast: 12
+        slow: 26
+        signal: 9
+      output_col_names: ["macd_1h", "macd_signal_1h", "macd_hist_1h"]
+    
+    - name: "Bollinger Bands"
+      function: "bbands"
+      params:
+        length: 20
+        std: 2
+      output_col_names: ["bbl_20_2.0_1h", "bbm_20_2.0_1h", "bbu_20_2.0_1h"]
+    
+    - name: "ATR"
+      function: "atr"
+      params:
+        length: 14
+      output_col_name: "atr_14_1h"
+    
+    # TODO: Implémenter Ichimoku Cloud quand la sortie sera mieux comprise
+    # - name: "Ichimoku Cloud"
+    #   function: "ichimoku"
+    #   params:
+    #     tenkan: 9
+    #     kijun: 26
+    #     senkou: 52
+    #   output_col_names: ["ichimoku_tenkan_1h", "ichimoku_kijun_1h", "ichimoku_senkou_a_1h", "ichimoku_senkou_b_1h"]
+  
+  # Indicateurs pour le timeframe 1d
+  "1d":
+    - name: "SMA Court"
+      function: "sma"
+      params:
+        length: 50
+      output_col_name: "sma_50_1d"
+    
+    - name: "SMA Moyen"
+      function: "sma"
+      params:
+        length: 100
+      output_col_name: "sma_100_1d"
+    
+    - name: "SMA Long"
+      function: "sma"
+      params:
+        length: 200
+      output_col_name: "sma_200_1d"
+    
+    - name: "RSI"
+      function: "rsi"
+      params:
+        length: 14
+      output_col_name: "rsi_14_1d"
+    
+    - name: "OBV"
+      function: "obv"
+      params: {}
+      output_col_name: "obv_1d"
+    
+    # TODO: Implémenter Fibonacci Retracement quand la sortie sera mieux comprise
+    # - name: "Fibonacci Retracement"
+    #   function: "fibonacci"
+    #   params: {}
+    #   output_col_names: ["fib_236_1d", "fib_382_1d", "fib_500_1d", "fib_618_1d", "fib_786_1d"]
+    
+    - name: "ADX"
+      function: "adx"
+      params:
+        length: 14
+      output_col_names: ["adx_14_1d", "dmp_14_1d", "dmn_14_1d"]
+
+# Features à normaliser
+# Cette liste sera construite dynamiquement dans process_data.py
+# en fonction des indicateurs calculés pour chaque timeframe
+features_to_normalize: []
+
+# Méthode de gestion des valeurs manquantes
+missing_values_handling: "ffill"
+
+# Paramètres pour le calcul des rendements
+returns:
+  type: "log_return"
+  periods: [1, 5, 10]
+
+# Paramètres pour la normalisation
+normalization:
+  method: "standard"  # 'standard', 'minmax', 'robust'
+  fit_on_train_only: true
+
+# Normalisation des données
+normalization:
+  # Méthode de normalisation: 'standard', 'minmax', 'robust', 'none'
+  method: "standard"
+  # Appliquer la normalisation par: 'feature', 'asset', 'global'
+  scope: "feature"
+  # Fenêtre glissante pour la normalisation (0 = utiliser toutes les données)
+  window_size: 0
+  # Sauvegarder les scalers pour une utilisation future
+  save_scalers: true
+  # Chemin pour sauvegarder les scalers
+  scalers_path: "../data/scalers_encoders/"
+
+# Division des données
+data_split:
+  # Méthode de division: 'chronological', 'random', 'cross_validation'
+  method: "chronological"
+  # Ratio d'entraînement
+  train_ratio: 0.7
+  # Ratio de validation
+  validation_ratio: 0.15
+  # Ratio de test
+  test_ratio: 0.15
+  # Graine aléatoire pour la reproductibilité
+  random_seed: 42
+  # Nombre de folds pour la validation croisée (si applicable)
+  cv_folds: 5
+  # Taille de la fenêtre glissante pour l'entraînement (en jours)
+  window_size_days: 180

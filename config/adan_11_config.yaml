@@ -1,0 +1,55 @@
+created: '2025-05-29T10:55:20.381690'
+data_info:
+  features:
+  - timestamp
+  - open
+  - high
+  - low
+  - close
+  - volume
+  - symbol
+  - SMA_short
+  - SMA_long
+  - EMA_short
+  - EMA_long
+  - RSI
+  - MACD
+  - MACDs
+  - MACDh
+  - BBU
+  - BBM
+  - BBL
+  - ATR
+  - STOCHk
+  - STOCHd
+  - ADX
+  - CCI
+  - Momentum
+  - ROC
+  - Williams_%R
+  - Ultimate_Osc
+  - OBV
+  - VWMA
+  - CMF
+  - MFI
+  - Parabolic_SAR
+  - VWAP
+  - STOCHRSIk
+  - CMO
+  - PPO
+  - hmm_regime
+  - hmm_prob_0
+  - hmm_prob_1
+  - hmm_prob_2
+  normalization: RobustScaler
+  splits:
+    test: 15
+    train: 70
+    validation: 15
+  timeframe: 1m
+processing:
+  dtype_optimization: true
+  missing_values: forward_fill
+  outliers: clip_iqr
+  workers: 3
+version: '1.1'

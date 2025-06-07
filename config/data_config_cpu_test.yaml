@@ -1,0 +1,264 @@
+assets:
+- ADAUSDT
+- BNBUSDT
+- BTCUSDT
+- ETHUSDT
+- XRPUSDT
+base_market_features:
+- open
+- high
+- low
+- close
+- volume
+- SMA_short
+- SMA_long
+- EMA_short
+- EMA_long
+- RSI
+- MACD
+- MACDs
+- MACDh
+- BBL
+- BBM
+- BBU
+- ATR
+- STOCHk
+- STOCHd
+- ADX
+- CCI
+- Momentum
+- ROC
+- Williams_%R
+- TRIX
+- Ultimate_Osc
+- DPO
+- OBV
+- VWMA
+- CMF
+- MFI
+- Parabolic_SAR
+- Ichimoku_Tenkan
+- Ichimoku_Kijun
+- Ichimoku_SenkouA
+- Ichimoku_SenkouB
+- Ichimoku_Chikou
+- KAMA
+- VWAP
+- STOCHRSIk
+- CMO
+- PPO
+- PPOh
+- PPOs
+- FISHERt
+- hmm_regime
+- hmm_prob_0
+- hmm_prob_1
+- hmm_prob_2
+cnn_config:
+  activation: relu
+  conv_layers:
+  - kernel_size: 3
+    out_channels: 32
+    padding: 1
+    stride: 1
+  - kernel_size: 3
+    out_channels: 64
+    padding: 1
+    stride: 1
+  dropout: 0.3
+  fc_layers:
+  - 128
+  - 64
+  features_dim: 64
+  num_input_channels: 1
+  pool_layers:
+  - kernel_size: 2
+    stride: 2
+  - kernel_size: 2
+    stride: 2
+cnn_input_window_size: 20
+data_source_type: precomputed_features_1m_resample
+data_sources:
+- assets:
+  - ADAUSDT
+  - BNBUSDT
+  - BTCUSDT
+  - ETHUSDT
+  - XRPUSDT
+  directory: new
+  features_ready: true
+  filename_pattern: '{ASSET}_features.parquet'
+  group_name: lot2_features_unified
+  timeframes:
+  - 1m
+data_split:
+  1d:
+    test_end_date: '2025-02-01'
+    test_start_date: '2025-01-01'
+    train_end_date: '2024-11-30'
+    train_start_date: '2024-01-01'
+    validation_end_date: '2024-12-31'
+    validation_start_date: '2024-12-01'
+  1h:
+    test_end_date: '2025-02-01'
+    test_start_date: '2025-01-01'
+    train_end_date: '2024-11-30'
+    train_start_date: '2024-01-01'
+    validation_end_date: '2024-12-31'
+    validation_start_date: '2024-12-01'
+  1m:
+    test_end_date: '2025-02-01'
+    test_start_date: '2025-01-01'
+    train_end_date: '2024-11-30'
+    train_start_date: '2024-01-01'
+    validation_end_date: '2024-12-31'
+    validation_start_date: '2024-12-01'
+  test_percentage: 0.1
+  validation_percentage: 0.2
+indicators_by_timeframe:
+  1d:
+  - function: sma
+    name: SMA Court
+    output_col_name: SMA_short
+    params:
+      length: 10
+  - function: sma
+    name: SMA Long
+    output_col_name: SMA_long
+    params:
+      length: 50
+  - function: ema
+    name: EMA Court
+    output_col_name: EMA_short
+    params:
+      length: 12
+  - function: ema
+    name: EMA Long
+    output_col_name: EMA_long
+    params:
+      length: 26
+  - function: rsi
+    name: RSI
+    output_col_name: RSI
+    params:
+      length: 14
+  - function: macd
+    name: MACD
+    output_col_name:
+    - MACD
+    - MACDs
+    - MACDh
+    params:
+      fast: 12
+      signal: 9
+      slow: 26
+  - function: bbands
+    name: Bollinger Bands
+    output_col_name:
+    - BBL
+    - BBM
+    - BBU
+    params:
+      length: 20
+      std: 2
+  - function: atr
+    name: ATR
+    output_col_name: ATR
+    params:
+      length: 14
+  1h:
+  - function: sma
+    name: SMA Court
+    output_col_name: SMA_short
+    params:
+      length: 10
+  - function: sma
+    name: SMA Long
+    output_col_name: SMA_long
+    params:
+      length: 50
+  - function: ema
+    name: EMA Court
+    output_col_name: EMA_short
+    params:
+      length: 12
+  - function: ema
+    name: EMA Long
+    output_col_name: EMA_long
+    params:
+      length: 26
+  - function: rsi
+    name: RSI
+    output_col_name: RSI
+    params:
+      length: 14
+  - function: macd
+    name: MACD
+    output_col_name:
+    - MACD
+    - MACDs
+    - MACDh
+    params:
+      fast: 12
+      signal: 9
+      slow: 26
+  - function: bbands
+    name: Bollinger Bands
+    output_col_name:
+    - BBL
+    - BBM
+    - BBU
+    params:
+      length: 20
+      std: 2
+  - function: atr
+    name: ATR
+    output_col_name: ATR
+    params:
+      length: 14
+  - function: stoch
+    name: Stochastic
+    output_col_name:
+    - STOCHk
+    - STOCHd
+    params:
+      d: 3
+      k: 14
+  - function: adx
+    name: ADX
+    output_col_name: ADX
+    params:
+      length: 14
+  - function: cci
+    name: CCI
+    output_col_name: CCI
+    params:
+      length: 20
+  - function: roc
+    name: ROC
+    output_col_name: ROC
+    params:
+      length: 10
+  1m: []
+lot_id: unified
+processed_data_dir: processed
+processing_chunk_size: 10000
+raw_data_dir: raw
+scalers_encoders_dir: scalers_encoders
+timeframe_periods:
+  1d:
+    end_date: '2025-02-01'
+    start_date: '2024-01-01'
+  1h:
+    end_date: '2025-02-01'
+    start_date: '2024-01-01'
+  1m:
+    end_date: '2025-02-01'
+    start_date: '2024-01-01'
+timeframes:
+- 1m
+- 1h
+- 1d
+timeframes_to_process:
+- 1h
+training_timeframe: 1m

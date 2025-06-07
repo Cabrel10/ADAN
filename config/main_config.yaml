@@ -1,0 +1,82 @@
+# Configuration Principale d'ADAN
+
+# Chemins des répertoires principaux
+paths:
+  base_project_dir_local: "/home/morningstar/Desktop/ADAN/ADAN"
+  data_dir_name: "data"
+  models_dir_name: "models"
+  reports_dir_name: "reports"
+  logs_dir_name: "logs"
+  config_dir_name: "config"
+
+# Mode de fonctionnement
+mode:
+  # Mode d'exécution: 'training', 'backtest', 'paper_trading', 'live_trading'
+  execution_mode: "training"
+  # Niveau de verbosité: 0 (silencieux), 1 (erreurs), 2 (avertissements), 3 (info), 4 (debug)
+  verbosity: 3
+  # Activer/désactiver le mode debug
+  debug: true
+
+# Configuration générale
+general:
+  # Graine aléatoire pour la reproductibilité
+  random_seed: 42
+  # Devise de base pour le portefeuille
+  base_currency: "USDT"
+  # Fuseau horaire pour les horodatages
+  timezone: "UTC"
+  # Nombre de threads à utiliser pour le traitement parallèle
+  num_threads: 4
+
+# Configuration des actifs à trader
+assets:
+  # Liste des actifs à inclure
+  symbols: ["BTC", "ETH", "XRP", "ADA", "SOL"]
+  # Période des données (en minutes)
+  timeframe: 60  # 1h
+  # Date de début pour les données historiques
+  start_date: "2020-01-01"
+  # Date de fin pour les données historiques
+  end_date: "2023-01-01"
+
+# Configuration des checkpoints et sauvegardes
+checkpoints:
+  # Fréquence de sauvegarde pendant l'entraînement (en étapes)
+  save_frequency: 50000
+  # Nombre maximum de checkpoints à conserver
+  max_to_keep: 5
+  # Activer/désactiver la sauvegarde automatique
+  enable_auto_save: true
+
+# Configuration pour le paper trading (trading simulé)
+paper_trading:
+  # ID de l'exchange à utiliser (doit correspondre à un exchange CCXT)
+  exchange_id: 'binance'
+  # Activer le mode testnet/sandbox
+  use_testnet: true
+  # Les clés API seront lues depuis les variables d'environnement
+  # Convention: {EXCHANGE_ID_UPPER}_TESTNET_API_KEY et {EXCHANGE_ID_UPPER}_TESTNET_SECRET_KEY
+  # Exemple: BINANCE_TESTNET_API_KEY et BINANCE_TESTNET_SECRET_KEY
+  
+  # Configuration des ordres
+  order_config:
+    # Montant minimum pour un ordre (en devise de base)
+    min_order_amount: 0.001
+    # Montant maximum pour un ordre (en devise de base)
+    max_order_amount: 1.0
+    # Type d'ordre par défaut: 'market', 'limit'
+    default_order_type: 'market'
+    # Timeout pour les ordres en secondes
+    order_timeout: 30
+  
+  # Configuration de gestion des risques
+  risk_management:
+    # Pourcentage maximum du capital à risquer par trade
+    max_risk_per_trade: 0.02  # 2%
+    # Capital minimum à conserver
+    min_capital_threshold: 1.0  # 1 USDT minimum
+    # Stop loss par défaut (en pourcentage)
+    default_stop_loss: 0.05  # 5%
+    # Take profit par défaut (en pourcentage)
+    default_take_profit: 0.10  # 10%

@@ -1,0 +1,305 @@
+# Configuration CPU Unifiée ADAN - Pipeline Production
+# Version finale basée sur données réelles Lot 2 (data/new/)
+
+# Actifs réels disponibles (5 cryptos avec données complètes)
+assets: ["ADAUSDT", "BNBUSDT", "BTCUSDT", "ETHUSDT", "XRPUSDT"]
+
+# Timeframes supportés
+timeframes: ["1m", "1h", "1d"]
+timeframes_to_process: ["1m", "1h", "1d"]
+
+# Configuration principale
+training_timeframe: "1m"
+lot_id: "unified"
+data_source_type: "precomputed_features_1m_resample"
+
+# Configuration CNN optimisée CPU
+cnn_input_window_size: 20
+cnn_config:
+  features_dim: 64
+  num_input_channels: 1
+  conv_layers:
+    - out_channels: 32
+      kernel_size: 3
+      stride: 1
+      padding: 1
+    - out_channels: 64
+      kernel_size: 3
+      stride: 1
+      padding: 1
+  pool_layers:
+    - kernel_size: 2
+      stride: 2
+    - kernel_size: 2
+      stride: 2
+  activation: "relu"
+  dropout: 0.3
+  fc_layers: [128, 64]
+
+# Features pré-calculées pour training_timeframe="1m"
+base_market_features:
+  - "open"
+  - "high" 
+  - "low"
+  - "close"
+  - "volume"
+  - "SMA_short"
+  - "SMA_long"
+  - "EMA_short"
+  - "EMA_long"
+  - "RSI"
+  - "MACD"
+  - "MACDs"
+  - "MACDh"
+  - "BBL"
+  - "BBM"
+  - "BBU"
+  - "ATR"
+  - "STOCHk"
+  - "STOCHd"
+  - "ADX"
+  - "CCI"
+  - "Momentum"
+  - "ROC"
+  - "Williams_%R"
+  - "TRIX"
+  - "Ultimate_Osc"
+  - "DPO"
+  - "OBV"
+  - "VWMA"
+  - "CMF"
+  - "MFI"
+  - "Parabolic_SAR"
+  - "Ichimoku_Tenkan"
+  - "Ichimoku_Kijun"
+  - "Ichimoku_SenkouA"
+  - "Ichimoku_SenkouB"
+  - "Ichimoku_Chikou"
+  - "KAMA"
+  - "VWAP"
+  - "STOCHRSIk"
+  - "CMO"
+  - "PPO"
+  - "FISHERt"
+  - "hmm_regime"
+  - "hmm_prob_0"
+  - "hmm_prob_1"
+  - "hmm_prob_2"
+
+# Configuration des indicateurs pour timeframes ré-échantillonnés
+indicators_by_timeframe:
+  "1m": 
+    # Indicateurs techniques avancés pour s'assurer qu'ils sont générés
+    - name: "CCI"
+      function: "cci"
+      params: {length: 14}
+      output_col_name: "CCI"
+    - name: "Momentum"
+      function: "momentum"
+      params: {length: 10}
+      output_col_name: "Momentum"
+    - name: "ROC"
+      function: "roc"
+      params: {length: 10}
+      output_col_name: "ROC"
+    - name: "Williams %R"
+      function: "willr"
+      params: {length: 14}
+      output_col_name: "Williams_%R"
+    - name: "TRIX"
+      function: "trix"
+      params: {length: 14}
+      output_col_name: "TRIX"
+    - name: "Ultimate Oscillator"
+      function: "ultosc"
+      params: {timeperiod1: 7, timeperiod2: 14, timeperiod3: 28}
+      output_col_name: "Ultimate_Osc"
+    - name: "DPO"
+      function: "dpo"
+      params: {length: 20}
+      output_col_name: "DPO"
+    - name: "OBV"
+      function: "obv"
+      params: {}
+      output_col_name: "OBV"
+    - name: "VWMA"
+      function: "vwma"
+      params: {length: 20}
+      output_col_name: "VWMA"
+    - name: "CMF"
+      function: "cmf"
+      params: {length: 20}
+      output_col_name: "CMF"
+    - name: "MFI"
+      function: "mfi"
+      params: {length: 14}
+      output_col_name: "MFI"
+    - name: "Parabolic SAR"
+      function: "sar"
+      params: {acceleration: 0.02, maximum: 0.2}
+      output_col_name: "Parabolic_SAR"
+    - name: "KAMA"
+      function: "kama"
+      params: {length: 30}
+      output_col_name: "KAMA"
+    - name: "VWAP"
+      function: "vwap"
+      params: {}
+      output_col_name: "VWAP"
+    - name: "Stochastic RSI"
+      function: "stochrsi"
+      params: {length: 14, rsi_length: 14, k: 3, d: 3}
+      output_col_name: "STOCHRSIk"
+    - name: "CMO"
+      function: "cmo"
+      params: {length: 14}
+      output_col_name: "CMO"
+    - name: "PPO"
+      function: "ppo"
+      params: {fast: 12, slow: 26}
+      output_col_name: "PPO"
+    - name: "PPO Histogram"
+      function: "ppo"
+      params: {fast: 12, slow: 26, signal: 9}
+      output_col_name: ["PPO", "PPOh", "PPOs"]
+    - name: "Fisher Transform"
+      function: "fisher"
+      params: {length: 10}
+      output_col_name: "FISHERt"
+  
+  "1h":
+    - name: "SMA Court"
+      function: "sma"
+      params: {length: 10}
+      output_col_name: "SMA_short"
+    - name: "SMA Long"
+      function: "sma"
+      params: {length: 50}
+      output_col_name: "SMA_long"
+    - name: "EMA Court"
+      function: "ema"
+      params: {length: 12}
+      output_col_name: "EMA_short"
+    - name: "EMA Long"
+      function: "ema"
+      params: {length: 26}
+      output_col_name: "EMA_long"
+    - name: "RSI"
+      function: "rsi"
+      params: {length: 14}
+      output_col_name: "RSI"
+    - name: "MACD"
+      function: "macd"
+      params: {fast: 12, slow: 26, signal: 9}
+      output_col_name: ["MACD", "MACDs", "MACDh"]
+    - name: "Bollinger Bands"
+      function: "bbands"
+      params: {length: 20, std: 2}
+      output_col_name: ["BBL", "BBM", "BBU"]
+    - name: "ATR"
+      function: "atr"
+      params: {length: 14}
+      output_col_name: "ATR"
+    - name: "Stochastic"
+      function: "stoch"
+      params: {k: 14, d: 3}
+      output_col_name: ["STOCHk", "STOCHd"]
+    - name: "ADX"
+      function: "adx"
+      params: {length: 14}
+      output_col_name: "ADX"
+    - name: "CCI"
+      function: "cci"
+      params: {length: 20}
+      output_col_name: "CCI"
+    - name: "ROC"
+      function: "roc"
+      params: {length: 10}
+      output_col_name: "ROC"
+
+  "1d":
+    - name: "SMA Court"
+      function: "sma"
+      params: {length: 10}
+      output_col_name: "SMA_short"
+    - name: "SMA Long"
+      function: "sma"
+      params: {length: 50}
+      output_col_name: "SMA_long"
+    - name: "EMA Court"
+      function: "ema"
+      params: {length: 12}
+      output_col_name: "EMA_short"
+    - name: "EMA Long"
+      function: "ema"
+      params: {length: 26}
+      output_col_name: "EMA_long"
+    - name: "RSI"
+      function: "rsi"
+      params: {length: 14}
+      output_col_name: "RSI"
+    - name: "MACD"
+      function: "macd"
+      params: {fast: 12, slow: 26, signal: 9}
+      output_col_name: ["MACD", "MACDs", "MACDh"]
+    - name: "Bollinger Bands"
+      function: "bbands"
+      params: {length: 20, std: 2}
+      output_col_name: ["BBL", "BBM", "BBU"]
+    - name: "ATR"
+      function: "atr"
+      params: {length: 14}
+      output_col_name: "ATR"
+
+# Sources de données (Lot 2 unifié)
+data_sources:
+  - group_name: "lot2_features_unified"
+    directory: "new"
+    assets: ["ADAUSDT", "BNBUSDT", "BTCUSDT", "ETHUSDT", "XRPUSDT"]
+    timeframes: ["1m"]
+    filename_pattern: "{ASSET}_features.parquet"
+    features_ready: true
+
+# Répertoires
+raw_data_dir: "raw"
+processed_data_dir: "processed"
+scalers_encoders_dir: "scalers_encoders"
+processing_chunk_size: 10000
+
+# Périodes de données
+timeframe_periods:
+  "1m":
+    start_date: "2024-01-01"
+    end_date: "2025-02-01"
+  "1h":
+    start_date: "2024-01-01"
+    end_date: "2025-02-01"
+  "1d":
+    start_date: "2024-01-01"
+    end_date: "2025-02-01"
+
+# Splits de données
+data_split:
+  "1m":
+    train_start_date: "2024-01-01"
+    train_end_date: "2024-11-30"
+    validation_start_date: "2024-12-01"
+    validation_end_date: "2024-12-31"
+    test_start_date: "2025-01-01"
+    test_end_date: "2025-02-01"
+  "1h":
+    train_start_date: "2024-01-01"
+    train_end_date: "2024-11-30"
+    validation_start_date: "2024-12-01"
+    validation_end_date: "2024-12-31"
+    test_start_date: "2025-01-01"
+    test_end_date: "2025-02-01"
+  "1d":
+    train_start_date: "2024-01-01"
+    train_end_date: "2024-11-30"
+    validation_start_date: "2024-12-01"
+    validation_end_date: "2024-12-31"
+    test_start_date: "2025-01-01"
+    test_end_date: "2025-02-01"
+  validation_percentage: 0.2
+  test_percentage: 0.1
