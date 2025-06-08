@@ -318,7 +318,8 @@ def main():
         logger.info(f"Temporary configurations created: {created_data_cfg_path}, {created_agent_cfg_path}")
 
         cmd_convert = [sys.executable, str(PROJECT_ROOT / 'scripts' / 'convert_real_data.py'),
-                       '--data_config', str(temp_data_config_path)]
+                       '--data_config', str(temp_data_config_path),
+                       '--exec_profile', SYNTHETIC_PROFILE]
         if not run_pipeline_step(cmd_convert, "Data Conversion"):
             raise Exception("Data Conversion step failed.")
         logger.info("Data conversion step completed.")

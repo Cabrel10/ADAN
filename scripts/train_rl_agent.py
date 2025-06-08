@@ -34,7 +34,7 @@ def main():
         '--exec_profile', 
         type=str, 
         default='cpu',
-        choices=['cpu', 'gpu'],
+        choices=['cpu', 'gpu', 'smoke_cpu'],
         help="Profil d'exécution unifié ('cpu' ou 'gpu') pour charger data_config_{profile}.yaml."
     )
     parser.add_argument(
