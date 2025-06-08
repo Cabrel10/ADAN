@@ -235,20 +235,31 @@ def train_agent(config_paths=None, config=None, override_params=None):
     max_episode_steps_override = override_params.get('max_episode_steps') if override_params else None
     train_env, val_env = setup_training_environment(config, train_df, val_df, max_episode_steps_override=max_episode_steps_override)
     
+    # Access training_timeframe for naming
+    training_timeframe = config.get('data', {}).get('training_timeframe', 'default_tf')
+    logger.info(f"Using training_timeframe='{training_timeframe}' for model save paths.")
+
     # Create agent
     logger.info("Creating PPO agent...")
-    tensorboard_log = os.path.join(get_path('reports'), 'tensorboard_logs')
-    agent = create_ppo_agent(train_env, config, tensorboard_log)
+    # Tensorboard log directory could also be timeframe specific if desired, but not requested here.
+    tensorboard_log_dir = os.path.join(get_path('reports'), 'tensorboard_logs')
+    ensure_dir_exists(tensorboard_log_dir)
+    agent = create_ppo_agent(train_env, config, tensorboard_log_dir)
     
     # Setup callbacks
     callbacks = []
     
+    models_base_dir = get_path('models') # e.g., 'output/models'
+
     # Evaluation callback if validation environment is available
     if val_env is not None:
+        best_model_dir = os.path.join(models_base_dir, f'best_model_{training_timeframe}')
+        # EvalCallback saves the model as 'best_model.zip' inside this path
+        ensure_dir_exists(best_model_dir)
         eval_callback = EvalCallback(
             val_env,
-            best_model_save_path=os.path.join(get_path('models'), 'best_model'),
-            log_path=os.path.join(get_path('reports'), 'eval_logs'),
+            best_model_save_path=best_model_dir,
+            log_path=os.path.join(get_path('reports'), 'eval_logs'), # Eval logs can stay common or be specific
             eval_freq=config.get('agent', {}).get('eval_freq', 10000),
             deterministic=True,
             render=False
@@ -257,17 +268,22 @@ def train_agent(config_paths=None, config=None, override_params=None):
     
     # Checkpoint callback
     checkpoint_freq = config.get('agent', {}).get('checkpoint_freq', 50000)
+    checkpoints_dir = os.path.join(models_base_dir, f'checkpoints_{training_timeframe}')
+    # CheckpointCallback creates this directory if it doesn't exist.
+    # ensure_dir_exists(checkpoints_dir) # Usually handled by SB3
     checkpoint_callback = CheckpointCallback(
         save_freq=checkpoint_freq,
-        save_path=os.path.join(get_path('models'), 'checkpoints'),
-        name_prefix="ppo_trading"
+        save_path=checkpoints_dir,
+        name_prefix=f"ppo_trading_{training_timeframe}"
     )
     callbacks.append(checkpoint_callback)
     
     # Custom trading callback
+    best_trading_model_path = os.path.join(models_base_dir, f'best_trading_model_{training_timeframe}.zip')
+    ensure_dir_exists(os.path.dirname(best_trading_model_path))
     trading_callback = TradingCallback(
         check_freq=config.get('agent', {}).get('check_freq', 10000),
-        save_path=os.path.join(get_path('models'), 'best_trading_model.zip'),
+        save_path=best_trading_model_path,
         verbose=1
     )
     callbacks.append(trading_callback)
@@ -285,18 +301,23 @@ def train_agent(config_paths=None, config=None, override_params=None):
     total_timesteps = config.get('agent', {}).get('total_timesteps', 1000000)
     
     start_time = time.time()
-    interrupted_model_path = os.path.join(get_path('models', config_paths.get('main', None) if config_paths else None), 'interrupted_model.zip')
+    # Use models_base_dir defined earlier for consistency
+    interrupted_model_save_dir = models_base_dir
+    ensure_dir_exists(interrupted_model_save_dir)
+    interrupted_model_path = os.path.join(interrupted_model_save_dir, f'interrupted_model_{training_timeframe}.zip')
     
     try:
         logger.info("Starting agent training...")
         agent.learn(
             total_timesteps=total_timesteps,
             callback=callbacks,
-            log_interval=100
+            log_interval=100 # Default SB3 log interval for console output
         )
         
         # Save the final model
-        final_model_path = os.path.join(get_path('models', config_paths.get('main', None) if config_paths else None), 'final_model.zip')
+        final_model_save_dir = models_base_dir
+        ensure_dir_exists(final_model_save_dir)
+        final_model_path = os.path.join(final_model_save_dir, f'final_model_{training_timeframe}.zip')
         save_agent(agent, final_model_path)
         training_time = time.time() - start_time
         logger.info(f"Training completed in {training_time:.2f} seconds")
@@ -489,11 +510,19 @@ def resume_training(model_path, config_paths=None, config=None, train_df=None, o
     # Setup callbacks (same as in train_agent)
     callbacks = []
     
+    # Access training_timeframe for naming in resume_training as well
+    training_timeframe = config.get('data', {}).get('training_timeframe', 'default_tf') # Already available in config
+    logger.info(f"Using training_timeframe='{training_timeframe}' for resumed model save paths.")
+
+    models_base_dir = get_path('models') # e.g., 'output/models'
+
     # Evaluation callback if validation environment is available
     if val_env is not None:
+        best_model_dir_resumed = os.path.join(models_base_dir, f'best_model_{training_timeframe}_resumed')
+        ensure_dir_exists(best_model_dir_resumed)
         eval_callback = EvalCallback(
             val_env,
-            best_model_save_path=os.path.join(get_path('models'), 'best_model'),
+            best_model_save_path=best_model_dir_resumed, # Dir for best_model.zip
             log_path=os.path.join(get_path('reports'), 'eval_logs'),
             eval_freq=config.get('agent', {}).get('eval_freq', 10000),
             deterministic=True,
@@ -503,17 +532,21 @@ def resume_training(model_path, config_paths=None, config=None, train_df=None, o
     
     # Checkpoint callback
     checkpoint_freq = config.get('agent', {}).get('checkpoint_freq', 50000)
+    checkpoints_dir_resumed = os.path.join(models_base_dir, f'checkpoints_{training_timeframe}_resumed')
+    # ensure_dir_exists(checkpoints_dir_resumed) # Usually handled by SB3
     checkpoint_callback = CheckpointCallback(
         save_freq=checkpoint_freq,
-        save_path=os.path.join(get_path('models'), 'checkpoints'),
-        name_prefix="ppo_trading_resumed"
+        save_path=checkpoints_dir_resumed,
+        name_prefix=f"ppo_trading_{training_timeframe}_resumed"
     )
     callbacks.append(checkpoint_callback)
     
     # Custom trading callback
+    best_trading_model_resumed_path = os.path.join(models_base_dir, f'best_trading_model_{training_timeframe}_resumed.zip')
+    ensure_dir_exists(os.path.dirname(best_trading_model_resumed_path))
     trading_callback = TradingCallback(
         check_freq=config.get('agent', {}).get('check_freq', 10000),
-        save_path=os.path.join(get_path('models'), 'best_trading_model_resumed.zip'),
+        save_path=best_trading_model_resumed_path,
         verbose=1
     )
     callbacks.append(trading_callback)
@@ -534,7 +567,10 @@ def resume_training(model_path, config_paths=None, config=None, train_df=None, o
     logger.info(f"Training resumed and completed in {training_time:.2f} seconds")
     
     # Save the final model
-    final_model_path = os.path.join(get_path('models'), 'final_model_resumed.zip')
-    save_agent(agent, final_model_path)
+    final_model_resumed_save_dir = models_base_dir
+    ensure_dir_exists(final_model_resumed_save_dir)
+    final_model_resumed_path = os.path.join(final_model_resumed_save_dir, f'final_model_{training_timeframe}_resumed.zip')
+    save_agent(agent, final_model_resumed_path)
+    logger.info(f"Resumed final model saved to {final_model_resumed_path}")
     
     return agent, train_env

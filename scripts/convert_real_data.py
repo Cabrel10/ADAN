@@ -291,22 +291,35 @@ def process_unified_pipeline(config, exec_profile):
     timeframes_to_process = config.get('timeframes_to_process', ['1m'])
     
     logger.info(f"📊 Assets: {assets}")
-    logger.info(f"📊 Assets: {assets}")
-    logger.info(f"⏰ Timeframes: {timeframes_to_process}")
+    # logger.info(f"📊 Assets: {assets}") # Duplicate log
+    logger.info(f"⏰ Timeframes to process: {timeframes_to_process}")
 
-    for asset in assets:
-        logger.info(f"\n{'='*60}")
-        logger.info(f"Processing Asset: {asset}")
-        logger.info(f"{'='*60}")
+    for timeframe in timeframes_to_process:
+        logger.info(f"\n{'='*70}")
+        logger.info(f"Processing Timeframe: {timeframe}")
+        logger.info(f"{'='*70}")
 
-        # Create output directories for the asset
-        asset_data_dir = Path(f"data/processed/unified/{asset}")
-        asset_scalers_dir = Path(f"data/scalers_encoders/{asset}")
-        asset_data_dir.mkdir(parents=True, exist_ok=True)
-        asset_scalers_dir.mkdir(parents=True, exist_ok=True)
+        # Create base directories for the current timeframe
+        timeframe_unified_data_dir = Path("data/processed/unified") / timeframe
+        timeframe_scalers_dir = Path("data/scalers_encoders") / timeframe
 
-        for timeframe in timeframes_to_process:
-            logger.info(f"\n--- Processing Timeframe: {timeframe} for {asset} ---")
+        timeframe_unified_data_dir.mkdir(parents=True, exist_ok=True)
+        timeframe_scalers_dir.mkdir(parents=True, exist_ok=True)
+        logger.info(f"Base data directory for {timeframe}: {timeframe_unified_data_dir}")
+        logger.info(f"Base scalers directory for {timeframe}: {timeframe_scalers_dir}")
+
+        for asset in assets:
+            logger.info(f"\n--- Processing Asset: {asset} for Timeframe: {timeframe} ---")
+
+            # Create specific directories for the asset within the timeframe directory
+            asset_specific_data_dir = timeframe_unified_data_dir / asset
+            asset_specific_scaler_dir = timeframe_scalers_dir / asset
+            asset_specific_data_dir.mkdir(parents=True, exist_ok=True)
+            asset_specific_scaler_dir.mkdir(parents=True, exist_ok=True)
+
+            logger.debug(f"Asset data save path: {asset_specific_data_dir}")
+            logger.debug(f"Asset scaler save path: {asset_specific_scaler_dir}")
+
             try:
                 asset_df = process_asset_for_timeframe(asset, timeframe, config)
                 if asset_df is None:
@@ -316,23 +329,24 @@ def process_unified_pipeline(config, exec_profile):
                 train_df, val_df, test_df = split_data_by_timeframe(asset_df, config, timeframe)
 
                 if train_df.empty or val_df.empty or test_df.empty:
-                    logger.warning(f"⚠️ Data splitting for {asset} - {timeframe} resulted in one or more empty dataframes. Skipping normalization and saving for this timeframe.")
+                    logger.warning(f"⚠️ Data splitting for {asset} - {timeframe} resulted in one or more empty dataframes. Skipping normalization and saving.")
                     logger.warning(f"Train: {len(train_df)}, Val: {len(val_df)}, Test: {len(test_df)}")
                     continue
 
                 train_norm, val_norm, test_norm, scaler = normalize_features(train_df, val_df, test_df, config)
 
-                save_asset_data_split(train_norm, "train", asset, timeframe, asset_data_dir)
-                save_asset_data_split(val_norm, "val", asset, timeframe, asset_data_dir)
-                save_asset_data_split(test_norm, "test", asset, timeframe, asset_data_dir)
-                save_scaler(scaler, asset, timeframe, asset_scalers_dir)
+                # Pass the new asset_specific_data_dir and asset_specific_scaler_dir
+                save_asset_data_split(train_norm, "train", asset, timeframe, asset_specific_data_dir)
+                save_asset_data_split(val_norm, "val", asset, timeframe, asset_specific_data_dir)
+                save_asset_data_split(test_norm, "test", asset, timeframe, asset_specific_data_dir)
+                save_scaler(scaler, asset, timeframe, asset_specific_scaler_dir)
 
-                logger.info(f"✅ Successfully processed and saved {timeframe} for {asset}")
+                logger.info(f"✅ Successfully processed and saved {asset} for {timeframe}")
 
             except Exception as e:
-                logger.error(f"❌ Error processing {timeframe} for {asset}: {e}", exc_info=True)
+                logger.error(f"❌ Error processing {asset} for {timeframe}: {e}", exc_info=True)
         
-        logger.info(f"✅ Asset {asset} processed successfully!")
+        logger.info(f"✅ Timeframe {timeframe} processed successfully for all assets!")
 
 def main():
     """Fonction principale du script."""

@@ -238,33 +238,43 @@ class TrainingMonitor:
         
         layout["right"] = Panel(system_table, title="Système", border_style="yellow")
         
-        # Footer avec alertes et instructions
-        footer_content = []
-        
-        # Alertes
-        alerts = self.generate_alerts()
-        if alerts:
-            alerts_text = "\n".join(alerts)
-            footer_content.append(Panel(alerts_text, title="🚨 Alertes", border_style="red"))
-        
-        # Instructions
-        instructions = (
+        # Footer construction starts here
+        alerts_panel = None
+        # Use self.generate_alerts() as it's a method of the class
+        current_alerts = self.generate_alerts() # Call it once
+        if current_alerts: # Check if the list of alert strings is non-empty
+            alerts_text = "\n".join(current_alerts)
+            if alerts_text: # Check if the joined string is not empty
+                alerts_panel = Panel(alerts_text, title="🚨 Alertes", border_style="red")
+
+        instructions_text = (
             "[bold cyan]Contrôles:[/bold cyan] Ctrl+C pour quitter | "
             "[dim]Moniteur automatique des performances ADAN[/dim]"
         )
-        footer_content.append(Panel(instructions, border_style="dim"))
-        
-        if len(footer_content) == 1:
-            layout["footer"] = footer_content[0]
+        instructions_panel = Panel(instructions_text, border_style="dim")
+
+        if alerts_panel:
+            # Both alerts and instructions need to be displayed.
+            # Create a new Layout for the footer that will contain these two, potentially side-by-side.
+            footer_combined_layout = Layout(name="footer_split")
+
+            # Split this new layout into two columns (adjust ratio/size as needed)
+            # Using ratio based split as an example
+            footer_combined_layout.split_row(
+                Layout(name="alerts_col", ratio=1),
+                Layout(name="instructions_col", ratio=2) # Example: instructions take more space
+            )
+
+            # Populate these new columns with the panel content
+            footer_combined_layout["alerts_col"].update(alerts_panel)
+            footer_combined_layout["instructions_col"].update(instructions_panel)
+
+            # Update the main layout's "footer" region with this composite layout
+            layout["footer"].update(footer_combined_layout)
         else:
-            footer_layout = Layout()
-            footer_layouts = []
-            for content in footer_content:
-                sub_layout = Layout()
-                sub_layout.update(content)
-                footer_layouts.append(sub_layout)
-            footer_layout.split_row(*footer_layouts)
-            layout["footer"] = footer_layout
+            # Only instructions panel needs to be displayed.
+            # Update the main layout's "footer" region directly with the instructions_panel.
+            layout["footer"].update(instructions_panel)
         
         return layout
     

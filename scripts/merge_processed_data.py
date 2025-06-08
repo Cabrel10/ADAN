@@ -67,19 +67,24 @@ def get_processed_data_paths(main_config, data_config):
     lot_id = data_config.get('lot_id', None)
     unified_segment = 'unified'
 
-    # Source directory for individual asset files (output of convert_real_data.py)
-    # This path should consistently point to where convert_real_data.py saves its files.
-    # Based on convert_real_data.py, files are in data/processed/unified/{ASSET}/...
-    processed_dir = os.path.join(base_processed_dir, unified_segment)
-    logger.info(f"Répertoire source des données par actif (issues de convert_real_data.py): {processed_dir}")
+    # Source directory for individual asset files
+    # This will now be data/processed/ or data/processed/{lot_id}/
+    # The "unified/{timeframe}/{asset}" will be added in merge_data_for_timeframe_split
+    if lot_id:
+        processed_dir = os.path.join(base_processed_dir, lot_id)
+        logger.info(f"Utilisation du lot de données pour la source des données par actif: {lot_id}")
+        logger.info(f"Répertoire de base pour les données par actif (avant unified/tf/asset): {processed_dir}")
+    else:
+        processed_dir = base_processed_dir
+    logger.info(f"Répertoire de base pour les données par actif (avant unified/tf/asset): {processed_dir}")
 
-    # Target directory for merged files
+    # Target directory for merged files (remains .../merged/{lot_id}/unified or .../merged/unified)
     if lot_id:
         merged_dir = os.path.join(base_processed_dir, 'merged', lot_id, unified_segment)
         logger.info(f"Utilisation du lot de données pour la sortie fusionnée: {lot_id}")
     else:
         merged_dir = os.path.join(base_processed_dir, 'merged', unified_segment)
-    
+
     logger.info(f"Répertoire cible pour les données fusionnées: {merged_dir}")
 
     # Créer le répertoire pour les données fusionnées s'il n'existe pas
@@ -123,7 +128,9 @@ def merge_data_for_timeframe_split(processed_dir, merged_dir, assets, timeframe,
     
     # Charger les données pour chaque actif
     for asset in assets:
-        file_path = os.path.join(processed_dir, asset, f"{asset}_{timeframe}_{split}.parquet")
+        # Construct the full path to the asset-specific file, including timeframe
+        # processed_dir is now data/processed/ or data/processed/{lot_id}/
+        file_path = os.path.join(processed_dir, "unified", timeframe, asset, f"{asset}_{timeframe}_{split}.parquet")
         
         if not os.path.exists(file_path):
             logger.warning(f"Fichier {file_path} non trouvé. L'actif {asset} sera ignoré pour {timeframe}_{split}.")

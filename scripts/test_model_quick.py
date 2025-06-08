@@ -24,73 +24,50 @@ from rich.progress import Progress, BarColumn, TextColumn
 
 console = Console()
 
-def load_training_configs():
-    """Charge les configurations utilisées pendant l'entraînement."""
+# load_test_data is now modified to accept config and construct path dynamically
+def load_test_data(config):
+    """Charge les données de test fusionnées en fonction de la configuration."""
     try:
-        # Charger les configurations avec les mêmes profils que l'entraînement
-        main_config = load_config('config/main_config.yaml')
-        data_config = load_config('config/data_config_cpu.yaml')
-        env_config = load_config('config/environment_config.yaml')
+        project_root = config.get('paths', {}).get('base_project_dir_local', '.')
+        data_dir_name = config.get('paths', {}).get('data_dir_name', 'data')
+        processed_dir_name = config.get('data', {}).get('processed_data_dir', 'processed')
         
-        # Fusionner les configurations comme pendant l'entraînement
-        config = {
-            'data': data_config.get('data', {}),
-            'environment': env_config.get('environment', {}),
-            'main': main_config
-        }
+        timeframe_to_load = config.get('data', {}).get('training_timeframe', '1m') # Default if somehow not set
+        lot_id = config.get('data', {}).get('lot_id', None)
         
-        console.print(f"[green]✅ Configurations chargées - Assets: {config['data'].get('assets', [])}[/green]")
-        return config
-    except Exception as e:
-        console.print(f"[red]❌ Erreur lors du chargement des configs: {str(e)}[/red]")
-        return None
-</text>
+        console.print(f"[cyan]Attempting to load test data for timeframe: {timeframe_to_load}[/cyan]")
 
-<old_text>
-        # Charger les configurations utilisées pendant l'entraînement
-        console.print("[cyan]🔄 Chargement des configurations...[/cyan]")
-        config = load_training_configs()
-        if config is None:
-            return 1
-        
-        # Override du capital initial
-        config['environment']['initial_capital'] = args.capital
+        base_merged_path = os.path.join(project_root, data_dir_name, processed_dir_name, 'merged')
+        unified_segment = 'unified'
 
-def load_test_data():
-    """Charge directement les données de test fusionnées."""
-    test_file = "data/processed/merged/unified/1m_test_merged.parquet"
-    
-    if not os.path.exists(test_file):
-        console.print(f"[red]❌ Fichier de test non trouvé: {test_file}[/red]")
-        return None
-    
-    try:
-        df = pd.read_parquet(test_file)
-        console.print(f"[green]✅ Données de test chargées: {df.shape}[/green]")
-        return df
-    except Exception as e:
-        console.print(f"[red]❌ Erreur lors du chargement: {str(e)}[/red]")
-        return None
+        if lot_id:
+            merged_dir = os.path.join(base_merged_path, lot_id, unified_segment)
+        else:
+            merged_dir = os.path.join(base_merged_path, unified_segment)
+        
+        file_name = f"{timeframe_to_load}_test_merged.parquet"
+        test_file_path = os.path.join(merged_dir, file_name)
+        
+        console.print(f"Constructed test data path: {test_file_path}")
 
-def load_training_configs():
-    """Charge les configurations utilisées pendant l'entraînement."""
-    try:
-        # Charger les configurations avec les mêmes profils que l'entraînement
-        main_config = load_config('config/main_config.yaml')
-        data_config = load_config('config/data_config_cpu.yaml')
-        env_config = load_config('config/environment_config.yaml')
-        
-        # Fusionner les configurations comme pendant l'entraînement
-        config = {
-            'data': data_config.get('data', {}),
-            'environment': env_config.get('environment', {}),
-            'main': main_config
-        }
-        
-        console.print(f"[green]✅ Configurations chargées - Assets: {config['data'].get('assets', [])}[/green]")
-        return config
+        if os.path.exists(test_file_path):
+            df = pd.read_parquet(test_file_path)
+            console.print(f"[green]✅ Données de test chargées depuis {test_file_path}: {df.shape}[/green]")
+            return df
+        else:
+            console.print(f"[red]❌ Fichier de test introuvable: {test_file_path}[/red]")
+            if not os.path.exists(merged_dir):
+                console.print(f"  Le répertoire merged/unified ({merged_dir}) n'existe pas.")
+                parent_merged_dir = os.path.dirname(merged_dir)
+                if os.path.exists(parent_merged_dir):
+                    console.print(f"  Contenu de {parent_merged_dir}: {os.listdir(parent_merged_dir)}")
+            else:
+                console.print(f"  Contenu de {merged_dir}: {os.listdir(merged_dir)}")
+            return None
     except Exception as e:
-        console.print(f"[red]❌ Erreur lors du chargement des configs: {str(e)}[/red]")
+        console.print(f"[red]❌ Erreur lors du chargement des données de test: {str(e)}[/red]")
+        import traceback
+        traceback.print_exc()
         return None
 
 def calculate_quick_metrics(env, initial_capital=15.0):
@@ -158,6 +135,20 @@ def main():
                         help='Nombre de steps par épisode (défaut: 500)')
     parser.add_argument('--episodes', type=int, default=3,
                         help='Nombre d\'épisodes (défaut: 3)')
+    parser.add_argument(
+        '--exec_profile',
+        type=str,
+        default='cpu',
+        choices=['cpu', 'gpu'],
+        help="Profil d'exécution pour charger data_config_{profile}.yaml (défaut: cpu)"
+    )
+    parser.add_argument(
+        '--training_timeframe',
+        type=str,
+        default='1m', # Defaulting to '1m' as this is a quick test script
+        choices=['1m', '1h', '1d'],
+        help="Timeframe d'évaluation (e.g., '1m', '1h', '1d', défaut: 1m)"
+    )
     
     args = parser.parse_args()
     
@@ -182,46 +173,53 @@ def main():
         
         # Charger données de test
         console.print("[cyan]🔄 Chargement des données de test...[/cyan]")
-        df_test = load_test_data()
-        if df_test is None:
+        # df_test = load_test_data() # Will be called after config is loaded
+
+        # Charger les configurations
+        console.print(f"[cyan]🔄 Chargement des configurations pour le profil: {args.exec_profile}...[/cyan]")
+        main_config = load_config('config/main_config.yaml')
+        data_config_path = f'config/data_config_{args.exec_profile}.yaml'
+        data_config = load_config(data_config_path)
+        env_config_path = 'config/environment_config.yaml' # Assuming this is standard
+        env_config = load_config(env_config_path)
+
+        if not main_config or not data_config or not env_config:
+            console.print("[red]❌ Erreur: Un ou plusieurs fichiers de configuration n'ont pu être chargés.[/red]")
             return 1
-        
-        # Charger configurations basiques
+
         config = {
-            'data': {
-                'assets': ["ADAUSDT", "BNBUSDT", "BTCUSDT", "ETHUSDT", "XRPUSDT"],
-                'training_timeframe': '1m',
-                'base_market_features': [
-                    "open", "high", "low", "close", "volume"
-                ]
-            },
-            'environment': {
-                'initial_capital': args.capital,
-                'transaction': {'fee_percent': 0.001, 'fixed_fee': 0.0},
-                'order_rules': {'min_value_tolerable': 1.0, 'min_value_absolute': 0.5},
-                'penalties': {
-                    'time_step': -0.001,
-                    'invalid_order_base': -0.3,
-                    'out_of_funds': -0.5,
-                    'max_positions_reached': -0.2
-                },
-                'reward_tiers': [
-                    {'threshold': 0, 'max_positions': 3, 'allocation_frac_per_pos': 0.2, 'reward_pos_mult': 1.0, 'reward_neg_mult': 1.0}
-                ]
-            }
+            # 'main': main_config, # Keep full main_config if other parts of it are needed later
+            'paths': main_config.get('paths', {}),
+            'data': data_config,  # Keep full data_config
+            'environment': env_config.get('environment', {}) # Get the 'environment' sub-dictionary
         }
         
+        # Override du capital initial depuis les arguments
+        if 'environment' not in config: config['environment'] = {}
+        config['environment']['initial_capital'] = args.capital
+
+        # Override du training_timeframe depuis les arguments
+        if 'data' not in config: config['data'] = {}
+        config['data']['training_timeframe'] = args.training_timeframe # Already defaults to '1m' in args
+
+        console.print(f"[green]✅ Configurations chargées. Timeframe pour évaluation: {config['data']['training_timeframe']}[/green]")
+
+        # Charger les données de test en utilisant la config (qui contient maintenant le bon timeframe)
+        df_test = load_test_data(config) # Pass config to load_test_data
+        if df_test is None:
+            return 1
+
         # Créer environnement
         console.print("[cyan]🔄 Création de l'environnement...[/cyan]")
-        console.print(f"[yellow]⚠️ Utilisation de toutes les features disponibles: {df_test.shape[1]} colonnes[/yellow]")
+        # console.print(f"[yellow]⚠️ Utilisation de toutes les features disponibles: {df_test.shape[1]} colonnes[/yellow]") # To be removed
         env = MultiAssetEnv(
             df_received=df_test,
-            config=config,
-            scaler=None,
-            encoder=None,
+            config=config, # Pass the correct config
+            # scaler=None, # Scaler not typically used for quick test
+            # encoder=None,
             max_episode_steps_override=args.steps
         )
-        env.initial_capital = args.capital
+        # env.initial_capital = args.capital # This is now set via config['environment']['initial_capital']
         
         # Évaluation
         all_metrics = []

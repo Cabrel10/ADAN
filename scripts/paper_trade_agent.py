@@ -212,8 +212,43 @@ class PaperTradingAgent:
         """Initialise le constructeur d'état."""
         # Pour le paper trading, nous utiliserons une version simplifiée
         # qui peut construire des états à partir de données live
-        self.state_builder = None
-        logger.info("⚠️ StateBuilder will be initialized with first market data")
+
+        timeframe = self.config.get('data', {}).get('training_timeframe', '1m')
+        logger.info(f"Initializing StateBuilder for timeframe: {timeframe}")
+        base_features_per_asset = []
+
+        if timeframe == '1m':
+            base_features_per_asset = self.config.get('data', {}).get('base_market_features', ['open', 'high', 'low', 'close', 'volume'])
+            logger.info(f"Using 'base_market_features' for 1m: {base_features_per_asset}")
+        else:  # '1h' or '1d'
+            base_features_per_asset.extend(['open', 'high', 'low', 'close', 'volume'])
+            # indicators_by_timeframe should be at the root of data_config content
+            indicators_cfg = self.config.get('data', {}).get('indicators_by_timeframe', {}).get(timeframe, [])
+
+            logger.info(f"Found {len(indicators_cfg)} indicator specs for {timeframe} in config['data']['indicators_by_timeframe']")
+            for ind_spec in indicators_cfg:
+                name_to_use = ind_spec.get('output_col_name') or \
+                              (ind_spec.get('output_col_names') and ind_spec['output_col_names'][0]) or \
+                              ind_spec.get('alias') or \
+                              ind_spec.get('name')
+                if name_to_use:
+                    base_features_per_asset.append(f"{name_to_use}_{timeframe}")
+                else:
+                    logger.warning(f"Could not determine name for indicator spec: {ind_spec}")
+
+        seen = set()
+        unique_base_features = [x for x in base_features_per_asset if not (x in seen or seen.add(x))]
+        logger.info(f"Unique base features determined: {unique_base_features}")
+
+        self.state_builder = StateBuilder(
+            config=self.config, # Pass the main config dictionary
+            assets=self.assets,
+            scaler=self.scaler, # self.scaler should be loaded before this
+            encoder=None,
+            base_feature_names=unique_base_features,
+            cnn_input_window_size=self.config.get('data', {}).get('cnn_input_window_size', 20)
+        )
+        logger.info(f"✅ StateBuilder initialized with {len(unique_base_features)} base features per asset for timeframe {timeframe}.")
     
     def get_live_market_data(self, symbol_ccxt, limit=50):
         """
@@ -285,17 +320,71 @@ class PaperTradingAgent:
                 logger.error("❌ Failed to normalize features")
                 return None
             
-            # Étape 4: Construire l'observation finale
-            observation = self._build_final_observation(normalized_data)
+            # Étape 4: Combiner les features des actifs en un seul DataFrame
+            window_size = self.config.get('data', {}).get('cnn_input_window_size', 20)
+            all_asset_dfs_for_window = []
+
+            for asset_id in self.assets: # Iterate in defined order
+                if asset_id not in normalized_data:
+                    logger.warning(f"No normalized data for {asset_id} to combine. Skipping this asset for observation.")
+                    # How to handle missing asset? StateBuilder expects all.
+                    # For now, let's assume StateBuilder will handle missing columns if padded correctly later.
+                    # Or, this should ideally not happen if data fetching is robust.
+                    continue
+
+                asset_df = normalized_data[asset_id]
+                if len(asset_df) < window_size:
+                    logger.warning(f"Insufficient data for {asset_id} in normalized_data ({len(asset_df)} < {window_size}). Padding with last known value.")
+                    if asset_df.empty: # No data at all
+                        # This is problematic. StateBuilder needs some data.
+                        # Create a dummy df with NaNs for this asset's features, StateBuilder might handle NaNs.
+                        # This part needs careful consideration on how StateBuilder handles missing asset columns.
+                        # For now, log error and skip, which will likely cause downstream issues.
+                        logger.error(f"CRITICAL: No data for {asset_id} to build observation. Observation will be incomplete.")
+                        continue # Or raise error
+
+                    # Padding: repeat the last row
+                    last_row = asset_df.iloc[[-1]] # Keep as DataFrame
+                    padding_needed = window_size - len(asset_df)
+                    padding_df = pd.concat([last_row] * padding_needed, ignore_index=False) # keep index of last_row for alignment
+                    asset_df_window = pd.concat([asset_df, padding_df])
+                    # Ensure the index is consistent after padding if it was messed up
+                    # This part is tricky; ideally, data fetching ensures enough points.
+                    # For now, we assume simple concat is okay if indices are simple.
+                else:
+                    asset_df_window = asset_df.tail(window_size)
+
+                # Rename columns to feature_asset_id
+                renamed_df = asset_df_window.rename(columns=lambda col: f"{col}_{asset_id}")
+                all_asset_dfs_for_window.append(renamed_df)
             
-            if observation is not None:
-                logger.debug(f"📊 Final observation shape: {observation.shape}")
-                logger.debug(f"📊 Observation range: [{observation.min():.6f}, {observation.max():.6f}]")
+            if not all_asset_dfs_for_window:
+                logger.error("❌ No asset dataframes to combine for observation.")
+                return None
+
+            # Merge all asset dataframes horizontally
+            # Assuming they share the same DatetimeIndex from resampling/fetching
+            combined_features_df = pd.concat(all_asset_dfs_for_window, axis=1)
+
+            # Ensure the combined_features_df has exactly window_size rows.
+            # This can be tricky if different assets had slightly misaligned timestamps at the resampling stage.
+            # For now, we trust the resampling and tail(window_size) per asset.
+            # If issues arise, a reindex to a common DatetimeIndex might be needed before concat.
+            if len(combined_features_df) != window_size:
+                 logger.warning(f"Combined features df has {len(combined_features_df)} rows, expected {window_size}. Using tail.")
+                 combined_features_df = combined_features_df.tail(window_size)
+                 if len(combined_features_df) < window_size:
+                     logger.error(f"Still not enough rows ({len(combined_features_df)}) after tail. Observation will be flawed.")
+                     # Potentially pad again here if necessary, or let StateBuilder handle it.
+
+
+            # Étape 5: Construire l'observation finale avec StateBuilder
+            observation_dict = self._build_final_observation(combined_features_df)
             
-            return observation
+            return observation_dict # This is now a dictionary
             
         except Exception as e:
-            logger.error(f"❌ Error processing market data: {e}")
+            logger.error(f"❌ Error processing market data: {e}", exc_info=True)
             return None
     
     def _prepare_timeframe_data(self, market_data_dict):
@@ -427,8 +516,8 @@ class PaperTradingAgent:
             
             # Import de la fonction add_technical_indicators si disponible
             try:
-                from src.adan_trading_bot.data_processing.feature_engineering import add_technical_indicators
-                features_df = add_technical_indicators(df, indicators_config, self.training_timeframe)
+                from adan_trading_bot.data_processing.feature_engineer import add_technical_indicators
+                features_df, _ = add_technical_indicators(df, indicators_config, self.training_timeframe) # add_technical_indicators returns df, added_features
                 logger.debug(f"📊 Timeframe indicators calculated: {features_df.shape[1]} features")
                 return features_df
             except ImportError:
@@ -481,65 +570,67 @@ class PaperTradingAgent:
         except Exception as e:
             logger.error(f"❌ Error normalizing features: {e}")
             return features_data  # Return unnormalized data as fallback
-    
-    def _build_final_observation(self, normalized_data):
-        """Construit l'observation finale pour l'agent."""
+
+    def _build_final_observation(self, combined_features_df):
+        """
+        Construit l'observation finale pour l'agent en utilisant StateBuilder.
+
+        Args:
+            combined_features_df: DataFrame contenant les features de tous les actifs pour la fenêtre requise,
+                                  avec des colonnes nommées (ex: 'rsi_1h_ADAUSDT', 'open_BTCUSDT').
+                                  L'index doit être un DatetimeIndex.
+        Returns:
+            dict: Dictionnaire d'observation attendu par l'agent (image_features, vector_features).
+        """
         try:
-            window_size = self.config.get('data', {}).get('cnn_input_window_size', 20)
-            features = []
-            
-            for asset_id in self.assets:
-                if asset_id not in normalized_data:
-                    logger.warning(f"⚠️ No normalized data for {asset_id}")
-                    # Ajouter des zéros pour maintenir la cohérence dimensionnelle
-                    num_features = len(self.config.get('data', {}).get('base_market_features', [])) or 5
-                    features.extend([0.0] * num_features * window_size)
-                    continue
-                
-                df = normalized_data[asset_id]
-                
-                if len(df) < window_size:
-                    logger.warning(f"⚠️ Insufficient data for {asset_id}: {len(df)} < {window_size}")
-                    # Padding avec la dernière valeur disponible
-                    if len(df) > 0:
-                        last_row = df.iloc[-1]
-                        padding_rows = []
-                        for _ in range(window_size - len(df)):
-                            padding_rows.append(last_row)
-                        padding_df = pd.DataFrame(padding_rows, columns=df.columns)
-                        df_windowed = pd.concat([df, padding_df], ignore_index=True)
-                    else:
-                        # Aucune donnée : utiliser des zéros
-                        features.extend([0.0] * len(df.columns) * window_size)
-                        continue
-                else:
-                    df_windowed = df.tail(window_size)
-                
-                # Aplatir les données de la fenêtre
-                asset_features = df_windowed.values.flatten()
-                features.extend(asset_features.tolist())
-            
-            if not features:
-                logger.error("❌ No features generated for observation")
+            if self.state_builder is None:
+                logger.error("❌ StateBuilder not initialized. Cannot build observation.")
                 return None
+
+            if not isinstance(combined_features_df.index, pd.DatetimeIndex):
+                logger.warning("Converting index of combined_features_df to DatetimeIndex.")
+                try:
+                    combined_features_df.index = pd.to_datetime(combined_features_df.index)
+                except Exception as e_conv:
+                    logger.error(f"Failed to convert index to DatetimeIndex: {e_conv}")
+                    return None
             
-            observation = np.array(features, dtype=np.float32)
+            # StateBuilder expects market_data_window, capital, positions
+            # image_shape is handled internally by StateBuilder based on its config
+            observation_dict = self.state_builder.build_observation(
+                market_data_window=combined_features_df, # This df should have the window_size rows
+                capital=self.current_capital,
+                positions=self.positions
+            )
             
-            # Validation de l'observation
-            if np.any(np.isnan(observation)):
-                logger.warning("⚠️ NaN values detected in observation, replacing with 0")
-                observation = np.nan_to_num(observation, nan=0.0)
-            
-            if np.any(np.isinf(observation)):
-                logger.warning("⚠️ Infinite values detected in observation, clipping")
-                observation = np.clip(observation, -1e6, 1e6)
-            
-            return observation
+            # Validation de l'observation (StateBuilder devrait déjà gérer ça, mais double-check)
+            if isinstance(observation_dict, dict):
+                for key, value in observation_dict.items():
+                    if value is None: # Statebuilder can return None for a feature type if error.
+                        logger.error(f"Observation component '{key}' is None.")
+                        return None
+                    if np.any(np.isnan(value)):
+                        logger.warning(f"⚠️ NaN values detected in observation component '{key}', replacing with 0")
+                        observation_dict[key] = np.nan_to_num(value, nan=0.0)
+                    if np.any(np.isinf(value)):
+                        logger.warning(f"⚠️ Infinite values detected in observation component '{key}', clipping")
+                        observation_dict[key] = np.clip(value, -1e6, 1e6)
+            else: # Should be a dict
+                 logger.error(f"❌ Observation_dict is not a dict: {type(observation_dict)}")
+                 return None
+
+            logger.debug(f"📊 Final observation dict built. Keys: {list(observation_dict.keys())}")
+            if "image_features" in observation_dict:
+                 logger.debug(f"   Image features shape: {observation_dict['image_features'].shape}")
+            if "vector_features" in observation_dict:
+                 logger.debug(f"   Vector features shape: {observation_dict['vector_features'].shape}")
+
+            return observation_dict
             
         except Exception as e:
-            logger.error(f"❌ Error building final observation: {e}")
+            logger.error(f"❌ Error building final observation with StateBuilder: {e}", exc_info=True)
             return None
-    
+
     def convert_asset_to_ccxt_symbol(self, asset_id):
         """Convertit un asset_id en symbole CCXT."""
         if asset_id.endswith('USDT'):
@@ -815,12 +906,43 @@ def main():
                        help="Nombre maximum d'itérations de trading")
     parser.add_argument("--sleep_seconds", type=int, default=60,
                        help="Temps d'attente entre chaque décision (secondes)")
+    parser.add_argument(
+        '--training_timeframe',
+        type=str,
+        default='1m', # Defaulting to '1m'
+        choices=['1m', '1h', '1d'],
+        help="Operational timeframe, should match the model's training. (default: 1m)"
+    )
     
     args = parser.parse_args()
     
     try:
         # Charger la configuration
-        config = load_config(project_root, args.exec_profile)
+        logger.info(f"🔄 Loading configurations for profile: {args.exec_profile} from project root: {project_root}")
+        main_cfg_path = project_root / 'config' / 'main_config.yaml'
+        data_cfg_path = project_root / 'config' / f'data_config_{args.exec_profile}.yaml'
+        env_cfg_path = project_root / 'config' / 'environment_config.yaml'
+
+        main_config = load_config(str(main_cfg_path))
+        data_config = load_config(str(data_cfg_path))
+        environment_config = load_config(str(env_cfg_path))
+
+        if not main_config or not data_config or not environment_config:
+            logger.error("❌ Critical error: One or more configuration files could not be loaded.")
+            sys.exit(1)
+
+        config = {
+            'main': main_config,
+            'paths': main_config.get('paths', {}),
+            'data': data_config,
+            'environment': environment_config.get('environment', {}) # Ensure 'environment' key exists
+        }
+
+        # Override training_timeframe from args
+        # args.training_timeframe has a default, so it will always be set.
+        config['data']['training_timeframe'] = args.training_timeframe
+        logger.info(f"Paper trading timeframe set to: {args.training_timeframe} (from command line or default).")
+
         logger.info(f"✅ Configuration loaded for profile: {args.exec_profile}")
         
         # Vérifier que le modèle existe

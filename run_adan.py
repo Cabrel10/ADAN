@@ -125,8 +125,8 @@ def prepare_data_if_needed(timeframe='1m'):
             return False
         
         # Exécuter le traitement des données pour le timeframe
-        cmd = f'bash -c "source ~/miniconda3/etc/profile.d/conda.sh && conda activate trading_env && python scripts/convert_real_data.py --exec_profile cpu --timeframe {timeframe}"'
-        success, _ = run_command(cmd, f"Conversion des données {timeframe}")
+        cmd = f'bash -c "source ~/miniconda3/etc/profile.d/conda.sh && conda activate trading_env && python scripts/convert_real_data.py --exec_profile cpu"'
+        success, _ = run_command(cmd, f"Conversion des données (tous timeframes configurés)") # Updated description
         
         if not success:
             return False
@@ -139,7 +139,7 @@ def train_model(timesteps=50000, capital=15.0, profile="cpu", timeframe="1m", ve
     print_message(f"🚀 Démarrage de l'entraînement {timeframe} ({timesteps:,} timesteps, capital ${capital:.2f})", "green")
     
     verbose_flag = "--verbose" if verbose else ""
-    cmd = f'bash -c "source ~/miniconda3/etc/profile.d/conda.sh && conda activate trading_env && python scripts/train_rl_agent.py --exec_profile {profile} --total_timesteps {timesteps} --initial_capital {capital} {verbose_flag}"'
+    cmd = f'bash -c "source ~/miniconda3/etc/profile.d/conda.sh && conda activate trading_env && python scripts/train_rl_agent.py --exec_profile {profile} --training_timeframe {timeframe} --total_timesteps {timesteps} --initial_capital {capital} {verbose_flag}"'
     
     success, _ = run_command(cmd, "Entraînement du modèle")
     return success
@@ -159,7 +159,7 @@ def evaluate_model(model_path="models/final_model.zip", capital=15.0, profile="c
     
     print_message(f"📊 Évaluation du modèle avec capital ${capital:.2f}", "blue")
     
-    cmd = f'bash -c "source ~/miniconda3/etc/profile.d/conda.sh && conda activate trading_env && python scripts/test_model_quick.py --model_path {model_path} --capital {capital} --episodes 3"'
+    cmd = f'bash -c "source ~/miniconda3/etc/profile.d/conda.sh && conda activate trading_env && python scripts/test_model_quick.py --model_path {model_path} --capital {capital} --exec_profile {profile} --training_timeframe {timeframe} --episodes 3"'
     
     success, _ = run_command(cmd, f"Évaluation des performances {timeframe}")
     return success
@@ -195,55 +195,65 @@ def test_exchange_connection():
     
     return success
 
-def run_paper_trading(model_path="models/final_model.zip", capital=15000, iterations=30, learning=False):
+def run_paper_trading(model_path="models/final_model.zip", capital=15000, iterations=30, learning=False, profile="cpu", timeframe="1m"):
     """Lance le paper trading en temps réel avec options d'apprentissage continu."""
     mode = "avec apprentissage continu" if learning else "mode inférence"
-    print_message(f"🌐 Démarrage du paper trading (${capital:.2f}, {iterations} itérations, {mode})", "green")
-    
-    if not os.path.exists(model_path):
-        # Chercher modèles disponibles
-        models_dir = Path("models")
-        if models_dir.exists():
-            model_files = list(models_dir.glob("*.zip"))
-            if model_files:
-                model_path = str(model_files[0])
-                print_message(f"📁 Utilisation du modèle: {model_path}", "yellow")
-            else:
-                print_message("❌ Aucun modèle trouvé pour le paper trading", "red")
-                return False
+    print_message(f"🌐 Démarrage du paper trading (${capital:.2f}, {iterations} itérations, {mode}, Profile: {profile}, Timeframe: {timeframe})", "green")
+
+    # Determine model path (specific or generic)
+    timeframe_model_path = f"models/final_model_{timeframe}.zip"
+    if os.path.exists(timeframe_model_path):
+        model_to_use = timeframe_model_path
+        print_message(f"💡 Utilisation du modèle spécifique au timeframe: {model_to_use}", "yellow")
+    elif os.path.exists(model_path):
+        model_to_use = model_path
+        print_message(f"💡 Utilisation du modèle générique: {model_to_use}", "yellow")
+    else:
+        # Try interrupted model as last resort for generic path
+        interrupted_model_path = "models/interrupted_model.zip"
+        if os.path.exists(interrupted_model_path):
+            model_to_use = interrupted_model_path
+            print_message(f"💡 Utilisation du modèle interrompu: {model_to_use}", "yellow")
         else:
-            print_message("❌ Répertoire models/ non trouvé", "red")
+            print_message(f"❌ Aucun modèle trouvé (ni {timeframe_model_path}, ni {model_path}, ni {interrupted_model_path})", "red")
             return False
-    
+
+    print_message(f"📁 Modèle sélectionné pour paper trading: {model_to_use}", "cyan")
+
     if learning:
         # Apprentissage continu conservateur
-        cmd = f'bash -c "source ~/miniconda3/etc/profile.d/conda.sh && conda activate trading_env && python scripts/online_learning_agent.py --exec_profile cpu --model_path {model_path} --initial_capital {capital} --learning_rate 0.00001 --exploration_rate 0.1 --max_iterations {iterations}"'
+        cmd = f'bash -c "source ~/miniconda3/etc/profile.d/conda.sh && conda activate trading_env && python scripts/online_learning_agent.py --exec_profile {profile} --training_timeframe {timeframe} --model_path {model_to_use} --initial_capital {capital} --learning_rate 0.00001 --exploration_rate 0.1 --max_iterations {iterations}"'
     else:
         # Paper trading classique (inférence)
-        cmd = f'bash -c "source ~/miniconda3/etc/profile.d/conda.sh && conda activate trading_env && python scripts/paper_trade_agent.py --exec_profile cpu --model_path {model_path} --initial_capital {capital} --max_iterations {iterations} --sleep_seconds 60"'
+        cmd = f'bash -c "source ~/miniconda3/etc/profile.d/conda.sh && conda activate trading_env && python scripts/paper_trade_agent.py --exec_profile {profile} --training_timeframe {timeframe} --model_path {model_to_use} --initial_capital {capital} --max_iterations {iterations} --sleep_seconds 60"'
     
     success, _ = run_command(cmd, f"Paper trading {mode}")
     return success
 
-def run_human_feedback_trading(model_path="models/final_model.zip", capital=15000, iterations=20):
+def run_human_feedback_trading(model_path="models/final_model.zip", capital=15000, iterations=20, profile="cpu", timeframe="1m"):
     """Lance le trading avec feedback humain interactif."""
-    print_message(f"🤝 Démarrage du trading avec feedback humain (${capital:.2f}, {iterations} décisions)", "magenta")
-    
-    if not os.path.exists(model_path):
-        models_dir = Path("models")
-        if models_dir.exists():
-            model_files = list(models_dir.glob("*.zip"))
-            if model_files:
-                model_path = str(model_files[0])
-                print_message(f"📁 Utilisation du modèle: {model_path}", "yellow")
-            else:
-                print_message("❌ Aucun modèle trouvé", "red")
-                return False
+    print_message(f"🤝 Démarrage du trading avec feedback humain (${capital:.2f}, {iterations} décisions, Profile: {profile}, Timeframe: {timeframe})", "magenta")
+
+    # Determine model path (specific or generic)
+    timeframe_model_path = f"models/final_model_{timeframe}.zip"
+    if os.path.exists(timeframe_model_path):
+        model_to_use = timeframe_model_path
+        print_message(f"💡 Utilisation du modèle spécifique au timeframe: {model_to_use}", "yellow")
+    elif os.path.exists(model_path):
+        model_to_use = model_path
+        print_message(f"💡 Utilisation du modèle générique: {model_to_use}", "yellow")
+    else:
+        interrupted_model_path = "models/interrupted_model.zip"
+        if os.path.exists(interrupted_model_path):
+            model_to_use = interrupted_model_path
+            print_message(f"💡 Utilisation du modèle interrompu: {model_to_use}", "yellow")
         else:
-            print_message("❌ Répertoire models/ non trouvé", "red")
+            print_message(f"❌ Aucun modèle trouvé (ni {timeframe_model_path}, ni {model_path}, ni {interrupted_model_path})", "red")
             return False
-    
-    cmd = f'bash -c "source ~/miniconda3/etc/profile.d/conda.sh && conda activate trading_env && python scripts/human_feedback_trading.py --exec_profile cpu --model_path {model_path} --initial_capital {capital} --interactive_mode true --max_iterations {iterations}"'
+
+    print_message(f"📁 Modèle sélectionné pour feedback trading: {model_to_use}", "cyan")
+
+    cmd = f'bash -c "source ~/miniconda3/etc/profile.d/conda.sh && conda activate trading_env && python scripts/human_feedback_trading.py --exec_profile {profile} --training_timeframe {timeframe} --model_path {model_to_use} --initial_capital {capital} --interactive_mode true --max_iterations {iterations}"'
     
     success, _ = run_command(cmd, "Trading avec feedback humain")
     return success
@@ -259,7 +269,7 @@ def run_data_pipeline():
     if success:
         print_message("✅ Pipeline de données terminé avec succès", "green")
         # Fusion des données
-        cmd_merge = 'bash -c "source ~/miniconda3/etc/profile.d/conda.sh && conda activate trading_env && python scripts/merge_processed_data.py --exec_profile cpu --timeframes 1m --splits train val test --training-timeframe 1m"'
+        cmd_merge = 'bash -c "source ~/miniconda3/etc/profile.d/conda.sh && conda activate trading_env && python scripts/merge_processed_data.py --exec_profile cpu --timeframes 1m 1h 1d --splits train val test --training-timeframe 1m"'
         success_merge, _ = run_command(cmd_merge, "Fusion des données")
         return success_merge
     else:
@@ -393,7 +403,7 @@ def main():
                     print_message("Paper trading annulé par l'utilisateur", "yellow")
                     return 0
             
-            paper_success = run_paper_trading(capital=args.capital, iterations=args.iterations, learning=args.learning)
+            paper_success = run_paper_trading(capital=args.capital, iterations=args.iterations, learning=args.learning, profile=args.profile, timeframe=args.timeframe)
             
             if not paper_success:
                 print_message("❌ Échec du paper trading", "red")
@@ -429,7 +439,7 @@ def main():
                     print_message("Feedback humain annulé par l'utilisateur", "yellow")
                     return 0
             
-            feedback_success = run_human_feedback_trading(capital=args.capital, iterations=args.iterations)
+            feedback_success = run_human_feedback_trading(capital=args.capital, iterations=args.iterations, profile=args.profile, timeframe=args.timeframe)
             
             if not feedback_success:
                 print_message("❌ Échec du trading avec feedback humain", "red")

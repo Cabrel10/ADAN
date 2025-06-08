@@ -89,18 +89,48 @@ def calculate_performance_metrics(env, episode_rewards, episode_capitals, trades
     }
 
 def load_test_data(config):
-    """Charge les données de test."""
+    """Charge les données de test en fonction de la configuration."""
     try:
-        test_file = Path('data/processed/merged/1m_test_merged.parquet')
-        if test_file.exists():
-            df = pd.read_parquet(test_file)
-            logger.info(f"✅ Données de test chargées: {df.shape}")
+        project_root = config.get('paths', {}).get('base_project_dir_local', '.')
+        data_dir_name = config.get('paths', {}).get('data_dir_name', 'data')
+        processed_dir_name = config.get('data', {}).get('processed_data_dir', 'processed')
+
+        # This will reflect the command-line override if one was provided and set in main()
+        timeframe_to_load = config.get('data', {}).get('training_timeframe', '1h')
+        lot_id = config.get('data', {}).get('lot_id', None)
+
+        logger.info(f"Attempting to load test data for timeframe: {timeframe_to_load}")
+
+        base_merged_path = os.path.join(project_root, data_dir_name, processed_dir_name, 'merged')
+        unified_segment = 'unified'
+
+        if lot_id:
+            merged_dir = os.path.join(base_merged_path, lot_id, unified_segment)
+        else:
+            merged_dir = os.path.join(base_merged_path, unified_segment)
+
+        file_name = f"{timeframe_to_load}_test_merged.parquet"
+        test_file_path = os.path.join(merged_dir, file_name)
+
+        logger.info(f"Constructed test data path: {test_file_path}")
+
+        if os.path.exists(test_file_path):
+            df = pd.read_parquet(test_file_path)
+            logger.info(f"✅ Données de test chargées depuis {test_file_path}: {df.shape}")
             return df
         else:
-            logger.error(f"❌ Fichier de test introuvable: {test_file}")
+            logger.error(f"❌ Fichier de test introuvable: {test_file_path}")
+            # Provide more context if file not found
+            if not os.path.exists(merged_dir):
+                logger.error(f"  Le répertoire merged/unified ({merged_dir}) n'existe pas.")
+                parent_merged_dir = os.path.dirname(merged_dir)
+                if os.path.exists(parent_merged_dir):
+                    logger.error(f"  Contenu de {parent_merged_dir}: {os.listdir(parent_merged_dir)}")
+            else:
+                logger.error(f"  Contenu de {merged_dir}: {os.listdir(merged_dir)}")
             return None
     except Exception as e:
-        logger.error(f"❌ Erreur chargement données test: {e}")
+        logger.error(f"❌ Erreur chargement données test: {e}", exc_info=True)
         return None
 
 def evaluate_model(model_path, config, num_episodes=10, max_steps_per_episode=1000):
@@ -237,6 +267,13 @@ def main():
                        help='Maximum steps per episode')
     parser.add_argument('--save_results', action='store_true',
                        help='Save results to CSV file')
+    parser.add_argument(
+        '--training_timeframe',
+        type=str,
+        default=None, # Default to None, so it might use data_config's value
+        choices=['1m', '1h', '1d'],
+        help="Timeframe to use for loading test data and configuring the environment (e.g., '1m', '1h', '1d'). Overrides data_config if set."
+    )
     
     args = parser.parse_args()
     
@@ -263,6 +300,17 @@ def main():
         }
         
         logger.info(f"✅ Configuration chargée - Actifs: {data_config.get('assets', [])}")
+
+        # Override training_timeframe if provided via command line
+        if args.training_timeframe:
+            if 'data' not in config: # Should exist due to how config is built
+                config['data'] = {}
+            config['data']['training_timeframe'] = args.training_timeframe
+            logger.info(f"Overriding training_timeframe for evaluation to: {args.training_timeframe}")
+            # Update data_config as well if it's used directly elsewhere, though config['data'] is primary
+            if data_config is not None:
+                 data_config['training_timeframe'] = args.training_timeframe
+
     except Exception as e:
         logger.error(f"❌ Erreur chargement configuration: {e}")
         return 1
