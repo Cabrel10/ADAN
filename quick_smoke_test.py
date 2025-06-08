@@ -32,10 +32,14 @@ SYNTHETIC_PROFILE = "smoke_cpu" # A custom profile for this test
 SYNTHETIC_FEATURES_BASE = ['open', 'high', 'low', 'close', 'volume', 'sma_10', 'rsi_14'] # OHLCV + 2 indicators
 SYNTHETIC_NUM_ROWS = 300 # Number of rows for synthetic data
 
-# Expected output model name from training (using the new timeframe-specific naming)
-EXPECTED_MODEL_FILENAME = f"final_model_{SYNTHETIC_TIMEFRAME}.zip"
+TEMP_DATA_CONFIG_FILENAME = f"temp_data_config_{SYNTHETIC_PROFILE}.yaml" # More specific temp name
+SMOKE_TRAIN_N_STEPS = "64" # String for command line, SB3 default is 2048, make much smaller
+SMOKE_MODEL_SUFFIX = "smoke_test"
 
-# Constants for training parameters
+# Expected output model name from training (using the new timeframe-specific naming)
+EXPECTED_MODEL_FILENAME = f"final_model_{SYNTHETIC_TIMEFRAME}_{SMOKE_MODEL_SUFFIX}.zip"
+
+# Constants for training parameters (ensure these are strings for subprocess)
 SMOKE_TRAIN_TIMESTEPS = "100"
 SMOKE_TRAIN_CAPITAL = "15000"
 SMOKE_TRAIN_MAX_EP_STEPS = "50"
@@ -105,7 +109,7 @@ def generate_synthetic_data(base_save_path: Path, assets: list, timeframe_str: s
 def create_temporary_configs(data_config_target_path: Path, agent_config_target_path: Path, assets: list,
                                  features_base_names: list, synthetic_data_source_dir: Path,
                                  timeframe: str, num_rows: int, project_root: Path,
-                                 temp_smoke_test_dir_name: str):
+                                 temp_smoke_test_dir_name: str): # Renamed from temp_processed_base_dir_name
     logger.info(f"Creating temporary data configuration at: {data_config_target_path}")
     logger.info(f"Creating temporary agent configuration at: {agent_config_target_path}")
 
@@ -121,8 +125,9 @@ def create_temporary_configs(data_config_target_path: Path, agent_config_target_
     test_end_date = end_date_for_split
 
     relative_source_dir = str(synthetic_data_source_dir.relative_to(project_root))
+    # This path is relative to the main "data" dir (e.g., data/../temp_smoke_test_data/processed)
     relative_processed_dir = str(Path("..") / temp_smoke_test_dir_name / "processed")
-    # Path for scalers dir relative to project_root, as data_loader.py constructs it
+    # This path is relative to project_root for data_loader.py's Path construction
     relative_scalers_dir = str(Path(temp_smoke_test_dir_name) / "scalers_encoders")
 
 
@@ -147,7 +152,8 @@ def create_temporary_configs(data_config_target_path: Path, agent_config_target_
         'processed_data_dir': relative_processed_dir,
         'paths': {
             'scalers_encoders_dir': relative_scalers_dir
-        }
+        },
+        'lot_id': "smoke_test_lot" # Use a specific lot_id for smoke test outputs
     }
 
     try:
@@ -166,7 +172,7 @@ def create_temporary_configs(data_config_target_path: Path, agent_config_target_
         'seed': 42,
         'ppo': {
             'learning_rate': 0.0003,
-            'n_steps': 64,
+            'n_steps': int(SMOKE_TRAIN_N_STEPS), # Use constant, ensure it's int for SB3
             'batch_size': 32,
             'n_epochs': 4,
             'gamma': 0.99,
@@ -184,7 +190,7 @@ def create_temporary_configs(data_config_target_path: Path, agent_config_target_
             }
         },
         'eval_freq': 50,
-        'checkpoint_freq': 50,
+        'checkpoint_freq': 50, # Must be multiple of n_steps for SB3 if using EvalCallback with it
         'custom_log_freq_rollouts': 1,
     }
     try:
@@ -236,10 +242,41 @@ def run_pipeline_step(command_args: list, step_name: str, cwd: Path = None, env_
         logger.error(f"🔥 [Step: {step_name}] FAILED with an unexpected exception: {e}", exc_info=True)
         return False
 
-def cleanup(temp_data_dir: Path, temp_config_paths: list):
-    # To be implemented in Step 7
-    logger.info("Step 7: Cleanup (Not yet implemented)")
-    pass
+def cleanup(temp_data_root_to_delete: Path, temp_config_files_to_delete: list, smoke_model_file_to_delete: Path):
+    logger.info(f"Attempting to clean up temporary data directory: {temp_data_root_to_delete}")
+    try:
+        if temp_data_root_to_delete.exists():
+            shutil.rmtree(temp_data_root_to_delete)
+            logger.info(f"Successfully removed directory: {temp_data_root_to_delete}")
+        else:
+            logger.info(f"Temporary data directory not found: {temp_data_root_to_delete}")
+    except Exception as e:
+        logger.error(f"Error removing temporary data directory {temp_data_root_to_delete}: {e}", exc_info=True)
+
+    for config_file_path_obj in temp_config_files_to_delete:
+        if not isinstance(config_file_path_obj, Path):
+            config_file_path_obj = Path(config_file_path_obj)
+
+        logger.info(f"Attempting to clean up temporary config file: {config_file_path_obj}")
+        try:
+            if config_file_path_obj.exists():
+                config_file_path_obj.unlink()
+                logger.info(f"Successfully removed config file: {config_file_path_obj}")
+            else:
+                logger.info(f"Temporary config file not found: {config_file_path_obj}")
+        except Exception as e:
+            logger.error(f"Error removing temporary config file {config_file_path_obj}: {e}", exc_info=True)
+
+    logger.info(f"Attempting to clean up smoke test model file: {smoke_model_file_to_delete}")
+    try:
+        if smoke_model_file_to_delete.exists():
+            smoke_model_file_to_delete.unlink()
+            logger.info(f"Successfully removed smoke test model file: {smoke_model_file_to_delete}")
+        else:
+            logger.info(f"Smoke test model file not found: {smoke_model_file_to_delete}")
+    except Exception as e:
+        logger.error(f"Error removing smoke test model file {smoke_model_file_to_delete}: {e}", exc_info=True)
+
 
 def main():
     logger.info("🚀 Starting ADAN System Quick Smoke Test...")
@@ -247,15 +284,13 @@ def main():
     temp_data_root = PROJECT_ROOT / SMOKE_TEST_DIR_NAME
     temp_new_data_dir = temp_data_root / "new"
 
-    temp_models_dir = PROJECT_ROOT / "models"
+    models_output_dir = PROJECT_ROOT / "models" # Standard models dir for output check
 
-    temp_data_config_filename = f"data_config_{SYNTHETIC_PROFILE}.yaml"
-    temp_data_config_path = PROJECT_ROOT / "config" / temp_data_config_filename
-
-    temp_agent_config_filename = f"agent_config_{SYNTHETIC_PROFILE}.yaml"
-    temp_agent_config_path = PROJECT_ROOT / "config" / temp_agent_config_filename
+    temp_data_config_path = PROJECT_ROOT / "config" / TEMP_DATA_CONFIG_FILENAME
+    temp_agent_config_path = PROJECT_ROOT / "config" / f"agent_config_{SYNTHETIC_PROFILE}.yaml"
 
     temporary_files_to_cleanup = [temp_data_config_path, temp_agent_config_path]
+    smoke_model_file_path = models_output_dir / EXPECTED_MODEL_FILENAME
 
 
     overall_success = True
@@ -263,6 +298,8 @@ def main():
     try:
         logger.info(f"Creating temporary directories under: {temp_data_root}")
         temp_new_data_dir.mkdir(parents=True, exist_ok=True)
+        # Ensure models directory exists for saving test model
+        models_output_dir.mkdir(parents=True, exist_ok=True)
 
         generate_synthetic_data(temp_new_data_dir, SYNTHETIC_ASSETS, SYNTHETIC_TIMEFRAME,
                                 num_rows=SYNTHETIC_NUM_ROWS, features_to_generate=SYNTHETIC_FEATURES_BASE)
@@ -280,15 +317,19 @@ def main():
             raise FileNotFoundError("Temporary data or agent configuration was not created.")
         logger.info(f"Temporary configurations created: {created_data_cfg_path}, {created_agent_cfg_path}")
 
-        cmd_convert = [sys.executable, str(PROJECT_ROOT / 'scripts' / 'convert_real_data.py'), '--exec_profile', SYNTHETIC_PROFILE]
+        cmd_convert = [sys.executable, str(PROJECT_ROOT / 'scripts' / 'convert_real_data.py'),
+                       '--data_config', str(temp_data_config_path)]
         if not run_pipeline_step(cmd_convert, "Data Conversion"):
             raise Exception("Data Conversion step failed.")
         logger.info("Data conversion step completed.")
 
         cmd_merge = [
             sys.executable, str(PROJECT_ROOT / 'scripts' / 'merge_processed_data.py'),
-            '--exec_profile', SYNTHETIC_PROFILE, '--timeframes', SYNTHETIC_TIMEFRAME,
-            '--splits', 'train', 'val', 'test', '--training-timeframe', SYNTHETIC_TIMEFRAME
+            '--data_config', str(temp_data_config_path), # Use explicit temp data_config
+            '--exec_profile', SYNTHETIC_PROFILE, # Still needed for main_config loading within merge script
+            '--timeframes', SYNTHETIC_TIMEFRAME,
+            '--splits', 'train', 'val', 'test',
+            '--training-timeframe', SYNTHETIC_TIMEFRAME
         ]
         if not run_pipeline_step(cmd_merge, "Data Merging"):
             raise Exception("Data Merging step failed.")
@@ -296,9 +337,16 @@ def main():
 
         cmd_train = [
             sys.executable, str(PROJECT_ROOT / 'scripts' / 'train_rl_agent.py'),
-            '--exec_profile', SYNTHETIC_PROFILE, '--training_timeframe', SYNTHETIC_TIMEFRAME,
-            '--total_timesteps', SMOKE_TRAIN_TIMESTEPS, '--initial_capital', SMOKE_TRAIN_CAPITAL,
-            '--max_episode_steps', SMOKE_TRAIN_MAX_EP_STEPS, '--save_freq', SMOKE_TRAIN_SAVE_FREQ,
+            '--data_config', str(temp_data_config_path),      # Use explicit temp data_config
+            '--agent_config', str(temp_agent_config_path),   # Use explicit temp agent_config
+            '--exec_profile', SYNTHETIC_PROFILE,             # For any other configs it might load by convention
+            '--training_timeframe', SYNTHETIC_TIMEFRAME,
+            '--total_timesteps', SMOKE_TRAIN_TIMESTEPS,
+            '--initial_capital', SMOKE_TRAIN_CAPITAL,
+            '--max_episode_steps', SMOKE_TRAIN_MAX_EP_STEPS,
+            '--save_freq', SMOKE_TRAIN_SAVE_FREQ,
+            '--n_steps', SMOKE_TRAIN_N_STEPS,                 # Pass new n_steps
+            '--model_name_suffix', SMOKE_MODEL_SUFFIX,        # Pass new suffix
             '--logging_config', str(PROJECT_ROOT / 'config' / 'logging_config.yaml')
         ]
         if not run_pipeline_step(cmd_train, "Agent Training"):
@@ -309,17 +357,15 @@ def main():
 
         if overall_success:
             logger.info("🔬 Performing model output verifications...")
-            model_file_path = temp_models_dir / EXPECTED_MODEL_FILENAME
-
-            if model_file_path.exists() and model_file_path.is_file():
-                logger.info(f"✅ Verification PASSED: Expected model file '{model_file_path}' found.")
-                model_size_kb = model_file_path.stat().st_size / 1024
-                if model_size_kb > 1:
+            if smoke_model_file_path.exists() and smoke_model_file_path.is_file():
+                logger.info(f"✅ Verification PASSED: Expected model file '{smoke_model_file_path}' found.")
+                model_size_kb = smoke_model_file_path.stat().st_size / 1024
+                if model_size_kb > 0.5: # Check if > 0.5KB for a tiny model
                     logger.info(f"✅ Model file size is {model_size_kb:.2f} KB.")
                 else:
                     logger.warning(f"⚠️ Verification WARNING: Model file size is very small ({model_size_kb:.2f} KB).")
             else:
-                logger.error(f"🔥 Verification FAILED: Expected model file '{model_file_path}' NOT found.")
+                logger.error(f"🔥 Verification FAILED: Expected model file '{smoke_model_file_path}' NOT found.")
                 overall_success = False
         else:
              logger.warning("Skipping model verification because a previous step indicated failure.")
@@ -330,7 +376,7 @@ def main():
 
     finally:
         logger.info("🧹 Performing cleanup...")
-        cleanup(temp_data_root, temporary_files_to_cleanup)
+        cleanup(temp_data_root, temporary_files_to_cleanup, smoke_model_file_path)
 
         if overall_success:
             logger.info("=====================================")

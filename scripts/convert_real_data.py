@@ -285,15 +285,33 @@ def main():
     """Fonction principale du script."""
     parser = argparse.ArgumentParser(description="Pipeline unifié de traitement des données ADAN")
     parser.add_argument("--exec_profile", type=str, default="cpu", 
-                       choices=["cpu", "gpu"], help="Profil d'exécution")
+                       choices=["cpu", "gpu"], help="Profil d'exécution (utilisé si --data_config n'est pas fourni)")
+    parser.add_argument('--data_config', type=str, default=None,
+                        help='Path to a specific data_config YAML file. Overrides --exec_profile for data config loading.')
     
     args = parser.parse_args()
     
     try:
         # Charger la configuration
-        config_file = f"config/data_config_{args.exec_profile}.yaml"
-        config = load_config(config_file)
-        logger.info(f"✅ Configuration chargée pour le profil: {args.exec_profile}")
+        data_config_to_load = None
+        if args.data_config:
+            data_config_to_load = args.data_config
+            logger.info(f"Using explicit data_config from: {data_config_to_load}")
+        else:
+            data_config_to_load = f"config/data_config_{args.exec_profile}.yaml"
+            logger.info(f"Using data_config derived from exec_profile '{args.exec_profile}': {data_config_to_load}")
+
+        try:
+            config = load_config(data_config_to_load) # load_config should return the dict
+            if config is None: # load_config might return None on error
+                raise FileNotFoundError(f"Configuration file {data_config_to_load} not found or empty.")
+            logger.info(f"Data configuration loaded successfully from {data_config_to_load}")
+        except FileNotFoundError:
+            logger.error(f"FATAL: Data configuration file not found at {data_config_to_load}")
+            sys.exit(1)
+        except Exception as e:
+            logger.error(f"FATAL: Error loading data configuration from {data_config_to_load}: {e}")
+            sys.exit(1)
         
         # Exécuter le pipeline unifié
         process_unified_pipeline(config, args.exec_profile)

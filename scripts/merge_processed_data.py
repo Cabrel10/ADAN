@@ -294,11 +294,39 @@ def main():
     parser.add_argument('--timeframes', nargs='+', help='Liste des timeframes à traiter (par défaut: tous)')
     parser.add_argument('--splits', nargs='+', default=['train', 'val', 'test'], help='Liste des splits à traiter (par défaut: train, val, test)')
     parser.add_argument('--training-timeframe', type=str, help='Timeframe principal pour l\'entraînement (pour générer un fichier spécial)')
+    parser.add_argument('--data_config', type=str, default=None,
+                        help='Path to a specific data_config YAML file. Overrides --exec_profile for data config loading.')
     args = parser.parse_args()
     
-    # Charger les configurations avec le profil d'exécution spécifié
-    main_config, data_config = load_configs(exec_profile=args.exec_profile)
+    # Charger les configurations
+    main_config_path = 'config/main_config.yaml' # Or get from args if made configurable
+    logger.info(f"Loading main configuration from: {main_config_path}")
+    main_config = load_config(main_config_path)
+    if main_config is None:
+        logger.error(f"FATAL: Main configuration file not found or empty at {main_config_path}")
+        sys.exit(1)
+
+    data_config_to_load = None
+    if args.data_config:
+        data_config_to_load = args.data_config
+        logger.info(f"Using explicit data_config from: {data_config_to_load}")
+    else:
+        data_config_to_load = f'config/data_config_{args.exec_profile}.yaml'
+        logger.info(f"Using data_config derived from exec_profile '{args.exec_profile}': {data_config_to_load}")
     
+    logger.info(f"Loading data configuration from: {data_config_to_load}")
+    try:
+        data_config = load_config(data_config_to_load)
+        if data_config is None:
+            raise FileNotFoundError(f"Data configuration file {data_config_to_load} not found or empty.")
+        logger.info(f"Data configuration loaded successfully from {data_config_to_load}")
+    except FileNotFoundError:
+        logger.error(f"FATAL: Data configuration file not found at {data_config_to_load}")
+        sys.exit(1)
+    except Exception as e:
+        logger.error(f"FATAL: Error loading data configuration from {data_config_to_load}: {e}")
+        sys.exit(1)
+
     # Obtenir les chemins et informations
     processed_dir, merged_dir, assets, available_timeframes = get_processed_data_paths(main_config, data_config)
     

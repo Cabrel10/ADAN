@@ -22,47 +22,30 @@ def create_ppo_agent(env, config, tensorboard_log=None):
     Returns:
         PPO: Configured PPO agent.
     """
-    agent_config = config.get('agent', {})
+    agent_config = config.get('agent', {}) # This is the agent_config.yaml content
     
-    # Obtenir les configurations spécifiques à PPO et à la politique
-    ppo_config = config.get('ppo', {})
-    policy_config = config.get('policy', {})
+    # PPO hyperparameters are expected under agent_config['ppo']
+    # Policy architecture/kwargs are expected under agent_config['policy']
     
-    # Get PPO hyperparameters avec priorité : policy > ppo > agent
-    # Paramètres liés à l'apprentissage
-    learning_rate = policy_config.get('learning_rate', 
-                   ppo_config.get('learning_rate', 
-                   agent_config.get('learning_rate', 2.5e-4)))
-    
-    # Paramètres spécifiques à PPO
-    n_steps = ppo_config.get('n_steps', 
-              agent_config.get('n_steps', 2048))
-    batch_size = ppo_config.get('batch_size', 
-                agent_config.get('batch_size', 64))
-    n_epochs = ppo_config.get('n_epochs', 
-              agent_config.get('n_epochs', 10))
-    
-    # Paramètres de récompense et d'avantage
-    gamma = policy_config.get('gamma', 
-           ppo_config.get('gamma', 
-           agent_config.get('gamma', 0.99)))
-    gae_lambda = ppo_config.get('gae_lambda', 
-               agent_config.get('gae_lambda', 0.95))
-    
-    # Paramètres de clipping et de coefficients
-    clip_range = ppo_config.get('clip_range', 
-               agent_config.get('clip_range', 0.2))
-    clip_range_vf = ppo_config.get('clip_range_vf', 
-                   agent_config.get('clip_range_vf', None))
-    ent_coef = ppo_config.get('ent_coef', 
-             agent_config.get('ent_coef', 0.01))
-    vf_coef = ppo_config.get('vf_coef', 
-            agent_config.get('vf_coef', 0.5))
-    
-    # Paramètres de gradient
-    max_grad_norm = policy_config.get('max_grad_norm', 
-                   ppo_config.get('max_grad_norm', 
-                   agent_config.get('max_grad_norm', 0.5)))
+    ppo_params_from_config = agent_config.get('ppo', {})
+    policy_arch_config = agent_config.get('policy', {})
+
+    # Learning rate: agent_config['ppo'] or agent_config['policy'] or agent_config root
+    learning_rate = ppo_params_from_config.get('learning_rate',
+                    policy_arch_config.get('learning_rate',
+                    agent_config.get('learning_rate', 2.5e-4)))
+
+    # PPO specific parameters from agent_config['ppo'] or agent_config root
+    n_steps = ppo_params_from_config.get('n_steps', agent_config.get('n_steps', 2048))
+    batch_size = ppo_params_from_config.get('batch_size', agent_config.get('batch_size', 64))
+    n_epochs = ppo_params_from_config.get('n_epochs', agent_config.get('n_epochs', 10))
+    gamma = ppo_params_from_config.get('gamma', agent_config.get('gamma', 0.99))
+    gae_lambda = ppo_params_from_config.get('gae_lambda', agent_config.get('gae_lambda', 0.95))
+    clip_range = ppo_params_from_config.get('clip_range', agent_config.get('clip_range', 0.2))
+    clip_range_vf = ppo_params_from_config.get('clip_range_vf', agent_config.get('clip_range_vf', None))
+    ent_coef = ppo_params_from_config.get('ent_coef', agent_config.get('ent_coef', 0.01))
+    vf_coef = ppo_params_from_config.get('vf_coef', agent_config.get('vf_coef', 0.5))
+    max_grad_norm = ppo_params_from_config.get('max_grad_norm', agent_config.get('max_grad_norm', 0.5))
     
     # Préparer les policy_kwargs pour SB3
     policy_kwargs = {}

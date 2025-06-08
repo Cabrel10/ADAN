@@ -91,6 +91,10 @@ def main():
         choices=['1m', '1h', '1d'],
         help="Timeframe d'entraînement (surcharge la valeur de data_config si spécifié)."
     )
+    parser.add_argument('--n_steps', type=int, default=None,
+                        help='PPO n_steps (rollout buffer size). Overrides agent_config.')
+    parser.add_argument('--model_name_suffix', type=str, default=None,
+                        help='Suffix to add to saved model filenames (e.g., final_model_{timeframe}_{suffix}.zip).')
     
     args = parser.parse_args()
     
@@ -185,6 +189,16 @@ def main():
     if args.training_timeframe:
         override_params['training_timeframe'] = args.training_timeframe
     
+    # Ajouter n_steps si spécifié
+    if args.n_steps is not None:
+        override_params['n_steps'] = args.n_steps
+        logger.info(f"CLI override: PPO n_steps set to {args.n_steps}")
+
+    # Ajouter model_name_suffix si spécifié
+    if args.model_name_suffix is not None:
+        override_params['model_name_suffix'] = args.model_name_suffix
+        logger.info(f"CLI override: Model name suffix set to '{args.model_name_suffix}'")
+
     # Ajouter les chemins de fichiers si spécifiés
     if args.training_data_file is not None:
         override_params['training_data_file'] = args.training_data_file
