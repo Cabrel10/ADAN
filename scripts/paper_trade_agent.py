@@ -378,7 +378,33 @@ class PaperTradingAgent:
                      # Potentially pad again here if necessary, or let StateBuilder handle it.
 
 
-            # Étape 5: Construire l'observation finale avec StateBuilder
+            # Étape 5: Valider les colonnes avant de construire l'observation
+            if self.state_builder is None or self.state_builder.global_scaler_feature_order is None:
+                if self.state_builder and not self.state_builder.global_scaler_feature_order and not self.state_builder.global_scaler:
+                    # This is acceptable if no scaler is loaded, means we use canonical order and no scaling by SB
+                    logger.info("PaperTradingAgent: StateBuilder has no global_scaler or specific feature order. Proceeding with canonical feature order and no scaling by StateBuilder.")
+                else:
+                    logger.error("PaperTradingAgent: StateBuilder or its global_scaler_feature_order is not initialized. Cannot validate/build observation.")
+                    return None # Cannot proceed if scaler was expected but order is missing
+
+            expected_feature_columns = None
+            if self.state_builder.global_scaler_feature_order:
+                expected_feature_columns = self.state_builder.global_scaler_feature_order
+            elif hasattr(self.state_builder, 'canonical_fallback_feature_order'): # Check if fallback exists
+                expected_feature_columns = self.state_builder.canonical_fallback_feature_order
+
+            if not expected_feature_columns:
+                 logger.error("PaperTradingAgent: Could not determine expected feature columns for validation.")
+                 return None
+
+            missing_columns = [col for col in expected_feature_columns if col not in combined_features_df.columns]
+
+            if missing_columns:
+                logger.error(f"PaperTradingAgent: Critical features missing from combined_features_df for StateBuilder. Missing ({len(missing_columns)}): {missing_columns}")
+                logger.error(f"Available columns in combined_features_df (first {min(10, len(combined_features_df.columns))}): {combined_features_df.columns.tolist()[:min(10, len(combined_features_df.columns))]}")
+                return None # Stop if critical features for the model are missing
+
+            # All expected columns are present, proceed to build observation
             observation_dict = self._build_final_observation(combined_features_df)
             
             return observation_dict # This is now a dictionary
@@ -600,7 +626,8 @@ class PaperTradingAgent:
             observation_dict = self.state_builder.build_observation(
                 market_data_window=combined_features_df, # This df should have the window_size rows
                 capital=self.current_capital,
-                positions=self.positions
+                positions=self.positions,
+                apply_scaling=True # Explicitly set to True for live/paper trading data
             )
             
             # Validation de l'observation (StateBuilder devrait déjà gérer ça, mais double-check)

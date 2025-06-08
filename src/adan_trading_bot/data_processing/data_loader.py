@@ -4,6 +4,10 @@ Data loading utilities for the ADAN trading bot.
 import os
 import pandas as pd
 import numpy as np
+from pathlib import Path
+import joblib
+from sklearn.preprocessing import StandardScaler
+import json # Added
 from ..common.utils import get_path, get_logger
 
 logger = get_logger()
@@ -399,6 +403,186 @@ def prepare_data_for_training(config):
     logger.error("La méthode legacy pour charger les données individuelles a été supprimée.")
     logger.error("Veuillez vous assurer que les fichiers fusionnés existent avant l'entraînement.")
     raise RuntimeError("Méthode de préparation des données non valide.")
+
+
+# Helper function _determine_feature_columns_to_scale and updated prepare_data_for_training follow below
+# Imports are already moved to the top of the file.
+
+def _determine_feature_columns_to_scale(config, df_columns):
+    """
+    Determines the list of feature columns to be scaled based on config and available df columns.
+    """
+    assets = config.get('data', {}).get('assets', [])
+    timeframe = config.get('data', {}).get('training_timeframe', '1h')
+
+    current_base_features_per_asset = []
+    if timeframe == '1m':
+        current_base_features_per_asset = config.get('data', {}).get('base_market_features', ['open', 'high', 'low', 'close', 'volume'])
+    else: # '1h' or '1d'
+        current_base_features_per_asset.extend(['open', 'high', 'low', 'close', 'volume'])
+        # indicators_by_timeframe should be at the root of data_config content (i.e. config['data'])
+        indicators_cfg = config.get('data', {}).get('indicators_by_timeframe', {}).get(timeframe, [])
+        for ind_spec in indicators_cfg:
+            name_to_use = ind_spec.get('output_col_name') or \
+                          (ind_spec.get('output_col_names') and ind_spec['output_col_names'][0]) or \
+                          ind_spec.get('alias') or \
+                          ind_spec.get('name')
+            if name_to_use:
+                current_base_features_per_asset.append(f"{name_to_use}_{timeframe}")
+            else:
+                logger.warning(f"Could not determine name for indicator spec in _determine_feature_columns_to_scale: {ind_spec}")
+
+    # Remove duplicates while preserving order
+    seen = set()
+    unique_base_features = [x for x in current_base_features_per_asset if not (x in seen or seen.add(x))]
+
+    feature_columns_to_scale = []
+    # We only want to scale features, not OHLCV directly usually (though 'volume' is often scaled).
+    # The 'unique_base_features' for 1m includes OHLCV. For 1h/1d, we add OHLCV then indicators.
+    # The decision to scale OHLCV should be part of 'base_market_features' if desired for 1m,
+    # or explicitly handled here if OHLCV from other timeframes should/shouldn't be scaled.
+    # For now, let's assume all constructed features here are candidates, and filter out strict OHLC.
+
+    ohlc_strict = ['open', 'high', 'low', 'close']
+
+    for asset in assets:
+        for base_feature in unique_base_features:
+            # Avoid scaling strict OHLC columns, but allow volume and indicators (which might contain "close", "open" etc in their names)
+            is_strict_ohlc = False
+            for ohlc_pattern in ohlc_strict:
+                if base_feature == ohlc_pattern: # e.g. base_feature is 'open', 'close'
+                    is_strict_ohlc = True
+                    break
+
+            if not is_strict_ohlc:
+                 feature_columns_to_scale.append(f"{base_feature}_{asset}")
+
+    # Filter to only include columns that actually exist in the DataFrame
+    existing_feature_columns_to_scale = [col for col in feature_columns_to_scale if col in df_columns]
+
+    missing_for_scaling = set(feature_columns_to_scale) - set(existing_feature_columns_to_scale)
+    if missing_for_scaling:
+        logger.warning(f"Columns identified for scaling but not found in DataFrame: {missing_for_scaling}")
+
+    logger.info(f"Identified {len(existing_feature_columns_to_scale)} columns for global scaling (excluding strict OHLC).")
+    logger.debug(f"Columns to scale: {existing_feature_columns_to_scale[:20]}...") # Log first 20
+    return existing_feature_columns_to_scale
+
+
+def prepare_data_for_training(config):
+    """
+    Prepare data for training based on configuration.
+    This version implements GLOBAL scaling after loading merged data.
+    """
+    logger.info("Preparing data for training with global scaling")
+
+    try:
+        logger.info("Chargement des données fusionnées pour l'entraînement...")
+        train_df = load_merged_data(config, 'train')
+        logger.info("Chargement des données fusionnées pour la validation...")
+        val_df = load_merged_data(config, 'val')
+        logger.info("Chargement des données fusionnées pour le test...")
+        test_df = load_merged_data(config, 'test')
+
+        if train_df.empty:
+            logger.error("No training data loaded. Cannot proceed with global scaling.")
+            return train_df, val_df, test_df # Return as is
+
+        # Determine Feature Columns for Scaling
+        feature_columns_to_scale = _determine_feature_columns_to_scale(config, train_df.columns)
+
+        if not feature_columns_to_scale:
+            logger.warning("No feature columns identified for scaling. Returning unscaled data.")
+            return train_df, val_df, test_df
+
+        # Fit Global Scaler
+        scaler = StandardScaler()
+
+        logger.info("Fitting global scaler on training data...")
+        # Simple imputation for fitting scaler
+        train_df_features_to_scale = train_df[feature_columns_to_scale].copy()
+        train_means = train_df_features_to_scale.mean() # Calculate means once for imputation
+        train_df_features_to_scale.fillna(train_means, inplace=True)
+        train_df_features_to_scale.fillna(method='ffill', inplace=True)
+        train_df_features_to_scale.fillna(method='bfill', inplace=True)
+
+        if train_df_features_to_scale.isnull().values.any():
+            logger.error("NaN values still present in training data for scaling after imputation. Cannot fit scaler.")
+            # Log columns with NaNs
+            nan_cols_fit = train_df_features_to_scale.columns[train_df_features_to_scale.isnull().any()].tolist()
+            logger.error(f"Columns with NaNs before fitting scaler: {nan_cols_fit}")
+            return train_df, val_df, test_df # Return unscaled data
+
+        scaler.fit(train_df_features_to_scale)
+
+        # Save Global Scaler
+        # Use get_path for consistency if 'scalers_encoders' is a defined path key
+        # Otherwise, create relative to project root or data directory.
+        project_root_path = Path(config.get('paths', {}).get('base_project_dir_local', '.'))
+        scalers_dir_config = config.get('paths', {}).get('scalers_encoders_dir', 'data/scalers_encoders')
+
+        # Check if scalers_dir_config is absolute. If not, join with project_root_path.
+        scalers_dir = Path(scalers_dir_config)
+        if not scalers_dir.is_absolute():
+            scalers_dir = project_root_path / scalers_dir
+
+        scalers_dir.mkdir(parents=True, exist_ok=True)
+
+        timeframe = config.get('data', {}).get('training_timeframe', 'default_tf')
+        scaler_filename = f'global_scaler_{timeframe}.joblib'
+        scaler_path = scalers_dir / scaler_filename
+        joblib.dump(scaler, scaler_path)
+        logger.info(f"Global scaler saved to {scaler_path}")
+
+        # Define path for feature order list and save it
+        feature_order_filename = f'global_scaler_{timeframe}_feature_order.json'
+        feature_order_path = scaler_path.parent / feature_order_filename # Save in same directory as scaler
+        try:
+            with open(feature_order_path, 'w') as f:
+                json.dump(feature_columns_to_scale, f, indent=4) # feature_columns_to_scale is available here
+            logger.info(f"Global scaler feature order saved to {feature_order_path}")
+        except Exception as e:
+            logger.error(f"Failed to save global scaler feature order to {feature_order_path}: {e}")
+
+        # Transform Datasets
+        logger.info("Applying global scaler to train, validation, and test datasets...")
+        # Train
+        train_df_to_transform = train_df[feature_columns_to_scale].copy()
+        train_df_to_transform.fillna(train_means, inplace=True) # Impute with pre-calculated train_means
+        train_df_to_transform.fillna(method='ffill', inplace=True)
+        train_df_to_transform.fillna(method='bfill', inplace=True)
+        if train_df_to_transform.isnull().values.any(): logger.warning(f"NaNs in train_df for transform after imputation. Columns: {train_df_to_transform.columns[train_df_to_transform.isnull().any()].tolist()}")
+        train_df[feature_columns_to_scale] = scaler.transform(train_df_to_transform)
+
+        # Validation
+        if not val_df.empty:
+            val_df_to_transform = val_df[feature_columns_to_scale].copy()
+            val_df_to_transform.fillna(train_means, inplace=True) # Impute with train_means
+            val_df_to_transform.fillna(method='ffill', inplace=True)
+            val_df_to_transform.fillna(method='bfill', inplace=True)
+            if val_df_to_transform.isnull().values.any(): logger.warning(f"NaNs in val_df for transform after imputation. Columns: {val_df_to_transform.columns[val_df_to_transform.isnull().any()].tolist()}")
+            val_df[feature_columns_to_scale] = scaler.transform(val_df_to_transform)
+
+        # Test
+        if not test_df.empty:
+            test_df_to_transform = test_df[feature_columns_to_scale].copy()
+            test_df_to_transform.fillna(train_means, inplace=True) # Impute with train_means
+            test_df_to_transform.fillna(method='ffill', inplace=True)
+            test_df_to_transform.fillna(method='bfill', inplace=True)
+            if test_df_to_transform.isnull().values.any(): logger.warning(f"NaNs in test_df for transform after imputation. Columns: {test_df_to_transform.columns[test_df_to_transform.isnull().any()].tolist()}")
+            test_df[feature_columns_to_scale] = scaler.transform(test_df_to_transform)
+
+        logger.info("Global scaling applied successfully.")
+        return train_df, val_df, test_df
+
+    except Exception as e:
+        logger.error(f"ERREUR CRITIQUE lors de la préparation des données avec scaling global: {e}", exc_info=True)
+        # Fallback to returning unscaled data if scaling fails catastrophically
+        # Ensure original dfs are returned if they were loaded before error
+        try:
+            return train_df, val_df, test_df
+        except NameError: # If dfs were not even loaded
+             return pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
 
 
 def generate_synthetic_data(assets, num_points_per_asset=1000):

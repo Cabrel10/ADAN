@@ -184,57 +184,6 @@ def split_data_by_timeframe(df, config, timeframe):
     logger.info(f"📊 Split résultats: Train={len(train_df)}, Val={len(val_df)}, Test={len(test_df)}")
     return train_df, val_df, test_df
 
-def normalize_features(train_df, val_df, test_df, config):
-    """
-    Normalise les features (sauf OHLCV) avec StandardScaler pour un actif et timeframe spécifique.
-    Le scaler est ajusté UNIQUEMENT sur les données d'entraînement.
-    
-    Args:
-        train_df, val_df, test_df: DataFrames de données pour un actif/timeframe.
-        config: Configuration complète.
-        
-    Returns:
-        tuple: (train_norm_df, val_norm_df, test_norm_df, scaler)
-    """
-    from sklearn.preprocessing import StandardScaler
-    
-    logger.info(f"🔧 Normalisation des features...") # Timeframe/asset context will be in parent function log
-    
-    # Identifier les colonnes à normaliser (exclure OHLCV et colonnes non numériques)
-    # OHLCV columns for a single asset DataFrame are typically 'open', 'high', 'low', 'close', 'volume'
-    # We want to normalize volume, but not O H L C.
-    ohlc_cols = ['open', 'high', 'low', 'close']
-    
-    cols_to_normalize = []
-    for col in train_df.columns:
-        if train_df[col].dtype in ['object', 'string', 'datetime64[ns]']: # Ensure datetime columns are excluded
-            continue
-        if col in ohlc_cols: # Do not normalize O, H, L, C
-            continue
-        cols_to_normalize.append(col) # Normalize all other numeric columns (including volume and indicators)
-    
-    logger.info(f"📊 Colonnes à normaliser ({len(cols_to_normalize)}/{len(train_df.columns)}): {cols_to_normalize}")
-    
-    if not cols_to_normalize:
-        logger.warning("⚠️ Aucune colonne à normaliser")
-        return train_df, val_df, test_df, None
-    
-    # Créer et ajuster le scaler sur les données d'entraînement
-    scaler = StandardScaler()
-    scaler.fit(train_df[cols_to_normalize])
-    
-    # Appliquer la normalisation
-    train_norm = train_df.copy()
-    val_norm = val_df.copy()
-    test_norm = test_df.copy()
-    
-    train_norm[cols_to_normalize] = scaler.transform(train_df[cols_to_normalize])
-    val_norm[cols_to_normalize] = scaler.transform(val_df[cols_to_normalize])
-    test_norm[cols_to_normalize] = scaler.transform(test_df[cols_to_normalize])
-    
-    logger.info("✅ Normalisation terminée")
-    return train_norm, val_norm, test_norm, scaler
-
 def save_asset_data_split(df_split, split_name, asset, timeframe, asset_data_dir):
     """
     Sauvegarde un split de données (train, val, ou test) pour un actif et timeframe spécifique.
@@ -253,28 +202,6 @@ def save_asset_data_split(df_split, split_name, asset, timeframe, asset_data_dir
         logger.info(f"✅ Data split saved: {output_file} ({df_split.shape})")
     except Exception as e:
         logger.error(f"❌ Failed to save data split {output_file}: {e}")
-
-def save_scaler(scaler, asset, timeframe, asset_scalers_dir):
-    """
-    Sauvegarde le scaler ajusté pour un actif et timeframe spécifique.
-    
-    Args:
-        scaler: Scaler ajusté (objet scikit-learn).
-        asset: Nom de l'actif (ex: 'BTCUSDT').
-        timeframe: Timeframe traité (ex: '1h').
-        asset_scalers_dir: Chemin du répertoire où sauvegarder le scaler (Path object).
-                           Ex: data/scalers_encoders/BTCUSDT/
-    """
-    if scaler is not None:
-        scaler_file = asset_scalers_dir / f"{asset}_{timeframe}_scaler.joblib"
-        try:
-            import joblib
-            joblib.dump(scaler, scaler_file)
-            logger.info(f"✅ Scaler saved: {scaler_file}")
-        except Exception as e:
-            logger.error(f"❌ Failed to save scaler {scaler_file}: {e}")
-    else:
-        logger.warning(f"⚠️ Scaler for {asset} {timeframe} is None. Not saving.")
 
 def process_unified_pipeline(config, exec_profile):
     """
@@ -333,15 +260,21 @@ def process_unified_pipeline(config, exec_profile):
                     logger.warning(f"Train: {len(train_df)}, Val: {len(val_df)}, Test: {len(test_df)}")
                     continue
 
-                train_norm, val_norm, test_norm, scaler = normalize_features(train_df, val_df, test_df, config)
+                # Normalization is removed from this script. Saving raw (but feature-engineered) data.
+                # train_norm, val_norm, test_norm, scaler = normalize_features(train_df, val_df, test_df, config)
 
-                # Pass the new asset_specific_data_dir and asset_specific_scaler_dir
-                save_asset_data_split(train_norm, "train", asset, timeframe, asset_specific_data_dir)
-                save_asset_data_split(val_norm, "val", asset, timeframe, asset_specific_data_dir)
-                save_asset_data_split(test_norm, "test", asset, timeframe, asset_specific_data_dir)
-                save_scaler(scaler, asset, timeframe, asset_specific_scaler_dir)
+                logger.info(f"Skipping normalization for {asset} - {timeframe}. Saving data as is after feature engineering.")
 
-                logger.info(f"✅ Successfully processed and saved {asset} for {timeframe}")
+                # Pass the new asset_specific_data_dir
+                # Saving unnormalized data directly
+                save_asset_data_split(train_df, "train", asset, timeframe, asset_specific_data_dir)
+                save_asset_data_split(val_df, "val", asset, timeframe, asset_specific_data_dir)
+                save_asset_data_split(test_df, "test", asset, timeframe, asset_specific_data_dir)
+
+                # Scaler saving is removed
+                # save_scaler(scaler, asset, timeframe, asset_specific_scaler_dir)
+
+                logger.info(f"✅ Successfully processed and saved (unnormalized) {asset} for {timeframe}")
 
             except Exception as e:
                 logger.error(f"❌ Error processing {asset} for {timeframe}: {e}", exc_info=True)

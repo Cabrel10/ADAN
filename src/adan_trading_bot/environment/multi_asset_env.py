@@ -37,14 +37,15 @@ class MultiAssetEnv(gym.Env):
     
     metadata = {'render.modes': ['human']}
     
-    def __init__(self, df_received, config, scaler=None, encoder=None, max_episode_steps_override=None):
+    # scaler parameter removed from __init__ as StateBuilder now loads the global scaler
+    def __init__(self, df_received, config, encoder=None, max_episode_steps_override=None):
         """
         Initialize the trading environment.
         
         Args:
             df_received: DataFrame with market data.
             config: Configuration dictionary.
-            scaler: Optional pre-fitted scaler for market features.
+            # scaler: Optional pre-fitted scaler for market features. (Removed)
             encoder: Optional pre-fitted encoder for dimensionality reduction.
             max_episode_steps_override: Optional override for max episode steps.
         """
@@ -92,7 +93,7 @@ class MultiAssetEnv(gym.Env):
         else:
             logger.critical("MultiAssetEnv __init__ - ERREUR CRITIQUE - self.df APRÈS copie est vide ou None!")
         
-        self.scaler = scaler
+        # self.scaler = scaler # Scaler is no longer passed directly, StateBuilder handles global scaler
         self.encoder = encoder
         
         # Environment configuration
@@ -209,23 +210,28 @@ class MultiAssetEnv(gym.Env):
         logger.info(f"Base feature names: {self.base_feature_names}")
         
         # Initialize components
-        self.state_builder = StateBuilder(config, self.assets, scaler, encoder, 
+        # Scaler argument removed from StateBuilder instantiation
+        self.state_builder = StateBuilder(config, self.assets, encoder=encoder,
                                          base_feature_names=self.base_feature_names, 
                                          cnn_input_window_size=self.cnn_input_window_size)
-        self.order_manager = OrderManager(config)
+        self.order_manager = OrderManager(config) # OrderManager might also need config for fees, etc.
         self.reward_calculator = RewardCalculator(config)
         
         # Define action and observation spaces
         self.action_space = spaces.Discrete(1 + 2 * len(self.assets))  # HOLD + BUY/SELL for each asset
         
-        # Get observation space dimensions
+        # Get observation space dimensions FROM StateBuilder to ensure consistency
         obs_space_dims = self.state_builder.get_observation_space_dim()
-        
-        # Define observation space as a dictionary
+        self.image_shape = obs_space_dims["image_features"] # Update self.image_shape to be consistent
+        self.num_market_features_per_step = self.image_shape[2] # Update num_market_features_per_step based on actual width
+        logger.info(f"Updated self.image_shape from StateBuilder: {self.image_shape}")
+        logger.info(f"Updated self.num_market_features_per_step from StateBuilder: {self.num_market_features_per_step}")
+
+        # Define observation space as a dictionary using the consistent image_shape
         self.observation_space = spaces.Dict({
             "image_features": spaces.Box(
                 low=-np.inf, high=np.inf, 
-                shape=obs_space_dims["image_features"], 
+                shape=self.image_shape, # Use the updated self.image_shape
                 dtype=np.float32
             ),
             "vector_features": spaces.Box(
@@ -502,10 +508,11 @@ class MultiAssetEnv(gym.Env):
         
         # Build observation using state builder
         observation = self.state_builder.build_observation(
-            market_data_window, 
-            self.capital, 
-            self.positions,
-            self.image_shape
+            market_data_window=market_data_window,
+            capital=self.capital,
+            positions=self.positions,
+            image_shape=self.image_shape, # Pass the consistent image_shape
+            apply_scaling=False # Data from data_loader is already scaled
         )
         
         return observation

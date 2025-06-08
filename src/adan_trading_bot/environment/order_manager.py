@@ -411,34 +411,52 @@ class OrderManager:
                     }
                 
                 # Update or create position
+                cost_of_this_buy = quantity * abs(current_price)
+
                 if asset_id in positions:
-                    # Update existing position (average down)
+                    # Update existing position
                     old_qty = positions[asset_id]["qty"]
-                    old_price = positions[asset_id]["price"]
-                    new_qty = old_qty + quantity
+                    # Ensure 'avg_price' and 'total_cost_basis' exist, provide defaults if from older state
+                    old_avg_price = positions[asset_id].get("avg_price", positions[asset_id].get("price", 0)) # Fallback to "price" for compatibility
+                    old_total_cost_basis = positions[asset_id].get("total_cost_basis", old_qty * abs(old_avg_price))
                     
-                    if new_qty <= old_qty:
-                        logger.error(f"🚨 BUY {asset_id}: Qty calc error")
+                    new_total_qty = old_qty + quantity
+                    new_total_cost_basis = old_total_cost_basis + cost_of_this_buy
                     
-                    total_old_cost = old_qty * abs(old_price)
-                    total_new_cost = quantity * abs(current_price)
-                    weighted_avg_abs_price = (total_old_cost + total_new_cost) / new_qty
-                    
-                    positions[asset_id] = {"qty": new_qty, "price": current_price}
-                    logger.info(f"📈 BUY {asset_id}: qty {old_qty:.3f}→{new_qty:.3f}, avg${weighted_avg_abs_price:.4f}")
+                    new_avg_price = 0
+                    if new_total_qty > 1e-9:
+                        new_avg_price = new_total_cost_basis / new_total_qty
+                    else: # Should not happen if quantity > 0
+                        new_total_qty = 0
+                        new_total_cost_basis = 0 # Reset cost basis if qty is zero
+
+                    positions[asset_id]["qty"] = new_total_qty
+                    positions[asset_id]["total_cost_basis"] = new_total_cost_basis
+                    positions[asset_id]["avg_price"] = new_avg_price
+                    # Remove old "price" key if it exists
+                    if "price" in positions[asset_id] and "avg_price" != "price":
+                        del positions[asset_id]["price"]
+
+                    logger.info(f"📈 BUY (update) {asset_id}: qty {old_qty:.3f}→{new_total_qty:.3f}, new avg_price ${new_avg_price:.4f}")
                 else:
+                    # Create new position
                     if quantity <= 0:
-                        logger.error(f"🚨 BUY {asset_id}: Invalid qty {quantity:.6f}")
+                        logger.error(f"🚨 BUY (new) {asset_id}: Invalid qty {quantity:.6f}")
                         return self.penalty_invalid_order_base, "INVALID_QUANTITY", {
-                            "reason": f"Quantité invalide: {quantity:.6f}",
+                            "reason": f"Quantité invalide pour nouvelle position: {quantity:.6f}",
                             "reward_mod": self.penalty_invalid_order_base,
                             "new_capital": capital
                         }
-                    positions[asset_id] = {"qty": quantity, "price": current_price}
-                    logger.info(f"📈 NEW {asset_id}: qty={quantity:.6f}, price=${current_price:.6f}")
+                    positions[asset_id] = {
+                        "qty": quantity,
+                        "total_cost_basis": cost_of_this_buy,
+                        "avg_price": abs(current_price) # For a new position, avg_price is current_price
+                    }
+                    logger.info(f"📈 BUY (new) {asset_id}: qty={quantity:.6f}, avg_price=${abs(current_price):.6f}")
                 
-                if positions[asset_id]["qty"] <= 0:
-                    logger.error(f"🚨 CRITICAL: Invalid position after BUY {asset_id}")
+                # Validate position quantity
+                if positions[asset_id]["qty"] <= 1e-9: # Use a small epsilon for float comparison
+                    logger.error(f"🚨 CRITICAL: Invalid or zero quantity position after BUY for {asset_id}: {positions[asset_id]['qty']:.8f}")
                     if asset_id in positions:
                         del positions[asset_id]
                     return self.penalty_invalid_order_base, "INVALID_POSITION_STATE", {
@@ -482,11 +500,17 @@ class OrderManager:
                         "new_capital": capital
                     }
                 
-                entry_price = positions[asset_id]["price"]
-                
-                gross_proceeds = quantity_to_sell * abs(current_price)
+                # Use avg_price for P&L calculation
+                avg_entry_price = positions[asset_id].get("avg_price", positions[asset_id].get("price", 0)) # Fallback for older states
+                if avg_entry_price == 0 and positions[asset_id]["qty"] > 1e-9 : # Should not happen if correctly managed
+                     logger.error(f"CRITICAL: avg_entry_price is 0 for {asset_id} with qty {positions[asset_id]['qty']}. P&L will be incorrect.")
+
+
+                gross_proceeds = quantity_to_sell * abs(current_price) # Sale happens at current market price (absolute)
                 net_proceeds = gross_proceeds - fee
-                pnl = (current_price - entry_price) * quantity_to_sell - fee
+
+                # P&L = (Sell Price - Avg Buy Price) * Quantity - Fee
+                pnl = (abs(current_price) - avg_entry_price) * quantity_to_sell - fee
                 new_capital = capital + net_proceeds
                 
                 if new_capital < 0 and capital >= 0:
@@ -719,22 +743,39 @@ class OrderManager:
                     # Update capital
                     new_capital = capital - total_cost
                     
-                    # Add position - stocke le prix normalisé original comme prix d'entrée
+                    # Add position
+                    cost_of_this_buy_pending = quantity * abs(current_price)
+
                     if asset_id in updated_positions:
                         # Update existing position
                         old_qty = updated_positions[asset_id]["qty"]
-                        old_price = updated_positions[asset_id]["price"]
+                        old_avg_price = updated_positions[asset_id].get("avg_price", updated_positions[asset_id].get("price", 0))
+                        old_total_cost_basis = updated_positions[asset_id].get("total_cost_basis", old_qty * abs(old_avg_price))
+
                         new_qty = old_qty + quantity
+                        new_total_cost_basis = old_total_cost_basis + cost_of_this_buy_pending
                         
-                        # Calculate new average price
-                        new_price = (old_qty * old_price + quantity * current_price) / new_qty
-                        updated_positions[asset_id] = {"qty": new_qty, "price": new_price, "value": abs(order_value)}
+                        new_avg_price = 0
+                        if new_qty > 1e-9:
+                            new_avg_price = new_total_cost_basis / new_qty
+                        else:
+                            new_qty = 0
+                            new_total_cost_basis = 0
+
+                        updated_positions[asset_id]["qty"] = new_qty
+                        updated_positions[asset_id]["total_cost_basis"] = new_total_cost_basis
+                        updated_positions[asset_id]["avg_price"] = new_avg_price
+                        if "price" in updated_positions[asset_id] and "avg_price" != "price":
+                             del updated_positions[asset_id]["price"]
+                        # 'value' key seems to be informational, not used for P&L, keep if needed or remove
+                        updated_positions[asset_id]["value"] = abs(order_value) # Or quantity * new_avg_price if that's more relevant
                     else:
                         # Create new position
                         updated_positions[asset_id] = {
                             "qty": quantity,
-                            "price": current_price,  # Prix normalisé original (peut être négatif)
-                            "value": abs(order_value)  # Valeur positive basée sur abs(price)
+                            "total_cost_basis": cost_of_this_buy_pending,
+                            "avg_price": abs(current_price),
+                            "value": abs(order_value)
                         }
                     
                     # Add to executed orders info
@@ -760,16 +801,21 @@ class OrderManager:
                     if updated_positions[asset_id]["qty"] < quantity:
                         # Adjust quantity
                         quantity = updated_positions[asset_id]["qty"]
-                        order_value = quantity * current_price
-                        fee = self._calculate_fee(order_value)
+                        order_value = quantity * abs(current_price) # Use abs for value calculation
+                        fee = self._calculate_fee(order_value) # fee calc needs positive amount
+
+                    # Use avg_price from the current state of updated_positions for this asset
+                    avg_entry_price_pending = updated_positions[asset_id].get("avg_price", updated_positions[asset_id].get("price", 0))
+                    if avg_entry_price_pending == 0 and updated_positions[asset_id]["qty"] > 1e-9:
+                        logger.error(f"CRITICAL (pending): avg_entry_price is 0 for {asset_id}. P&L will be incorrect.")
+
+                    # P&L = (Sell Price - Avg Buy Price) * Quantity - Fee
+                    pnl = (abs(current_price) - avg_entry_price_pending) * quantity - fee
                     
-                    entry_price = positions[asset_id]["price"]
-                    # Pour le calcul du PnL, utiliser les prix réels (normalisés)
-                    # Le PnL est la différence entre le prix de vente et le prix d'achat, multiplié par la quantité, moins les frais
-                    pnl = (current_price - entry_price) * quantity - fee
-                    # Pour le calcul du capital, utiliser la valeur absolue du prix pour garantir un calcul cohérent
-                    order_value_abs = quantity * abs(current_price)
-                    new_capital = capital + order_value_abs - fee
+                    # Proceeds are based on current market price
+                    gross_proceeds_pending = quantity * abs(current_price)
+                    net_proceeds_pending = gross_proceeds_pending - fee
+                    new_capital = capital + net_proceeds_pending # new_capital was correctly 'capital' not 'new_capital' from BUY block
                     
                     # Update position
                     if updated_positions[asset_id]["qty"] <= quantity:

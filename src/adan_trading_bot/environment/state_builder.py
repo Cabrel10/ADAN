@@ -3,6 +3,9 @@ State builder for the ADAN trading environment.
 """
 import numpy as np
 import pandas as pd
+import joblib
+from pathlib import Path
+import json # Added
 from ..common.utils import get_logger
 
 logger = get_logger()
@@ -12,24 +15,96 @@ class StateBuilder:
     Builds observation states for the RL agent based on market data and portfolio state.
     """
     
-    def __init__(self, config, assets, scaler=None, encoder=None, base_feature_names=None, cnn_input_window_size=None):
+    def __init__(self, config, assets, encoder=None, base_feature_names=None, cnn_input_window_size=None): # Removed scaler
         """
         Initialize the state builder.
         
         Args:
             config: Configuration dictionary.
             assets: List of asset symbols.
-            scaler: Optional pre-fitted scaler for market features.
+            # scaler: Optional pre-fitted scaler for market features. (Removed)
             encoder: Optional pre-fitted encoder for dimensionality reduction.
             base_feature_names: List of base feature names to use for the CNN image.
             cnn_input_window_size: Size of the window for CNN input.
         """
         self.config = config
         self.assets = assets
-        self.scaler = scaler
+        # self.scaler = scaler # Removed
         self.encoder = encoder
         self.initial_capital = config.get('environment', {}).get('initial_capital', 10000.0)
+
+        self.global_scaler = None # Initialize
+        timeframe = self.config.get('data', {}).get('training_timeframe', '1h') # Default or from config
+
+        # Construct path to scaler
+        # Use project_root from config if available, otherwise assume relative path for data
+        project_root_str = self.config.get('paths', {}).get('base_project_dir_local', '.')
+        scalers_encoders_path_str = self.config.get('paths', {}).get('scalers_encoders_dir', 'data/scalers_encoders')
+
+        # Ensure scalers_encoders_path_str is treated as relative to project_root if not absolute
+        scaler_base_path = Path(scalers_encoders_path_str)
+        if not scaler_base_path.is_absolute():
+            scaler_base_path = Path(project_root_str) / scalers_encoders_path_str
+
+        scaler_path = scaler_base_path / f'global_scaler_{timeframe}.joblib'
         
+        if scaler_path.exists():
+            try:
+                self.global_scaler = joblib.load(scaler_path)
+                logger.info(f"StateBuilder loaded global scaler from {scaler_path}")
+            except Exception as e:
+                logger.error(f"StateBuilder failed to load global scaler from {scaler_path}: {e}. Scaling will be skipped.")
+                self.global_scaler = None
+        else:
+            logger.warning(f"StateBuilder: Global scaler not found at {scaler_path}. Market features will not be scaled by StateBuilder.")
+
+        self.global_scaler_feature_order = None
+        if self.global_scaler: # Only try to load feature order if scaler was loaded
+            feature_order_filename = f'global_scaler_{timeframe}_feature_order.json'
+            # scaler_path is already defined and is a Path object
+            feature_order_path = scaler_path.parent / feature_order_filename
+
+            if feature_order_path.exists():
+                try:
+                    with open(feature_order_path, 'r') as f:
+                        self.global_scaler_feature_order = json.load(f)
+                    logger.info(f"StateBuilder loaded global scaler feature order ({len(self.global_scaler_feature_order)} features) from {feature_order_path}")
+                except Exception as e:
+                    logger.error(f"StateBuilder failed to load global scaler feature order from {feature_order_path}: {e}. Will rely on fallback order if scaling.")
+                    self.global_scaler_feature_order = None # Ensure it's None on failure
+            else:
+                logger.warning(f"StateBuilder: Global scaler feature order file not found at {feature_order_path}. Relying on fallback order if scaling.")
+
+        # Get the list of base market features to use (needed for fallback order construction)
+        if base_feature_names is not None:
+            self.base_feature_names = base_feature_names
+            # logger.debug(f"📊 Features from param: {len(self.base_feature_names)}") # Already logged if base_feature_names is None path taken before
+        else:
+            self.base_feature_names = config.get('data', {}).get('base_market_features',
+                                                          ['open', 'high', 'low', 'close', 'volume', 'macd'])
+            # logger.debug(f"📊 Features from config: {len(self.base_feature_names)}")
+
+        # If global_scaler_feature_order could not be loaded, create a canonical fallback order.
+        # This order is crucial for determining the shape of the image tensor and for iterating
+        # through features if the .json list is missing.
+        # The actual application of the scaler should ideally ONLY happen if self.global_scaler_feature_order is present.
+        self.canonical_fallback_feature_order = []
+        for asset_item in self.assets: # Iterate assets first
+            for base_feature_item in self.base_feature_names: # Then features
+                # This constructs feature names like open_ADAUSDT, rsi_1h_ADAUSDT etc.
+                # This is one possible way to order them if the JSON is missing.
+                # Note: This order (AssetMajor then FeatureMajor) is DIFFERENT from what the global scaler likely expects
+                # (which is often FeatureMajor then AssetMajor from DataFrame column order).
+                # This fallback is primarily for defining the shape if JSON is missing, not for guaranteeing correct scaling.
+                self.canonical_fallback_feature_order.append(f"{base_feature_item}_{asset_item}")
+
+        if not self.global_scaler_feature_order:
+            logger.warning(f"StateBuilder: Using a fallback canonical feature order of {len(self.canonical_fallback_feature_order)} features. If global_scaler is present and used, this fallback order might lead to incorrect scaling due to feature order mismatch.")
+        else:
+            logger.info(f"StateBuilder: Will use loaded global_scaler_feature_order for constructing market image if applicable.")
+            if len(self.global_scaler_feature_order) != len(self.canonical_fallback_feature_order):
+                logger.warning(f"Mismatch in length between loaded feature order ({len(self.global_scaler_feature_order)}) and fallback order ({len(self.canonical_fallback_feature_order)}). This could indicate issues if fallback is ever used with scaler.")
+
         # Log encoder status
         encoder_status = "🔧 Enabled" if self.encoder is not None else "❌ Disabled"
         logger.info(f"🧠 Auto-encoder: {encoder_status}")
@@ -77,7 +152,8 @@ class StateBuilder:
             dict: Observation dictionary with 'image_features' and 'vector_features'.
         """
         # Extract market features as image
-        image_features = self._get_market_features_as_image(market_data_window, image_shape)
+        # Pass apply_scaling parameter
+        image_features = self._get_market_features_as_image(market_data_window, image_shape, apply_scaling=apply_scaling)
         
         # Calculate portfolio features
         portfolio_features = self._get_portfolio_features(capital, positions)
@@ -101,7 +177,7 @@ class StateBuilder:
         Returns:
             numpy.ndarray: Image tensor with market features.
         """
-        logger.debug(f"🔍 Extract: {market_data_window.shape}, {len(self.base_feature_names)}×{len(self.assets)} features")
+        logger.debug(f"🔍 Extract: {market_data_window.shape}, {len(self.base_feature_names)}×{len(self.assets)} features, ApplyScaling: {apply_scaling}")
         
         # Determine image shape
         if image_shape is None:
@@ -111,97 +187,95 @@ class StateBuilder:
                 window_size = self.config.get('data', {}).get('cnn_input_window_size', 20)
                 self.cnn_input_window_size = window_size
             
-            num_features = len(self.base_feature_names) * len(self.assets)
-            image_shape = (num_channels, window_size, num_features)
-        else:
-            num_channels, window_size, num_features = image_shape
-        
-        logger.debug(f"🖼️ Shape: {image_shape}, timesteps: {len(market_data_window)}")
-        
-        # Check if market_data_window is a DataFrame
-        if isinstance(market_data_window, pd.DataFrame):
-            # Initialize image tensor
-            image_tensor = np.zeros((window_size, num_features), dtype=np.float32)
+            # Determine the order of features for the image tensor
+            feature_order_to_use = self.global_scaler_feature_order if self.global_scaler_feature_order else self.canonical_fallback_feature_order
             
-            # Determine actual window size (may be smaller than requested at the start of an episode)
+            if not feature_order_to_use:
+                logger.error("StateBuilder: No feature order defined (neither from JSON nor fallback). Cannot build image tensor.")
+                # Return a zero tensor with a guess for shape or a predefined error shape
+                num_fallback_features = len(self.base_feature_names) * len(self.assets) if self.base_feature_names and self.assets else 1
+                return np.zeros((num_channels if image_shape else 1,
+                                 window_size if image_shape else self.cnn_input_window_size,
+                                 num_fallback_features), dtype=np.float32)
+
+            num_image_columns = len(feature_order_to_use)
+
+            # Update image_shape's width if it was passed in and mismatches, or log
+            if image_shape is not None and image_shape[2] != num_image_columns:
+                logger.warning(f"StateBuilder: image_shape parameter width {image_shape[2]} mismatches determined feature order width {num_image_columns}. Using {num_image_columns}.")
+                num_features = num_image_columns # Correct num_features based on the order to be used
+            elif image_shape is None:
+                num_features = num_image_columns # num_features now reflects the actual columns we'll build
+            # else image_shape[2] == num_image_columns, so num_features is already correct.
+
+            # Initialize image tensor
+            image_tensor = np.zeros((window_size, num_image_columns), dtype=np.float32)
             actual_window_size = min(len(market_data_window), window_size)
             padding_offset = window_size - actual_window_size
             
-            # Track found and missing features for debugging
-            found_features = []
-            missing_features = []
+            missing_critical_features_count = 0
+            for idx, full_col_name in enumerate(feature_order_to_use):
+                if full_col_name in market_data_window.columns:
+                    feature_values = market_data_window[full_col_name].values[-actual_window_size:]
+                    image_tensor[padding_offset:, idx] = np.asarray(feature_values, dtype=np.float32)
+                else:
+                    image_tensor[padding_offset:, idx] = np.full(actual_window_size, np.nan, dtype=np.float32)
+                    logger.warning(f"StateBuilder: Feature '{full_col_name}' from feature_order not found in market_data_window. Filled with NaN.")
+                    missing_critical_features_count +=1
             
-            # Extract features for each asset and each base feature
-            feature_idx = 0
-            for asset in self.assets:
-                for base_feature in self.base_feature_names:
-                    if feature_idx >= num_features:
-                        break
-                    
-                    # Try multiple column formats
-                    column_found = False
-                    column_to_find = None
-                    
-                    # Get timeframe from config
-                    timeframe = self.config.get('data', {}).get('training_timeframe', '1m')
-                    
-                    # Pattern 1: {base_feature}_{asset}
-                    pattern1 = f"{base_feature}_{asset}"
-                    # Pattern 2: {base_feature}_{timeframe}_{asset}
-                    pattern2 = f"{base_feature}_{timeframe}_{asset}"
-                    
-                    if pattern1 in market_data_window.columns:
-                        column_to_find = pattern1
-                        column_found = True
-                    elif pattern2 in market_data_window.columns:
-                        column_to_find = pattern2
-                        column_found = True
-                    
-                    if column_found:
-                        # Extract values from the last actual_window_size timesteps
-                        feature_values = market_data_window[column_to_find].values[-actual_window_size:]
-                        # Place values in the image with padding at the beginning
-                        image_tensor[padding_offset:, feature_idx] = np.asarray(feature_values, dtype=np.float32)
-                        found_features.append(column_to_find)
-                    else:
-                        # Feature not found - erreur critique
-                        if len(missing_features) == 0:  # Log available columns only once
-                            logger.error(f"❌ Feature '{pattern1}' or '{pattern2}' not found!")
-                            logger.error(f"📋 Available columns: {market_data_window.columns.tolist()[:20]}")
-                        
-                        # Fill with NaN - pas de fallback
-                        image_tensor[padding_offset:, feature_idx] = np.full(actual_window_size, np.nan, dtype=np.float32)
-                        missing_features.append(f"{pattern1}/{pattern2}")
-                    
-                    feature_idx += 1
-                
-                if feature_idx >= num_features:
-                    break
-            
-            # Log results
-            if missing_features:
-                logger.error(f"❌ Missing: {len(missing_features)}/{num_features} features - {missing_features[:3]}...")
-            else:
-                logger.debug(f"✅ All {len(found_features)} features found")
-        else:
+            if missing_critical_features_count > 0:
+                logger.error(f"StateBuilder: {missing_critical_features_count} features from the defined order were NOT FOUND in market_data_window.")
+
+        else: # market_data_window is not a DataFrame
             logger.error(f"❌ Unexpected type for market_data_window: {type(market_data_window)}")
-            image_tensor = np.zeros((window_size, num_features), dtype=np.float32)
-        
-        # Apply scaler if available
-        if self.scaler is not None:
-            try:
-                # Reshape for scaling each time step
-                original_shape = image_tensor.shape
-                reshaped = image_tensor.reshape(-1, num_features)
-                scaled = self.scaler.transform(reshaped)
-                image_tensor = scaled.reshape(original_shape)
-            except Exception as e:
-                logger.error(f"❌ Scaler error: {e}")
-                # Continue with unscaled data
-        
-        # Reshape to include channel dimension if needed
-        if num_channels == 1:
-            image_tensor = image_tensor.reshape(1, window_size, num_features)
+            # Determine num_image_columns for zero tensor based on available feature order
+            feature_order_to_use = self.global_scaler_feature_order if self.global_scaler_feature_order else self.canonical_fallback_feature_order
+            num_image_columns = len(feature_order_to_use) if feature_order_to_use else (len(self.base_feature_names) * len(self.assets) if self.base_feature_names and self.assets else 1)
+            image_tensor = np.zeros((window_size, num_image_columns), dtype=np.float32)
+
+        # Impute NaNs (e.g., from missing columns or original data) BEFORE potentially scaling
+        if np.isnan(image_tensor).any():
+            logger.warning("StateBuilder: NaN values found in image_tensor before scaling (e.g. missing features). Imputing with 0.")
+            image_tensor = np.nan_to_num(image_tensor, nan=0.0, posinf=1e6, neginf=-1e6)
+
+        # Apply global scaler if available and requested
+        if apply_scaling:
+            if self.global_scaler is not None:
+                if self.global_scaler_feature_order is None:
+                    # This case means we loaded a scaler but not its feature order. Scaling here is highly risky.
+                    logger.error("StateBuilder: Attempting to apply global_scaler, but its feature order JSON was not loaded. Scaling with potentially misaligned features based on canonical_fallback_feature_order. THIS IS RISKY.")
+                # Check if the image_tensor width matches the scaler's expected features
+                # The number of features the scaler was fit on is implicitly len(self.global_scaler_feature_order) if loaded,
+                # or for the fallback, it's len(self.canonical_fallback_feature_order).
+                # The image_tensor was built using one of these, so its width image_tensor.shape[1] should match.
+
+                expected_scaler_features = 0
+                if self.global_scaler_feature_order:
+                    expected_scaler_features = len(self.global_scaler_feature_order)
+                elif hasattr(self.global_scaler, 'n_features_in_'): # Scikit-learn scalers
+                    expected_scaler_features = self.global_scaler.n_features_in_
+
+                if expected_scaler_features > 0 and image_tensor.shape[1] != expected_scaler_features :
+                     logger.error(f"StateBuilder: Shape mismatch for scaling. Image tensor has {image_tensor.shape[1]} features, but global_scaler was expecting {expected_scaler_features} (based on feature_order list or scaler attribute). Scaling skipped.")
+                else:
+                    try:
+                        image_tensor = self.global_scaler.transform(image_tensor) # image_tensor is (window_size, num_features)
+                        logger.debug("StateBuilder: Global scaler applied to market features.")
+                    except Exception as e:
+                        logger.error(f"StateBuilder: Error applying global_scaler: {e}. Features remain unscaled or partially scaled.")
+            else: # self.global_scaler is None
+                logger.warning("StateBuilder: 'apply_scaling' is True, but no global_scaler loaded. Features will not be scaled by StateBuilder.")
+        else: # apply_scaling is False
+            logger.info("StateBuilder: apply_scaling is False. Market features will not be scaled by StateBuilder.")
+
+        # Reshape to include channel dimension (1, window_size, num_image_columns)
+        # num_features here should be num_image_columns now
+        if image_shape is None: # If original image_shape was None, use the determined num_image_columns
+            final_image_shape_width = image_tensor.shape[1]
+        else: # If image_shape was provided, its width might have been adjusted if feature_order_to_use changed it
+            final_image_shape_width = num_features # num_features was updated if image_shape's width mismatched feature_order_to_use
+
+        image_tensor = image_tensor.reshape(num_channels, window_size, final_image_shape_width)
         
         return image_tensor
         
@@ -336,8 +410,17 @@ class StateBuilder:
         logger.info(f"Base feature names ({len(self.base_feature_names)}): {self.base_feature_names}")
         logger.debug(f"Assets ({len(self.assets)}): {self.assets}")
         
-        # Calculer le nombre de features par pas de temps
-        num_features_per_step = len(self.base_feature_names) * len(self.assets)
+        # Calculer le nombre de features par pas de temps based on the determined feature order
+        if self.global_scaler_feature_order:
+            num_features_per_step = len(self.global_scaler_feature_order)
+            logger.info(f"Observation space width based on global_scaler_feature_order: {num_features_per_step}")
+        elif hasattr(self, 'canonical_fallback_feature_order') and self.canonical_fallback_feature_order:
+            num_features_per_step = len(self.canonical_fallback_feature_order)
+            logger.info(f"Observation space width based on canonical_fallback_feature_order: {num_features_per_step}")
+        else:
+            # This case should ideally not be reached if __init__ always sets one of the orders.
+            logger.warning("StateBuilder.get_observation_space_dim: Feature order not determined. Using default calculation (base_feature_names * assets).")
+            num_features_per_step = len(self.base_feature_names) * len(self.assets)
         
         # Définir la forme du tenseur d'image
         image_shape = (num_channels, window_size, num_features_per_step)
