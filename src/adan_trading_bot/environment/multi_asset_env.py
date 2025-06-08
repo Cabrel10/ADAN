@@ -153,22 +153,50 @@ class MultiAssetEnv(gym.Env):
         
         # Get training timeframe
         self.training_timeframe = data_config.get('training_timeframe', '1h')
-        logger.info(f"Training timeframe: {self.training_timeframe}")
+        logger.info(f"Training timeframe set to: {self.training_timeframe}")
         
-        # Get base market features
-        self.base_feature_names = data_config.get('base_market_features', 
-                                                 ['open', 'high', 'low', 'close', 'volume', 'macd'])
-        
-        # Log des noms de base des features pour le diagnostic
-        logger.info(f"Base feature names from config: {self.base_feature_names}")
-        
-        # Stockage de la configuration des indicateurs par timeframe pour référence future
-        # mais nous utilisons directement base_market_features comme source de vérité
-        self.indicators_by_timeframe = data_config.get('indicators_by_timeframe', {})
-        
-        # Note: Les indicateurs spécifiques au timeframe sont maintenant directement inclus
-        # dans base_market_features dans le fichier de configuration data_config_{profile}.yaml
-        # et n'ont plus besoin d'être ajoutés dynamiquement ici
+        # Dynamically build base_feature_names
+        current_base_features_per_asset = []
+        logger.info(f"Determining base features for training timeframe: {self.training_timeframe}...")
+
+        if self.training_timeframe == '1m':
+            base_1m_features = data_config.get('base_market_features', ['open', 'high', 'low', 'close', 'volume'])
+            current_base_features_per_asset.extend(base_1m_features)
+            logger.info(f"For 1m timeframe, using 'base_market_features' from config: {base_1m_features}")
+        else: # For '1h' or '1d'
+            current_base_features_per_asset.extend(['open', 'high', 'low', 'close', 'volume'])
+            logger.info(f"Base OHLCV features for {self.training_timeframe}: {['open', 'high', 'low', 'close', 'volume']}")
+
+            # Fetching indicators_by_timeframe from the root of the config object (self.config)
+            # This aligns with how convert_real_data.py accesses it.
+            indicators_config_for_timeframe = self.config.get('indicators_by_timeframe', {}).get(self.training_timeframe, [])
+
+            if indicators_config_for_timeframe:
+                logger.info(f"Found {len(indicators_config_for_timeframe)} indicator configurations for {self.training_timeframe} from self.config.")
+                for indicator_spec in indicators_config_for_timeframe:
+                    # Use 'alias' if available, otherwise 'name'. 'output_col_name' or 'output_col_names' from feature_engineer.py seems more robust
+                    # For consistency with feature_engineer.py, let's try to use 'output_col_name' or first of 'output_col_names'
+                    indicator_base_name = None
+                    if 'output_col_name' in indicator_spec:
+                        indicator_base_name = indicator_spec['output_col_name']
+                    elif 'output_col_names' in indicator_spec and isinstance(indicator_spec['output_col_names'], list) and indicator_spec['output_col_names']:
+                        indicator_base_name = indicator_spec['output_col_names'][0] # Take the first one
+                    elif 'alias' in indicator_spec: # Fallback to alias
+                         indicator_base_name = indicator_spec['alias']
+                    elif 'name' in indicator_spec: # Fallback to name
+                         indicator_base_name = indicator_spec['name']
+
+                    if indicator_base_name:
+                        feature_name_with_suffix = f"{indicator_base_name}_{self.training_timeframe}"
+                        current_base_features_per_asset.append(feature_name_with_suffix)
+                        logger.debug(f"Added indicator feature: {feature_name_with_suffix}")
+                    else:
+                        logger.warning(f"Could not determine base name for indicator spec: {indicator_spec}")
+            else:
+                logger.info(f"No specific indicator configurations found for {self.training_timeframe} in data_config['indicators_by_timeframe']. Only OHLCV will be used.")
+
+        self.base_feature_names = list(dict.fromkeys(current_base_features_per_asset)) # Remove duplicates while preserving order
+        logger.info(f"Dynamically determined base_feature_names for {self.training_timeframe}: {self.base_feature_names}")
         
         # Determine the number of market features per step
         self.num_market_features_per_step = len(self.base_feature_names) * len(self.assets)

@@ -303,13 +303,13 @@ def load_merged_data(config, split_type='train'):
     # Nouveau: Support des lots de données
     lot_id = data_cfg.get('lot_id', None)
 
-    # 3. Construire le chemin vers le répertoire 'merged' avec support des lots
+    # 3. Construire le chemin vers le répertoire 'merged/unified' avec support des lots
+    unified_segment = 'unified'
     if lot_id:
-        merged_dir = os.path.join(project_root, data_dir_name, processed_dir_name, 'merged', lot_id)
+        merged_dir = os.path.join(project_root, data_dir_name, processed_dir_name, 'merged', lot_id, unified_segment)
     else:
-        # Fallback pour compatibilité avec l'ancien système
-        merged_dir = os.path.join(project_root, data_dir_name, processed_dir_name, 'merged')
-    logger.info(f"load_merged_data: Chemin construit pour le répertoire merged: {merged_dir}")
+        merged_dir = os.path.join(project_root, data_dir_name, processed_dir_name, 'merged', unified_segment)
+    logger.info(f"load_merged_data: Chemin construit pour le répertoire merged/unified: {merged_dir}")
 
     if not os.path.isdir(merged_dir):
         logger.error(f"load_merged_data: ERREUR CRITIQUE - Répertoire des données fusionnées introuvable : {merged_dir}")

@@ -63,21 +63,28 @@ def get_processed_data_paths(main_config, data_config):
     data_dir = os.path.join(project_dir, main_config.get('paths', {}).get('data_dir_name', 'data'))
     base_processed_dir = os.path.join(data_dir, data_config.get('processed_data_dir', 'processed'))
     
-    # Support des lots de données - appliquer lot_id AUSSI aux données source
+    # Support des lots de données
     lot_id = data_config.get('lot_id', None)
+    unified_segment = 'unified'
+
+    # Source directory for individual asset files (output of convert_real_data.py)
+    # This path should consistently point to where convert_real_data.py saves its files.
+    # Based on convert_real_data.py, files are in data/processed/unified/{ASSET}/...
+    processed_dir = os.path.join(base_processed_dir, unified_segment)
+    logger.info(f"Répertoire source des données par actif (issues de convert_real_data.py): {processed_dir}")
+
+    # Target directory for merged files
     if lot_id:
-        processed_dir = os.path.join(base_processed_dir, lot_id)
-        merged_dir = os.path.join(base_processed_dir, 'merged', lot_id)
-        logger.info(f"Utilisation du lot de données: {lot_id}")
-        logger.info(f"Répertoire des données traitées source: {processed_dir}")
+        merged_dir = os.path.join(base_processed_dir, 'merged', lot_id, unified_segment)
+        logger.info(f"Utilisation du lot de données pour la sortie fusionnée: {lot_id}")
     else:
-        processed_dir = base_processed_dir
-        merged_dir = os.path.join(base_processed_dir, 'merged')
-        logger.info(f"Répertoire des données traitées: {processed_dir}")
+        merged_dir = os.path.join(base_processed_dir, 'merged', unified_segment)
     
+    logger.info(f"Répertoire cible pour les données fusionnées: {merged_dir}")
+
     # Créer le répertoire pour les données fusionnées s'il n'existe pas
     ensure_dir_exists(merged_dir)
-    logger.info(f"Répertoire des données fusionnées: {merged_dir}")
+    # logger.info(f"Répertoire des données fusionnées: {merged_dir}") # Duplicate log line
     
     # Obtenir la liste des actifs et timeframes
     assets = data_config.get('assets', [])

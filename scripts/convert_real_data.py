@@ -93,9 +93,26 @@ def process_asset_for_timeframe(asset, timeframe, config):
             logger.info(f"🗑️ Colonne {col} supprimée")
     
     if timeframe == '1m':
-        # Pour 1m, utiliser les données avec toutes les features pré-calculées
-        logger.info(f"✅ Utilisation des features pré-calculées (1m)")
-        return df
+        # Pour 1m, utiliser les features spécifiées dans base_market_features
+        base_features = config.get('data', {}).get('base_market_features', [])
+        if not base_features:
+            logger.warning("⚠️ 'base_market_features' non défini dans la config. Utilisation de toutes les colonnes.")
+            selected_df = df
+        else:
+            # S'assurer que les colonnes OHLCV de base sont incluses si elles ne sont pas déjà dans base_features
+            ohlcv_base = ['open', 'high', 'low', 'close', 'volume']
+            for col in ohlcv_base:
+                if col not in base_features and col in df.columns:
+                    base_features.append(col)
+
+            missing_cols = [col for col in base_features if col not in df.columns]
+            if missing_cols:
+                logger.warning(f"⚠️ Colonnes manquantes dans le df pour 1m: {missing_cols}. Elles seront ignorées.")
+
+            final_features_1m = [col for col in base_features if col in df.columns]
+            selected_df = df[final_features_1m]
+            logger.info(f"✅ Sélection des {len(final_features_1m)} features pré-calculées pour 1m: {final_features_1m}")
+        return selected_df
     
     else:
         # Pour 1h/1d, ré-échantillonner et recalculer les indicateurs
@@ -124,64 +141,6 @@ def process_asset_for_timeframe(asset, timeframe, config):
         else:
             logger.warning(f"⚠️ Aucun indicateur configuré pour {timeframe}")
             return df_resampled
-
-def convert_to_wide_format(processed_data_by_asset, assets, timeframe):
-    """
-    Convertit les données traitées au format wide.
-    
-    Args:
-        processed_data_by_asset: Dict {asset: DataFrame} 
-        assets: Liste des actifs
-        timeframe: Timeframe traité
-        
-    Returns:
-        pd.DataFrame: DataFrame au format wide
-    """
-    logger.info(f"🔗 Conversion au format wide pour {timeframe}")
-    
-    # Obtenir l'index de référence (du premier actif disponible)
-    reference_asset = None
-    for asset in assets:
-        if asset in processed_data_by_asset and processed_data_by_asset[asset] is not None:
-            reference_asset = asset
-            break
-    
-    if not reference_asset:
-        logger.error("❌ Aucun actif disponible pour la conversion")
-        return None
-    
-    base_index = processed_data_by_asset[reference_asset].index
-    merged_data = {}
-    
-    for asset in assets:
-        if asset not in processed_data_by_asset or processed_data_by_asset[asset] is None:
-            logger.warning(f"⚠️ Données manquantes pour {asset}, remplissage par zéros")
-            continue
-        
-        asset_df = processed_data_by_asset[asset]
-        
-        # Ajouter le suffixe d'actif à chaque colonne
-        for col in asset_df.columns:
-            # Pour les colonnes OHLCV, pas de suffixe timeframe
-            if col in ['open', 'high', 'low', 'close', 'volume']:
-                new_col_name = f"{col}_{asset}"
-            else:
-                # Pour les indicateurs, ajouter le suffixe timeframe si pas déjà présent
-                if f"_{timeframe}" not in col:
-                    new_col_name = f"{col}_{timeframe}_{asset}"
-                else:
-                    new_col_name = f"{col}_{asset}"
-            merged_data[new_col_name] = asset_df[col].reindex(base_index, fill_value=0.0)
-    
-    if not merged_data:
-        logger.error("❌ Aucune donnée à fusionner")
-        return None
-    
-    # Créer le DataFrame final
-    result_df = pd.DataFrame(merged_data, index=base_index)
-    logger.info(f"✅ Format wide créé: {result_df.shape}")
-    
-    return result_df
 
 def split_data_by_timeframe(df, config, timeframe):
     """
@@ -225,41 +184,36 @@ def split_data_by_timeframe(df, config, timeframe):
     logger.info(f"📊 Split résultats: Train={len(train_df)}, Val={len(val_df)}, Test={len(test_df)}")
     return train_df, val_df, test_df
 
-def normalize_features(train_df, val_df, test_df, config, timeframe, assets):
+def normalize_features(train_df, val_df, test_df, config):
     """
-    Normalise les features (sauf OHLC) avec StandardScaler.
+    Normalise les features (sauf OHLCV) avec StandardScaler pour un actif et timeframe spécifique.
+    Le scaler est ajusté UNIQUEMENT sur les données d'entraînement.
     
     Args:
-        train_df, val_df, test_df: DataFrames de données
-        config: Configuration
-        timeframe: Timeframe traité
-        assets: Liste des actifs
+        train_df, val_df, test_df: DataFrames de données pour un actif/timeframe.
+        config: Configuration complète.
         
     Returns:
-        tuple: (train_norm, val_norm, test_norm, scaler)
+        tuple: (train_norm_df, val_norm_df, test_norm_df, scaler)
     """
     from sklearn.preprocessing import StandardScaler
     
-    logger.info(f"🔧 Normalisation des features pour {timeframe}")
+    logger.info(f"🔧 Normalisation des features...") # Timeframe/asset context will be in parent function log
     
-    # Identifier les colonnes à normaliser (exclure OHLC et colonnes non numériques)
-    ohlc_patterns = ['open_', 'high_', 'low_', 'close_']
+    # Identifier les colonnes à normaliser (exclure OHLCV et colonnes non numériques)
+    # OHLCV columns for a single asset DataFrame are typically 'open', 'high', 'low', 'close', 'volume'
+    # We want to normalize volume, but not O H L C.
+    ohlc_cols = ['open', 'high', 'low', 'close']
+    
     cols_to_normalize = []
-    
     for col in train_df.columns:
-        # Vérifier que la colonne est numérique
-        if train_df[col].dtype in ['object', 'string']:
+        if train_df[col].dtype in ['object', 'string', 'datetime64[ns]']: # Ensure datetime columns are excluded
             continue
-        
-        should_normalize = True
-        for pattern in ohlc_patterns:
-            if col.startswith(pattern):
-                should_normalize = False
-                break
-        if should_normalize:
-            cols_to_normalize.append(col)
+        if col in ohlc_cols: # Do not normalize O, H, L, C
+            continue
+        cols_to_normalize.append(col) # Normalize all other numeric columns (including volume and indicators)
     
-    logger.info(f"📊 Colonnes à normaliser: {len(cols_to_normalize)}/{len(train_df.columns)}")
+    logger.info(f"📊 Colonnes à normaliser ({len(cols_to_normalize)}/{len(train_df.columns)}): {cols_to_normalize}")
     
     if not cols_to_normalize:
         logger.warning("⚠️ Aucune colonne à normaliser")
@@ -281,37 +235,46 @@ def normalize_features(train_df, val_df, test_df, config, timeframe, assets):
     logger.info("✅ Normalisation terminée")
     return train_norm, val_norm, test_norm, scaler
 
-def save_processed_data(train_df, val_df, test_df, scaler, timeframe, assets):
+def save_asset_data_split(df_split, split_name, asset, timeframe, asset_data_dir):
     """
-    Sauvegarde les données traitées et le scaler.
+    Sauvegarde un split de données (train, val, ou test) pour un actif et timeframe spécifique.
     
     Args:
-        train_df, val_df, test_df: DataFrames normalisés
-        scaler: Scaler ajusté
-        timeframe: Timeframe traité
-        assets: Liste des actifs
+        df_split: DataFrame du split de données à sauvegarder.
+        split_name: Nom du split ("train", "val", "test").
+        asset: Nom de l'actif (ex: 'BTCUSDT').
+        timeframe: Timeframe traité (ex: '1h').
+        asset_data_dir: Chemin du répertoire où sauvegarder le fichier (Path object).
+                       Ex: data/processed/unified/BTCUSDT/
     """
-    logger.info(f"💾 Sauvegarde des données pour {timeframe}")
+    output_file = asset_data_dir / f"{asset}_{timeframe}_{split_name}.parquet"
+    try:
+        df_split.to_parquet(output_file)
+        logger.info(f"✅ Data split saved: {output_file} ({df_split.shape})")
+    except Exception as e:
+        logger.error(f"❌ Failed to save data split {output_file}: {e}")
+
+def save_scaler(scaler, asset, timeframe, asset_scalers_dir):
+    """
+    Sauvegarde le scaler ajusté pour un actif et timeframe spécifique.
     
-    # Créer les répertoires
-    processed_dir = Path("data/processed/unified")
-    scalers_dir = Path("data/scalers_encoders")
-    
-    for directory in [processed_dir, scalers_dir]:
-        directory.mkdir(parents=True, exist_ok=True)
-    
-    # Sauvegarder les splits de données
-    for split_name, df in [("train", train_df), ("val", val_df), ("test", test_df)]:
-        output_file = processed_dir / f"{timeframe}_{split_name}_merged.parquet"
-        df.to_parquet(output_file)
-        logger.info(f"✅ Sauvegardé: {output_file} ({df.shape})")
-    
-    # Sauvegarder le scaler
+    Args:
+        scaler: Scaler ajusté (objet scikit-learn).
+        asset: Nom de l'actif (ex: 'BTCUSDT').
+        timeframe: Timeframe traité (ex: '1h').
+        asset_scalers_dir: Chemin du répertoire où sauvegarder le scaler (Path object).
+                           Ex: data/scalers_encoders/BTCUSDT/
+    """
     if scaler is not None:
-        scaler_file = scalers_dir / f"scaler_{timeframe}.joblib"
-        import joblib
-        joblib.dump(scaler, scaler_file)
-        logger.info(f"✅ Scaler sauvegardé: {scaler_file}")
+        scaler_file = asset_scalers_dir / f"{asset}_{timeframe}_scaler.joblib"
+        try:
+            import joblib
+            joblib.dump(scaler, scaler_file)
+            logger.info(f"✅ Scaler saved: {scaler_file}")
+        except Exception as e:
+            logger.error(f"❌ Failed to save scaler {scaler_file}: {e}")
+    else:
+        logger.warning(f"⚠️ Scaler for {asset} {timeframe} is None. Not saving.")
 
 def process_unified_pipeline(config, exec_profile):
     """
@@ -328,49 +291,48 @@ def process_unified_pipeline(config, exec_profile):
     timeframes_to_process = config.get('timeframes_to_process', ['1m'])
     
     logger.info(f"📊 Assets: {assets}")
+    logger.info(f"📊 Assets: {assets}")
     logger.info(f"⏰ Timeframes: {timeframes_to_process}")
-    
-    for timeframe in timeframes_to_process:
+
+    for asset in assets:
         logger.info(f"\n{'='*60}")
-        logger.info(f"🔄 Traitement du timeframe: {timeframe}")
+        logger.info(f"Processing Asset: {asset}")
         logger.info(f"{'='*60}")
-        
-        # Traiter chaque actif pour ce timeframe
-        processed_data_by_asset = {}
-        
-        for asset in assets:
+
+        # Create output directories for the asset
+        asset_data_dir = Path(f"data/processed/unified/{asset}")
+        asset_scalers_dir = Path(f"data/scalers_encoders/{asset}")
+        asset_data_dir.mkdir(parents=True, exist_ok=True)
+        asset_scalers_dir.mkdir(parents=True, exist_ok=True)
+
+        for timeframe in timeframes_to_process:
+            logger.info(f"\n--- Processing Timeframe: {timeframe} for {asset} ---")
             try:
-                processed_df = process_asset_for_timeframe(asset, timeframe, config)
-                if processed_df is not None:
-                    processed_data_by_asset[asset] = processed_df
-                    logger.info(f"✅ {asset} traité: {processed_df.shape}")
-                else:
-                    logger.error(f"❌ Échec du traitement de {asset}")
+                asset_df = process_asset_for_timeframe(asset, timeframe, config)
+                if asset_df is None:
+                    logger.error(f"❌ No data processed for {asset} at {timeframe}. Skipping.")
+                    continue
+
+                train_df, val_df, test_df = split_data_by_timeframe(asset_df, config, timeframe)
+
+                if train_df.empty or val_df.empty or test_df.empty:
+                    logger.warning(f"⚠️ Data splitting for {asset} - {timeframe} resulted in one or more empty dataframes. Skipping normalization and saving for this timeframe.")
+                    logger.warning(f"Train: {len(train_df)}, Val: {len(val_df)}, Test: {len(test_df)}")
+                    continue
+
+                train_norm, val_norm, test_norm, scaler = normalize_features(train_df, val_df, test_df, config)
+
+                save_asset_data_split(train_norm, "train", asset, timeframe, asset_data_dir)
+                save_asset_data_split(val_norm, "val", asset, timeframe, asset_data_dir)
+                save_asset_data_split(test_norm, "test", asset, timeframe, asset_data_dir)
+                save_scaler(scaler, asset, timeframe, asset_scalers_dir)
+
+                logger.info(f"✅ Successfully processed and saved {timeframe} for {asset}")
+
             except Exception as e:
-                logger.error(f"❌ Erreur lors du traitement de {asset}: {e}")
+                logger.error(f"❌ Error processing {timeframe} for {asset}: {e}", exc_info=True)
         
-        if not processed_data_by_asset:
-            logger.error(f"❌ Aucun actif traité pour {timeframe}")
-            continue
-        
-        # Convertir au format wide
-        wide_df = convert_to_wide_format(processed_data_by_asset, assets, timeframe)
-        if wide_df is None:
-            logger.error(f"❌ Échec de la conversion wide pour {timeframe}")
-            continue
-        
-        # Diviser les données
-        train_df, val_df, test_df = split_data_by_timeframe(wide_df, config, timeframe)
-        
-        # Normaliser les features
-        train_norm, val_norm, test_norm, scaler = normalize_features(
-            train_df, val_df, test_df, config, timeframe, assets
-        )
-        
-        # Sauvegarder
-        save_processed_data(train_norm, val_norm, test_norm, scaler, timeframe, assets)
-        
-        logger.info(f"✅ Timeframe {timeframe} traité avec succès!")
+        logger.info(f"✅ Asset {asset} processed successfully!")
 
 def main():
     """Fonction principale du script."""

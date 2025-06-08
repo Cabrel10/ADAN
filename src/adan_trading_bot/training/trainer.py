@@ -174,6 +174,13 @@ def train_agent(config_paths=None, config=None, override_params=None):
             if 'validation_data_file' in override_params:
                 config['data']['validation_data_file'] = override_params['validation_data_file']
                 logger.info(f"Overriding validation_data_file: {override_params['validation_data_file']}")
+
+            # Override training_timeframe in data config
+            if 'training_timeframe' in override_params and override_params['training_timeframe'] is not None:
+                if 'data' not in config:
+                    config['data'] = {} # Ensure 'data' key exists
+                config['data']['training_timeframe'] = override_params['training_timeframe']
+                logger.info(f"Overriding training_timeframe in config['data'] to: {override_params['training_timeframe']}")
             
             # Override total_timesteps
             if 'total_timesteps' in override_params:
