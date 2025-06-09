@@ -60,32 +60,33 @@ def get_processed_data_paths(main_config, data_config):
     project_dir = main_config.get('paths', {}).get('base_project_dir_local', os.getcwd())
     
     # Construire le chemin vers les données traitées
-    data_dir = os.path.join(project_dir, main_config.get('paths', {}).get('data_dir_name', 'data'))
-    base_processed_dir = os.path.join(data_dir, data_config.get('processed_data_dir', 'processed'))
-    
-    # Support des lots de données
+    data_root_dir = Path(project_dir) / main_config.get('paths', {}).get('data_dir_name', 'data')
+    base_processed_dir_for_reading = data_root_dir / data_config.get('processed_data_dir', 'processed') / 'unified'
+    processed_dir = str(base_processed_dir_for_reading)
+    logger.info(f"Répertoire source pour les données par actif (doit être .../processed/unified/): {processed_dir}")
+
+    # Support des lots de données pour le répertoire de destination merged_dir
     lot_id = data_config.get('lot_id', None)
     unified_segment = 'unified'
 
-    # Source directory for individual asset files
-    # This will now be data/processed/ or data/processed/{lot_id}/
-    # The "unified/{timeframe}/{asset}" will be added in merge_data_for_timeframe_split
-    if lot_id:
-        processed_dir = os.path.join(base_processed_dir, lot_id)
-        logger.info(f"Utilisation du lot de données pour la source des données par actif: {lot_id}")
-        logger.info(f"Répertoire de base pour les données par actif (avant unified/tf/asset): {processed_dir}")
-    else:
-        processed_dir = base_processed_dir
-    logger.info(f"Répertoire de base pour les données par actif (avant unified/tf/asset): {processed_dir}")
+    # Déterminer base_processed_dir pour merged_dir (peut inclure lot_id dans son chemin parent si besoin, mais ici on le met dans merged)
+    # Pour la destination (merged_dir), nous utilisons le base_processed_dir original qui peut être data/processed ou data/processed/{lot_id}
+    # et ensuite on ajoute 'merged' et 'unified'.
+    # Note: data_config.get('processed_data_dir', 'processed') est 'processed' ou 'processed_lot1' etc.
+    # Si data_config.get('processed_data_dir') est 'processed_lot1', base_processed_dir sera .../data/processed_lot1
+    # Si c'est juste 'processed', alors .../data/processed
+    # Le lot_id est utilisé pour créer un sous-répertoire DANS merged.
 
-    # Target directory for merged files (remains .../merged/{lot_id}/unified or .../merged/unified)
-    if lot_id:
-        merged_dir = os.path.join(base_processed_dir, 'merged', lot_id, unified_segment)
-        logger.info(f"Utilisation du lot de données pour la sortie fusionnée: {lot_id}")
-    else:
-        merged_dir = os.path.join(base_processed_dir, 'merged', unified_segment)
+    original_base_processed_dir_for_writing = data_root_dir / data_config.get('processed_data_dir', 'processed')
 
-    logger.info(f"Répertoire cible pour les données fusionnées: {merged_dir}")
+    # Target directory for merged files
+    if lot_id:
+        merged_dir = str(original_base_processed_dir_for_writing / 'merged' / lot_id / unified_segment)
+        logger.info(f"Utilisation du lot de données '{lot_id}' pour la sortie fusionnée.")
+    else:
+        merged_dir = str(original_base_processed_dir_for_writing / 'merged' / unified_segment)
+
+    logger.info(f"Répertoire cible pour les données fusionnées (merged_dir): {merged_dir}")
 
     # Créer le répertoire pour les données fusionnées s'il n'existe pas
     ensure_dir_exists(merged_dir)
@@ -128,12 +129,12 @@ def merge_data_for_timeframe_split(processed_dir, merged_dir, assets, timeframe,
     
     # Charger les données pour chaque actif
     for asset in assets:
-        # Construct the full path to the asset-specific file, including timeframe
-        # processed_dir is now data/processed/ or data/processed/{lot_id}/
-        file_path = os.path.join(processed_dir, "unified", timeframe, asset, f"{asset}_{timeframe}_{split}.parquet")
+        # Construct the full path to the asset-specific file
+        # processed_dir est maintenant .../data/processed/unified/
+        file_path = Path(processed_dir) / timeframe / asset / f"{asset}_{timeframe}_{split}.parquet"
         
-        if not os.path.exists(file_path):
-            logger.warning(f"Fichier {file_path} non trouvé. L'actif {asset} sera ignoré pour {timeframe}_{split}.")
+        if not file_path.exists():
+            logger.warning(f"Fichier {str(file_path)} non trouvé. L'actif {asset} sera ignoré pour {timeframe}_{split}.")
             continue
         
         try:
@@ -287,9 +288,9 @@ def main():
     parser.add_argument(
         '--exec_profile', 
         type=str, 
-        default='cpu_lot1',
-        choices=['cpu', 'gpu', 'cpu_lot1', 'cpu_lot2', 'gpu_lot1', 'gpu_lot2', 'smoke_cpu'],
-        help="Profil d'exécution ('cpu', 'gpu', 'cpu_lot1', 'cpu_lot2', etc.) pour charger data_config_{profile}.yaml."
+        default='cpu',
+        choices=['cpu', 'gpu', 'smoke_cpu'],
+        help="Profil d'exécution ('cpu', 'gpu', 'smoke_cpu') pour charger data_config_{profile}.yaml."
     )
     parser.add_argument('--timeframes', nargs='+', help='Liste des timeframes à traiter (par défaut: tous)')
     parser.add_argument('--splits', nargs='+', default=['train', 'val', 'test'], help='Liste des splits à traiter (par défaut: train, val, test)')

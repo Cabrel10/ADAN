@@ -376,9 +376,9 @@ def main():
     parser.add_argument(
         '--exec_profile', 
         type=str, 
-        default='cpu_lot1',
-        choices=['cpu', 'gpu', 'cpu_lot1', 'cpu_lot2', 'gpu_lot1', 'gpu_lot2'],
-        help="Profil d'exécution ('cpu', 'gpu', 'cpu_lot1', 'cpu_lot2', etc.) pour charger data_config_{profile}.yaml."
+        default='cpu',
+        choices=['cpu', 'gpu', 'smoke_cpu'],
+        help="Profil d'exécution ('cpu', 'gpu', 'smoke_cpu') pour charger data_config_{profile}.yaml."
     )
     parser.add_argument('--main_config', type=str, default='config/main_config.yaml', help='Path to the main configuration file.')
     parser.add_argument('--data_config', type=str, default=None, help='Path to the data configuration file (default: config/data_config_{profile}.yaml).')

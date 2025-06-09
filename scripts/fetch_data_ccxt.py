@@ -90,8 +90,8 @@ def main():
         '--exec_profile', 
         type=str, 
         default='cpu',
-        choices=['cpu', 'gpu'],
-        help="Profil d'exécution ('cpu' ou 'gpu') pour charger data_config_{profile}.yaml."
+        choices=['cpu', 'gpu', 'smoke_cpu'],
+        help="Profil d'exécution ('cpu' ou 'gpu' ou 'smoke_cpu') pour charger data_config_{profile}.yaml."
     )
     parser.add_argument('--main_config', type=str, default='config/main_config.yaml', help='Path to the main configuration file.')
     parser.add_argument('--data_config', type=str, default=None, help='Path to the data configuration file (default: config/data_config_{profile}.yaml).')

@@ -139,7 +139,7 @@ def main():
         '--exec_profile',
         type=str,
         default='cpu',
-        choices=['cpu', 'gpu'],
+        choices=['cpu', 'gpu', 'smoke_cpu'],
         help="Profil d'exécution pour charger data_config_{profile}.yaml (défaut: cpu)"
     )
     parser.add_argument(

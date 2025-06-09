@@ -259,7 +259,7 @@ def main():
     parser = argparse.ArgumentParser(description="Evaluate ADAN trading model performance")
     parser.add_argument('--model_path', type=str, required=True,
                        help='Path to the trained model (.zip file)')
-    parser.add_argument('--exec_profile', type=str, default='cpu', choices=['cpu', 'gpu'],
+    parser.add_argument('--exec_profile', type=str, default='cpu', choices=['cpu', 'gpu', 'smoke_cpu'],
                        help='Execution profile for configuration')
     parser.add_argument('--episodes', type=int, default=10,
                        help='Number of episodes to evaluate')

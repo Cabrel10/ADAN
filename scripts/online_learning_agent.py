@@ -644,7 +644,7 @@ def main():
     """Fonction principale du script d'apprentissage continu."""
     parser = argparse.ArgumentParser(description="ADAN Online Learning Agent")
     parser.add_argument("--exec_profile", type=str, default="cpu", 
-                       choices=["cpu", "gpu"], help="Profil d'exécution")
+                       choices=["cpu", "gpu", "smoke_cpu"], help="Profil d'exécution")
     parser.add_argument("--model_path", type=str, required=True,
                        help="Chemin vers le modèle PPO pré-entraîné")
     parser.add_argument("--initial_capital", type=float, default=15000.0,

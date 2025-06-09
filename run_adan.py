@@ -290,7 +290,7 @@ def main():
     parser.add_argument('--capital', type=float, default=15.0,
                         help='Capital initial (défaut: 15$)')
     parser.add_argument('--profile', type=str, default='cpu',
-                        choices=['cpu', 'gpu'],
+                        choices=['cpu', 'gpu', 'smoke_cpu'],
                         help='Profil d\'exécution')
     parser.add_argument('--timeframe', type=str, default='1m',
                         choices=['1m', '1h', '1d'],
