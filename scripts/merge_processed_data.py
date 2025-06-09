@@ -288,7 +288,7 @@ def main():
         '--exec_profile', 
         type=str, 
         default='cpu_lot1',
-        choices=['cpu', 'gpu', 'cpu_lot1', 'cpu_lot2', 'gpu_lot1', 'gpu_lot2'],
+        choices=['cpu', 'gpu', 'cpu_lot1', 'cpu_lot2', 'gpu_lot1', 'gpu_lot2', 'smoke_cpu'], # Added 'smoke_cpu'
         help="Profil d'exécution ('cpu', 'gpu', 'cpu_lot1', 'cpu_lot2', etc.) pour charger data_config_{profile}.yaml."
     )
     parser.add_argument('--timeframes', nargs='+', help='Liste des timeframes à traiter (par défaut: tous)')

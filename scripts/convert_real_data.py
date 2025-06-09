@@ -285,7 +285,7 @@ def main():
     """Fonction principale du script."""
     parser = argparse.ArgumentParser(description="Pipeline unifié de traitement des données ADAN")
     parser.add_argument("--exec_profile", type=str, default="cpu", 
-                       choices=["cpu", "gpu"], help="Profil d'exécution (utilisé si --data_config n'est pas fourni)")
+                       choices=["cpu", "gpu", "smoke_cpu"], help="Profil d'exécution (utilisé si --data_config n'est pas fourni)") # Added smoke_cpu
     parser.add_argument('--data_config', type=str, default=None,
                         help='Path to a specific data_config YAML file. Overrides --exec_profile for data config loading.')
     
