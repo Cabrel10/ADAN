@@ -2,7 +2,7 @@
 
 # Chemins des répertoires principaux
 paths:
-  base_project_dir_local: "/home/morningstar/Desktop/ADAN/ADAN"
+  base_project_dir_local: "." # Changed to current directory
   data_dir_name: "data"
   models_dir_name: "models"
   reports_dir_name: "reports"
