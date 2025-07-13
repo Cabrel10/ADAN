@@ -1,326 +1,410 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 """
-Script pour convertir les données réelles de data/new vers le format pipeline ADAN multi-timeframe.
-Supporte la génération de données pour 1m (pré-calculées), 1h et 1d (calculées dynamiquement).
-Convertit du format "long" vers le format "wide" avec gestion multi-timeframe.
+Script to convert raw OHLCV data into processed data with technical indicators
+for multiple timeframes based on data_config.yaml configuration.
 """
-import os
+
 import sys
 import pandas as pd
 import numpy as np
 from pathlib import Path
 import logging
-from datetime import datetime
 import argparse
+from typing import Dict, List, Any, Optional, Tuple
+import yaml
+from datetime import datetime, timedelta
 
-# Assurer que le package src est dans le PYTHONPATH
-SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-sys.path.append(os.path.join(SCRIPT_DIR, '..'))
+# Add src to PYTHONPATH
+SCRIPT_DIR = Path(__file__).resolve().parent
+sys.path.append(str(SCRIPT_DIR.parent))
 
-from src.adan_trading_bot.common.utils import load_config
-from src.adan_trading_bot.data_processing.feature_engineer import add_technical_indicators
-
-# Configuration du logger
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+# Configure logger
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.StreamHandler(),
+        logging.FileHandler('convert_real_data.log')
+    ]
+)
 logger = logging.getLogger(__name__)
 
-def resample_data(df, target_timeframe):
-    """
-    Ré-échantillonne les données OHLCV de 1m vers 1h ou 1d.
-    
-    Args:
-        df: DataFrame avec colonnes OHLCV et index timestamp
-        target_timeframe: '1h' ou '1d'
-        
-    Returns:
-        pd.DataFrame: Données ré-échantillonnées
-    """
-    logger.info(f"🔄 Ré-échantillonnage vers {target_timeframe}")
-    
-    # Assurer que l'index est datetime
-    if not isinstance(df.index, pd.DatetimeIndex):
-        df.index = pd.to_datetime(df.index)
-    
-    # Définir la fréquence de ré-échantillonnage
-    freq = '1h' if target_timeframe == '1h' else '1D'
-    
-    # Ré-échantillonner les données OHLCV
-    ohlcv_resampled = df.resample(freq).agg({
-        'open': 'first',
-        'high': 'max', 
-        'low': 'min',
-        'close': 'last',
-        'volume': 'sum'
-    }).dropna()
-    
-    logger.info(f"✅ Ré-échantillonnage: {len(df)} → {len(ohlcv_resampled)} barres")
-    return ohlcv_resampled
+# Default configuration paths
+DEFAULT_CONFIG_PATH = SCRIPT_DIR.parent / 'config' / 'data_config.yaml'
 
-def process_asset_for_timeframe(asset, timeframe, config):
+# Standard OHLCV column names
+OHLCV_COLUMNS = ['timestamp', 'open', 'high', 'low', 'close', 'volume']
+
+def load_config(config_path: Path) -> Dict[str, Any]:
     """
-    Traite un actif pour un timeframe spécifique.
+    Load and validate configuration from data_config.yaml.
     
     Args:
-        asset: Nom de l'actif (ex: 'ADAUSDT')
-        timeframe: '1m', '1h', ou '1d'
-        config: Configuration complète
+        config_path: Path to the configuration file
         
     Returns:
-        pd.DataFrame: Données traitées pour cet actif
+        Dictionary containing the configuration
     """
-    logger.info(f"📊 Traitement {asset} pour {timeframe}")
+    try:
+        with open(config_path, 'r', encoding='utf-8') as f:
+            config = yaml.safe_load(f)
+            
+        # Set default paths if not specified
+        data_pipeline = config.get('data_pipeline', {})
+        data_pipeline.setdefault('local_data', {})
+        data_pipeline['local_data'].setdefault('directory', 'data/raw')
+        
+        # Ensure required keys exist
+        required_sections = ['data_pipeline', 'feature_engineering']
+        for section in required_sections:
+            if section not in config:
+                raise ValueError(f"Missing required section in config: {section}")
+                
+        return config
+        
+    except Exception as e:
+        logger.error(f"Error loading config: {e}")
+        raise
+
+def parse_timeframe(timeframe: str) -> Tuple[int, str]:
+    """
+    Parse timeframe string into numeric value and unit.
     
-    # Charger les données 1m de base
-    source_file = f"data/new/{asset}_features.parquet"
-    if not os.path.exists(source_file):
-        logger.error(f"❌ Fichier source manquant: {source_file}")
-        return None
+    Args:
+        timeframe: Timeframe string (e.g., '5m', '1h', '3h')
+        
+    Returns:
+        Tuple of (value, unit)
+    """
+    value = int(''.join(filter(str.isdigit, timeframe)))
+    unit = ''.join(filter(str.isalpha, timeframe)).lower()
+    return value, unit
+
+def calculate_minutes_since_update(df: pd.DataFrame) -> pd.Series:
+    """
+    Calculate minutes since last update for each row.
     
-    df = pd.read_parquet(source_file)
-    logger.info(f"📈 Données chargées: {df.shape}")
+    Args:
+        df: DataFrame with timestamp index
+        
+    Returns:
+        Series with minutes since last update
+    """
+    if not isinstance(df.index, pd.DatetimeIndex):
+        raise ValueError("DataFrame must have a DatetimeIndex")
+        
+    # Calculate time differences in minutes
+    time_diffs = df.index.to_series().diff().dt.total_seconds() / 60
+    time_diffs.iloc[0] = 0  # First row has no previous timestamp
     
-    # Assurer que timestamp est l'index
+    return time_diffs.rename('minutes_since_update')
+
+def calculate_technical_indicators(df: pd.DataFrame, indicators: List[str]) -> pd.DataFrame:
+    """
+    Calculate technical indicators for the given DataFrame.
+    
+    Args:
+        df: Input DataFrame with OHLCV data
+        indicators: List of indicator names to calculate
+        
+    Returns:
+        DataFrame with added indicator columns
+    """
+    # Make a copy to avoid modifying the original
+    df = df.copy()
+    
+    # Ensure timestamp is the index
     if 'timestamp' in df.columns:
-        df['timestamp'] = pd.to_datetime(df['timestamp'])
         df = df.set_index('timestamp')
     
-    # Supprimer les colonnes non numériques
-    columns_to_remove = ['symbol']
-    for col in columns_to_remove:
-        if col in df.columns:
-            df = df.drop(columns=[col])
-            logger.info(f"🗑️ Colonne {col} supprimée")
+    # Ensure OHLCV columns exist
+    for col in ['open', 'high', 'low', 'close', 'volume']:
+        if col not in df.columns:
+            raise ValueError(f"Missing required column: {col}")
     
-    if timeframe == '1m':
-        # Pour 1m, utiliser les features spécifiées dans base_market_features
-        base_features = config.get('data', {}).get('base_market_features', [])
-        if not base_features:
-            logger.warning("⚠️ 'base_market_features' non défini dans la config. Utilisation de toutes les colonnes.")
-            selected_df = df
-        else:
-            # S'assurer que les colonnes OHLCV de base sont incluses si elles ne sont pas déjà dans base_features
-            ohlcv_base = ['open', 'high', 'low', 'close', 'volume']
-            for col in ohlcv_base:
-                if col not in base_features and col in df.columns:
-                    base_features.append(col)
-
-            missing_cols = [col for col in base_features if col not in df.columns]
-            if missing_cols:
-                logger.warning(f"⚠️ Colonnes manquantes dans le df pour 1m: {missing_cols}. Elles seront ignorées.")
-
-            final_features_1m = [col for col in base_features if col in df.columns]
-            selected_df = df[final_features_1m]
-            logger.info(f"✅ Sélection des {len(final_features_1m)} features pré-calculées pour 1m: {final_features_1m}")
-        return selected_df
+    # Calculate each indicator
+    for indicator in indicators:
+        try:
+            if indicator.startswith('EMA_'):
+                period = int(indicator.split('_')[1])
+                df[f'ema_{period}'] = df['close'].ewm(span=period, adjust=False).mean()
+                
+            elif indicator.startswith('RSI_'):
+                period = int(indicator.split('_')[1])
+                delta = df['close'].diff()
+                gain = (delta.where(delta > 0, 0)).rolling(window=period).mean()
+                loss = (-delta.where(delta < 0, 0)).rolling(window=period).mean()
+                rs = gain / loss
+                df[f'rsi_{period}'] = 100 - (100 / (1 + rs))
+                
+            elif indicator == 'MACD_diff':
+                ema12 = df['close'].ewm(span=12, adjust=False).mean()
+                ema26 = df['close'].ewm(span=26, adjust=False).mean()
+                df['macd'] = ema12 - ema26
+                df['macd_signal'] = df['macd'].ewm(span=9, adjust=False).mean()
+                df['macd_diff'] = df['macd'] - df['macd_signal']
+                
+            elif indicator == 'ADX_14':
+                # Calculate +DM, -DM, and True Range
+                df['plus_dm'] = df['high'].diff()
+                df['minus_dm'] = df['low'].diff().abs()
+                
+                # Calculate True Range
+                df['tr1'] = df['high'] - df['low']
+                df['tr2'] = (df['high'] - df['close'].shift()).abs()
+                df['tr3'] = (df['low'] - df['close'].shift()).abs()
+                df['tr'] = df[['tr1', 'tr2', 'tr3']].max(axis=1)
+                
+                # Calculate +DM and -DM
+                df['plus_dm'] = np.where(
+                    (df['plus_dm'] > df['minus_dm']) & (df['plus_dm'] > 0),
+                    df['plus_dm'], 0.0
+                )
+                df['minus_dm'] = np.where(
+                    (df['minus_dm'] > df['plus_dm']) & (df['minus_dm'] > 0),
+                    df['minus_dm'], 0.0
+                )
+                
+                # Smooth the DMs and TR
+                period = 14
+                df['plus_di'] = 100 * (df['plus_dm'].ewm(alpha=1/period, adjust=False).mean() / 
+                                     df['tr'].ewm(alpha=1/period, adjust=False).mean())
+                df['minus_di'] = 100 * (df['minus_dm'].ewm(alpha=1/period, adjust=False).mean() / 
+                                      df['tr'].ewm(alpha=1/period, adjust=False).mean())
+                
+                # Calculate ADX
+                df['dx'] = 100 * (df['plus_di'] - df['minus_di']).abs() / (df['plus_di'] + df['minus_di'])
+                df['adx'] = df['dx'].ewm(alpha=1/period, adjust=False).mean()
+                
+                # Clean up intermediate columns
+                df.drop(['plus_dm', 'minus_dm', 'tr1', 'tr2', 'tr3', 'dx'], axis=1, inplace=True)
+                
+            elif indicator == 'Supertrend_14_3':
+                # Supertrend with ATR 14 and multiplier 3
+                atr_period = 14
+                multiplier = 3.0
+                
+                high = df['high']
+                low = df['low']
+                close = df['close']
+                
+                # Calculate ATR
+                tr1 = high - low
+                tr2 = (high - close.shift()).abs()
+                tr3 = (low - close.shift()).abs()
+                tr = pd.DataFrame({'tr1': tr1, 'tr2': tr2, 'tr3': tr3}).max(axis=1)
+                atr = tr.ewm(alpha=1/atr_period, adjust=False).mean()
+                
+                # Calculate basic upper and lower bands
+                hl2 = (high + low) / 2
+                df['supertrend_upper'] = hl2 + (multiplier * atr)
+                df['supertrend_lower'] = hl2 - (multiplier * atr)
+                
+                # Initialize the Supertrend column
+                df['supertrend'] = 0.0
+                
+                # Calculate Supertrend
+                for i in range(1, len(df)):
+                    if close.iloc[i-1] <= df['supertrend_upper'].iloc[i-1]:
+                        df['supertrend_upper'].iloc[i] = min(df['supertrend_upper'].iloc[i], 
+                                                           df['supertrend_upper'].iloc[i-1])
+                    else:
+                        df['supertrend_upper'].iloc[i] = df['supertrend_upper'].iloc[i]
+                        
+                    if close.iloc[i-1] >= df['supertrend_lower'].iloc[i-1]:
+                        df['supertrend_lower'].iloc[i] = max(df['supertrend_lower'].iloc[i], 
+                                                           df['supertrend_lower'].iloc[i-1])
+                    else:
+                        df['supertrend_lower'].iloc[i] = df['supertrend_lower'].iloc[i]
+                
+                # Determine the trend direction
+                df['supertrend'] = np.where(close > df['supertrend_upper'], 1, 
+                                          np.where(close < df['supertrend_lower'], -1, np.nan))
+                df['supertrend'] = df['supertrend'].ffill()
+                
+            elif indicator == 'Ichimoku_Cloud':
+                # Tenkan-sen (Conversion Line)
+                high_9 = df['high'].rolling(window=9).max()
+                low_9 = df['low'].rolling(window=9).min()
+                df['tenkan_sen'] = (high_9 + low_9) / 2
+                
+                # Kijun-sen (Base Line)
+                high_26 = df['high'].rolling(window=26).max()
+                low_26 = df['low'].rolling(window=26).min()
+                df['kijun_sen'] = (high_26 + low_26) / 2
+                
+                # Senkou Span A (Leading Span A)
+                df['senkou_span_a'] = ((df['tenkan_sen'] + df['kijun_sen']) / 2).shift(26)
+                
+                # Senkou Span B (Leading Span B)
+                high_52 = df['high'].rolling(window=52).max()
+                low_52 = df['low'].rolling(window=52).min()
+                df['senkou_span_b'] = ((high_52 + low_52) / 2).shift(26)
+                
+                # Chikou Span (Lagging Span)
+                df['chikou_span'] = df['close'].shift(-26)
+                
+                # Cloud status (1 = price above cloud, -1 = price below cloud, 0 = price in cloud)
+                df['cloud_status'] = np.where(
+                    df['close'] > df[['senkou_span_a', 'senkou_span_b']].max(axis=1), 1,
+                    np.where(df['close'] < df[['senkou_span_a', 'senkou_span_b']].min(axis=1), -1, 0)
+                )
+                
+            # Add more indicators as needed...
+            
+        except Exception as e:
+            logger.warning(f"Error calculating {indicator}: {e}")
+            continue
     
-    else:
-        # Pour 1h/1d, ré-échantillonner et recalculer les indicateurs
-        logger.info(f"🔄 Ré-échantillonnage et recalcul des indicateurs ({timeframe})")
-        
-        # Extraire seulement OHLCV pour le ré-échantillonnage
-        ohlcv_cols = ['open', 'high', 'low', 'close', 'volume']
-        available_ohlcv = [col for col in ohlcv_cols if col in df.columns]
-        
-        if not available_ohlcv:
-            logger.error(f"❌ Colonnes OHLCV manquantes pour {asset}")
-            return None
-        
-        df_ohlcv = df[available_ohlcv].copy()
-        
-        # Ré-échantillonner
-        df_resampled = resample_data(df_ohlcv, timeframe)
-        
-        # Ajouter les indicateurs techniques pour ce timeframe
-        indicators_config = config.get('indicators_by_timeframe', {}).get(timeframe, [])
-        
-        if indicators_config:
-            logger.info(f"📊 Calcul de {len(indicators_config)} indicateurs pour {timeframe}")
-            df_with_indicators, added_features = add_technical_indicators(df_resampled, indicators_config, timeframe)
-            return df_with_indicators
-        else:
-            logger.warning(f"⚠️ Aucun indicateur configuré pour {timeframe}")
-            return df_resampled
+    return df.reset_index()
 
-def split_data_by_timeframe(df, config, timeframe):
+def resample_data(df: pd.DataFrame, timeframe: str) -> pd.DataFrame:
     """
-    Divise les données selon les configurations de split pour le timeframe.
+    Resamples OHLCV data to a target timeframe.
     
     Args:
-        df: DataFrame à diviser
-        config: Configuration complète
-        timeframe: Timeframe concerné
+        df: Input DataFrame with OHLCV data
+        timeframe: Target timeframe (e.g., '1h', '4h')
         
     Returns:
-        tuple: (train_df, val_df, test_df)
+        Resampled DataFrame
     """
-    logger.info(f"✂️ Division des données pour {timeframe}")
-    
-    data_split = config.get('data', {}).get('data_split', {})
-    timeframe_split = data_split.get(timeframe, {})
-    
-    if not timeframe_split:
-        logger.warning(f"⚠️ Pas de split configuré pour {timeframe}, utilisation des pourcentages par défaut")
-        # Split par pourcentages
-        train_size = int(len(df) * 0.7)
-        val_size = int(len(df) * 0.2)
+    if df.empty:
+        return df
         
-        train_df = df.iloc[:train_size]
-        val_df = df.iloc[train_size:train_size + val_size]
-        test_df = df.iloc[train_size + val_size:]
-    else:
-        # Split par dates
-        train_start = pd.to_datetime(timeframe_split.get('train_start_date'))
-        train_end = pd.to_datetime(timeframe_split.get('train_end_date'))
-        val_start = pd.to_datetime(timeframe_split.get('validation_start_date'))
-        val_end = pd.to_datetime(timeframe_split.get('validation_end_date'))
-        test_start = pd.to_datetime(timeframe_split.get('test_start_date'))
-        test_end = pd.to_datetime(timeframe_split.get('test_end_date'))
-        
-        train_df = df[(df.index >= train_start) & (df.index <= train_end)]
-        val_df = df[(df.index >= val_start) & (df.index <= val_end)]
-        test_df = df[(df.index >= test_start) & (df.index <= test_end)]
+    # Convert timeframe to pandas frequency string
+    timeframe_map = {
+        '1m': '1T',   # 1 minute
+        '5m': '5T',   # 5 minutes
+        '15m': '15T', # 15 minutes
+        '1h': '1H',   # 1 hour
+        '4h': '4H',   # 4 hours
+        '1d': '1D'    # 1 day
+    }
     
-    logger.info(f"📊 Split résultats: Train={len(train_df)}, Val={len(val_df)}, Test={len(test_df)}")
-    return train_df, val_df, test_df
+    freq = timeframe_map.get(timeframe, timeframe)
+    
+    # Define resampling rules
+    ohlc_dict = {
+        'open': 'first',
+        'high': 'max',
+        'low': 'min',
+        'close': 'last',
+        'volume': 'sum',
+        'quote_asset_volume': 'sum',
+        'number_of_trades': 'sum',
+        'taker_buy_base_asset_volume': 'sum',
+        'taker_buy_quote_asset_volume': 'sum'
+    }
+    
+    # Resample the data
+    resampled = df.resample(freq).agg(ohlc_dict).dropna()
+    
+    # Recalculate typical price and other derived columns if they exist
+    if all(col in resampled.columns for col in ['high', 'low', 'close']):
+        resampled['typical_price'] = (resampled['high'] + resampled['low'] + resampled['close']) / 3
+    
+    logger.info(f"Resampled data to {timeframe}: {len(df)} -> {len(resampled)} rows")
+    return resampled
 
-def save_asset_data_split(df_split, split_name, asset, timeframe, asset_data_dir):
+def process_asset(asset: str, config: Dict[str, Any]) -> None:
     """
-    Sauvegarde un split de données (train, val, ou test) pour un actif et timeframe spécifique.
+    Process a single asset across all configured timeframes.
     
     Args:
-        df_split: DataFrame du split de données à sauvegarder.
-        split_name: Nom du split ("train", "val", "test").
-        asset: Nom de l'actif (ex: 'BTCUSDT').
-        timeframe: Timeframe traité (ex: '1h').
-        asset_data_dir: Chemin du répertoire où sauvegarder le fichier (Path object).
-                       Ex: data/processed/unified/BTCUSDT/
+        asset: Asset symbol (e.g., 'BTC/USDT')
+        config: Configuration dictionary
     """
-    output_file = asset_data_dir / f"{asset}_{timeframe}_{split_name}.parquet"
     try:
-        df_split.to_parquet(output_file)
-        logger.info(f"✅ Data split saved: {output_file} ({df_split.shape})")
-    except Exception as e:
-        logger.error(f"❌ Failed to save data split {output_file}: {e}")
-
-def process_unified_pipeline(config, exec_profile):
-    """
-    Pipeline unifié pour traiter tous les timeframes.
-    
-    Args:
-        config: Configuration complète
-        exec_profile: Profil d'exécution (cpu/gpu)
-    """
-    logger.info("🚀 Démarrage du pipeline unifié multi-timeframe")
-    
-    # Récupérer la configuration
-    assets = config.get('assets', [])
-    timeframes_to_process = config.get('timeframes_to_process', ['1m'])
-    
-    logger.info(f"📊 Assets: {assets}")
-    # logger.info(f"📊 Assets: {assets}") # Duplicate log
-    logger.info(f"⏰ Timeframes to process: {timeframes_to_process}")
-
-    for timeframe in timeframes_to_process:
-        logger.info(f"\n{'='*70}")
-        logger.info(f"Processing Timeframe: {timeframe}")
-        logger.info(f"{'='*70}")
-
-        # Create base directories for the current timeframe
-        timeframe_unified_data_dir = Path("data/processed/unified") / timeframe
-        timeframe_scalers_dir = Path("data/scalers_encoders") / timeframe
-
-        timeframe_unified_data_dir.mkdir(parents=True, exist_ok=True)
-        timeframe_scalers_dir.mkdir(parents=True, exist_ok=True)
-        logger.info(f"Base data directory for {timeframe}: {timeframe_unified_data_dir}")
-        logger.info(f"Base scalers directory for {timeframe}: {timeframe_scalers_dir}")
-
-        for asset in assets:
-            logger.info(f"\n--- Processing Asset: {asset} for Timeframe: {timeframe} ---")
-
-            # Create specific directories for the asset within the timeframe directory
-            asset_specific_data_dir = timeframe_unified_data_dir / asset
-            asset_specific_scaler_dir = timeframe_scalers_dir / asset
-            asset_specific_data_dir.mkdir(parents=True, exist_ok=True)
-            asset_specific_scaler_dir.mkdir(parents=True, exist_ok=True)
-
-            logger.debug(f"Asset data save path: {asset_specific_data_dir}")
-            logger.debug(f"Asset scaler save path: {asset_specific_scaler_dir}")
-
-            try:
-                asset_df = process_asset_for_timeframe(asset, timeframe, config)
-                if asset_df is None:
-                    logger.error(f"❌ No data processed for {asset} at {timeframe}. Skipping.")
-                    continue
-
-                train_df, val_df, test_df = split_data_by_timeframe(asset_df, config, timeframe)
-
-                if train_df.empty or val_df.empty or test_df.empty:
-                    logger.warning(f"⚠️ Data splitting for {asset} - {timeframe} resulted in one or more empty dataframes. Skipping normalization and saving.")
-                    logger.warning(f"Train: {len(train_df)}, Val: {len(val_df)}, Test: {len(test_df)}")
-                    continue
-
-                # Normalization is removed from this script. Saving raw (but feature-engineered) data.
-                # train_norm, val_norm, test_norm, scaler = normalize_features(train_df, val_df, test_df, config)
-
-                logger.info(f"Skipping normalization for {asset} - {timeframe}. Saving data as is after feature engineering.")
-
-                # Pass the new asset_specific_data_dir
-                # Saving unnormalized data directly
-                save_asset_data_split(train_df, "train", asset, timeframe, asset_specific_data_dir)
-                save_asset_data_split(val_df, "val", asset, timeframe, asset_specific_data_dir)
-                save_asset_data_split(test_df, "test", asset, timeframe, asset_specific_data_dir)
-
-                # Scaler saving is removed
-                # save_scaler(scaler, asset, timeframe, asset_specific_scaler_dir)
-
-                logger.info(f"✅ Successfully processed and saved (unnormalized) {asset} for {timeframe}")
-
-            except Exception as e:
-                logger.error(f"❌ Error processing {asset} for {timeframe}: {e}", exc_info=True)
+        # Get configuration
+        data_pipeline = config['data_pipeline']
+        local_data = data_pipeline.get('local_data', {})
+        raw_data_dir = Path(local_data.get('directory', 'data/raw'))
+        processed_dir = Path('data/processed')
         
-        logger.info(f"✅ Timeframe {timeframe} processed successfully for all assets!")
+        # Create output directory if it doesn't exist
+        processed_dir.mkdir(parents=True, exist_ok=True)
+        
+        # Get timeframes from config
+        timeframes = config['feature_engineering'].get('timeframes', ['5m', '1h'])
+        
+        # Format asset name for file paths
+        asset_file = asset.replace('/', '')
+        
+        logger.info(f"Processing {asset}...")
+        
+        # Process each timeframe
+        for timeframe in timeframes:
+            try:
+                # Check if raw data file exists for this timeframe
+                raw_file = raw_data_dir / timeframe / f"{asset_file}.csv"
+                if not raw_file.exists():
+                    logger.warning(f"Raw data file not found: {raw_file}")
+                    continue
+                
+                # Read raw data
+                logger.info(f"Reading data for {asset} {timeframe} from {raw_file}")
+                df = pd.read_csv(raw_file)
+                
+                # Convert timestamp to datetime and set as index
+                if 'timestamp' in df.columns:
+                    df['timestamp'] = pd.to_datetime(df['timestamp'])
+                    df = df.set_index('timestamp')
+                
+                # Add minutes since update
+                df['minutes_since_update'] = calculate_minutes_since_update(df)
+                
+                # Get indicators for this timeframe
+                indicators = config['feature_engineering'].get('indicators_by_timeframe', {}).get(timeframe, [])
+                
+                # Calculate technical indicators
+                if indicators:
+                    df = calculate_technical_indicators(df, indicators)
+                
+                # Save processed data
+                tf_processed_dir = processed_dir / timeframe
+                tf_processed_dir.mkdir(parents=True, exist_ok=True)
+                output_file = tf_processed_dir / f"{asset_file}.parquet"
+                df.to_parquet(output_file)
+                logger.info(f"Saved processed data for {asset} {timeframe} to {output_file}")
+                
+            except Exception as e:
+                logger.error(f"Error processing {asset} {timeframe}: {e}", exc_info=True)
+                continue
+                
+    except Exception as e:
+        logger.error(f"Error processing asset {asset}: {e}", exc_info=True)
+        raise
 
-def main():
-    """Fonction principale du script."""
-    parser = argparse.ArgumentParser(description="Pipeline unifié de traitement des données ADAN")
-    parser.add_argument("--exec_profile", type=str, default="cpu", 
-                       choices=["cpu", "gpu", "smoke_cpu"], help="Profil d'exécution (utilisé si --data_config n'est pas fourni)")
-    parser.add_argument('--data_config', type=str, default=None,
-                        help='Path to a specific data_config YAML file. Overrides --exec_profile for data config loading.')
-    
+def main() -> None:
+    """Main function to run the data conversion pipeline."""
+    parser = argparse.ArgumentParser(description='Convert raw OHLCV data into processed data with technical indicators.')
+    parser.add_argument('--config', type=str, default=str(DEFAULT_CONFIG_PATH),
+                      help='Path to configuration file (default: config/data_config.yaml)')
     args = parser.parse_args()
     
     try:
-        # Charger la configuration
-        data_config_to_load = None
-        if args.data_config:
-            data_config_to_load = args.data_config
-            logger.info(f"Using explicit data_config from: {data_config_to_load}")
+        # Load configuration
+        config = load_config(Path(args.config))
+        
+        # Get assets from config
+        data_pipeline = config['data_pipeline']
+        if data_pipeline['source'] == 'ccxt':
+            assets = data_pipeline['ccxt_download']['symbols']
         else:
-            data_config_to_load = f"config/data_config_{args.exec_profile}.yaml"
-            logger.info(f"Using data_config derived from exec_profile '{args.exec_profile}': {data_config_to_load}")
-
-        try:
-            config = load_config(data_config_to_load) # load_config should return the dict
-            if config is None: # load_config might return None on error
-                raise FileNotFoundError(f"Configuration file {data_config_to_load} not found or empty.")
-            logger.info(f"Data configuration loaded successfully from {data_config_to_load}")
-        except FileNotFoundError:
-            logger.error(f"FATAL: Data configuration file not found at {data_config_to_load}")
-            sys.exit(1)
-        except Exception as e:
-            logger.error(f"FATAL: Error loading data configuration from {data_config_to_load}: {e}")
-            sys.exit(1)
+            # For local data, we'd need to scan the directory
+            raise NotImplementedError("Local data source not yet implemented")
         
-        # Exécuter le pipeline unifié
-        process_unified_pipeline(config, args.exec_profile)
-        
-        logger.info("🎉 Pipeline unifié terminé avec succès!")
+        # Process each asset
+        for asset in assets:
+            process_asset(asset, config)
+            
+        logger.info("Data conversion completed successfully.")
         
     except Exception as e:
-        logger.error(f"❌ Erreur dans le pipeline: {e}")
-        raise
+        logger.error(f"Error in data conversion pipeline: {e}", exc_info=True)
+        sys.exit(1)
 
 if __name__ == "__main__":
     main()

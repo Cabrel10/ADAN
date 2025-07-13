@@ -1,64 +1,125 @@
-# Configuration du Logging pour ADAN (format dictConfig)
+# Configuration du Logging pour ADAN - Version 3.1 (format dictConfig)
 version: 1
 disable_existing_loggers: false
 
+# Configuration des répertoires de logs
+log_dirs:
+  base: "logs"
+  dbe_replay: "logs/dbe_replay"  # Répertoire pour les logs du ReplayLogger
+  metrics: "logs/metrics"
+  models: "logs/models"
+
+# Définition des formats de log
 formatters:
+  # Format standard pour la console
   standard:
-    format: "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+    format: "%(asctime)s - %(name)-25s - %(levelname)-8s - %(message)s"
     datefmt: "%Y-%m-%d %H:%M:%S"
   
+  # Format détaillé pour les fichiers
   detailed:
-    format: "%(asctime)s - %(name)s - %(levelname)s - %(filename)s:%(lineno)d - %(message)s"
+    format: "%(asctime)s - %(name)-25s - %(levelname)-8s - %(filename)s:%(lineno)d - %(message)s"
+    datefmt: "%Y-%m-%d %H:%M:%S"
+    
+  # Format JSON pour l'analyse structurée
+  json:
+    class: pythonjsonlogger.jsonlogger.JsonFormatter
+    format: "%(asctime)s %(name)s %(levelname)s %(filename)s %(lineno)s %(message)s"
     datefmt: "%Y-%m-%d %H:%M:%S"
 
+# Gestionnaires de logs
 handlers:
+  # Console (sortie standard)
   console:
     class: logging.StreamHandler
     level: INFO
     formatter: standard
     stream: ext://sys.stdout
   
+  # Fichier de log principal
   file_handler:
-    class: logging.handlers.RotatingFileHandler
+    class: logging.handlers.TimedRotatingFileHandler
     level: DEBUG
     formatter: detailed
     filename: logs/adan.log
-    maxBytes: 10485760  # 10 MB
-    backupCount: 5
+    when: 'midnight'  # Rotation quotidienne
+    backupCount: 30    # Conserver 30 jours de logs
     encoding: utf-8
+    utc: True  # Utiliser UTC pour éviter les problèmes de changement d'heure
   
+  # Fichier d'erreurs
   error_file_handler:
     class: logging.handlers.RotatingFileHandler
     level: ERROR
     formatter: detailed
     filename: logs/error.log
     maxBytes: 10485760  # 10 MB
-    backupCount: 5
+    backupCount: 10
+    encoding: utf-8
+  
+  # Fichier de log structuré en JSON
+  json_file_handler:
+    class: logging.handlers.RotatingFileHandler
+    level: INFO
+    formatter: json
+    filename: logs/adan_structured.log
+    maxBytes: 10485760  # 10 MB
+    backupCount: 10
     encoding: utf-8
 
 # Configuration des loggers spécifiques
 loggers:
-  adan_trading_bot:
-    level: INFO
+  # Logger racine
+  '':
+    level: WARNING
     handlers: [console, file_handler, error_file_handler]
     propagate: no
   
-  adan_trading_bot.data_processing:
+  # Logger principal de l'application
+  adan:
     level: INFO
-    handlers: [console, file_handler]
+    handlers: [console, file_handler, json_file_handler]
     propagate: no
   
-  adan_trading_bot.environment:
+  # Loggers pour les différents modules
+  adan.data:
     level: INFO
-    handlers: [console, file_handler]
+    handlers: [file_handler, json_file_handler]
     propagate: no
   
-  adan_trading_bot.training:
+  adan.models:
     level: INFO
-    handlers: [console, file_handler]
+    handlers: [file_handler, json_file_handler]
+    propagate: no
+  
+  adan.training:
+    level: DEBUG
+    handlers: [file_handler, json_file_handler]
+    propagate: no
+  
+  adan.trading:
+    level: INFO
+    handlers: [console, file_handler, json_file_handler]
+    propagate: no
+  
+  # Loggers pour les dépendances
+  tensorflow:
+    level: WARNING
+    handlers: [file_handler]
+    propagate: no
+    
+  stable_baselines3:
+    level: INFO
+    handlers: [file_handler]
+    propagate: no
+    
+  urllib3:
+    level: WARNING
+    handlers: [file_handler]
     propagate: no
 
+# Configuration du niveau de log racine
 root:
-  level: INFO
-  handlers: [console, error_file_handler]
+  level: WARNING
+  handlers: [console, file_handler, error_file_handler]
   propagate: no

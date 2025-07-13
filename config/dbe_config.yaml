@@ -1,0 +1,11 @@
+risk_parameters:
+  base_sl_pct: 0.02
+  base_tp_pct: 0.04
+  drawdown_sl_factor: 2.5  # Augmenté pour plus de sensibilité
+  min_drawdown_threshold: 2.0  # Seuil minimal avant ajustement
+
+reward:
+  winrate_threshold: 0.55  # Baissé de 0.6
+  max_boost: 2.0
+  inaction_factor: 0.15  # Augmenté pour une meilleure incitation
+  min_action_frequency: 0.05  # Fréquence minimale attendue

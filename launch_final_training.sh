@@ -1,25 +1,21 @@
 #!/bin/bash
 
 # Script d'entraînement final optimisé pour ADAN
-# Usage: ./launch_final_training.sh [timesteps] [workers] [episode_steps]
+# Usage: ./launch_final_training.sh [config_file]
 
 # Configuration par défaut
-TIMESTEPS=${1:-2000000}
-WORKERS=${2:-4}
-EPISODE_STEPS=${3:-8000}
-EXEC_PROFILE="cpu_lot2"
-DEVICE="cpu"
-INITIAL_CAPITAL=15
+CONFIG_FILE=${1:-"config/main_config.yaml"}
 
 echo "🚀 ADAN - ENTRAÎNEMENT FINAL"
 echo "⏰ Début: $(date)"
-echo "📊 Configuration:"
-echo "   - Timesteps: $TIMESTEPS"
-echo "   - Workers CPU: $WORKERS"
-echo "   - Episode steps: $EPISODE_STEPS"
-echo "   - Profile: $EXEC_PROFILE"
-echo "   - Device: $DEVICE"
+echo "📊 Fichier de configuration: $CONFIG_FILE"
 echo ""
+
+# Vérification du fichier de configuration
+if [ ! -f "$CONFIG_FILE" ]; then
+    echo "❌ Erreur: Le fichier de configuration $CONFIG_FILE n'existe pas"
+    exit 1
+fi
 
 # Activation de l'environnement
 echo "🔧 Activation environnement trading_env..."
@@ -44,11 +40,7 @@ echo ""
 
 # Lancement avec gestion d'erreur
 if nohup python scripts/train_rl_agent.py \
-    --exec_profile $EXEC_PROFILE \
-    --device $DEVICE \
-    --initial_capital $INITIAL_CAPITAL \
-    --total_timesteps $TIMESTEPS \
-    --max_episode_steps $EPISODE_STEPS \
+    --config "$CONFIG_FILE" \
     > $LOG_FILE 2>&1 &
 then
     TRAIN_PID=$!

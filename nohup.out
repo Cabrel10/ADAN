@@ -1,0 +1,26 @@
+Traceback (most recent call last):
+  File "/home/morningstar/miniconda3/envs/trading_env/lib/python3.11/site-packages/matplotlib/style/core.py", line 137, in use
+    style = _rc_params_in_file(style)
+            ^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/morningstar/miniconda3/envs/trading_env/lib/python3.11/site-packages/matplotlib/__init__.py", line 866, in _rc_params_in_file
+    with _open_file_or_url(fname) as fd:
+  File "/home/morningstar/miniconda3/envs/trading_env/lib/python3.11/contextlib.py", line 137, in __enter__
+    return next(self.gen)
+           ^^^^^^^^^^^^^^
+  File "/home/morningstar/miniconda3/envs/trading_env/lib/python3.11/site-packages/matplotlib/__init__.py", line 843, in _open_file_or_url
+    with open(fname, encoding='utf-8') as f:
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+FileNotFoundError: [Errno 2] No such file or directory: 'seaborn'
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "/home/morningstar/Documents/trading/ADAN/scripts/train_rl_agent.py", line 50, in <module>
+    from src.adan_trading_bot.utils.visualization import TradingVisualizer
+  File "/home/morningstar/Documents/trading/ADAN/src/adan_trading_bot/utils/__init__.py", line 9, in <module>
+    from .visualization import TradingVisualizer, generate_training_report
+  File "/home/morningstar/Documents/trading/ADAN/src/adan_trading_bot/utils/visualization.py", line 20, in <module>
+    plt.style.use('seaborn')
+  File "/home/morningstar/miniconda3/envs/trading_env/lib/python3.11/site-packages/matplotlib/style/core.py", line 139, in use
+    raise OSError(
+OSError: 'seaborn' is not a valid package style, path of style file, URL of style file, or library style name (library styles are listed in `style.available`)

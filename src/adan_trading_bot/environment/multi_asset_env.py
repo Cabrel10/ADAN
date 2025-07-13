@@ -1,1116 +1,1582 @@
+#!/usr/bin/env python
+# -*- coding: utf-8 -*-
 """
-Multi-asset trading environment for the ADAN trading bot.
+Main Gymnasium environment for the ADAN trading bot.
+
+This file defines the core trading environment, which orchestrates data loading,
+feature engineering, state representation, action handling, and reward calculation.
 """
+
 import numpy as np
 import pandas as pd
 import gymnasium as gym
 from gymnasium import spaces
-from rich.console import Console
-from rich.table import Table
-from rich.text import Text
-from rich.panel import Panel
-from rich.rule import Rule
-from rich import box
-import os
-import time
+from typing import Dict, Any, Optional, List, Tuple
+from pathlib import Path
+import logging
 
-from ..common.utils import get_logger, ensure_dir_exists
-from ..common.constants import (
-    HOLD, BUY, SELL,
-    ACTION_HOLD, ACTION_BUY_ASSET_0, ACTION_SELL_ASSET_0,
-    ORDER_TYPE_MARKET, PENALTY_TIME
-)
+from ..data_processing.chunked_loader import ChunkedDataLoader
 from .state_builder import StateBuilder
-from .order_manager import OrderManager
-from .reward_calculator import RewardCalculator
+from ..environment.reward_calculator import RewardCalculator
+from ..portfolio.portfolio_manager import PortfolioManager
+from ..trading.order_manager import OrderManager
 
-logger = get_logger()
-console = Console()
+logger = logging.getLogger(__name__)
 
-class MultiAssetEnv(gym.Env):
+class AdanTradingEnv(gym.Env):
     """
-    Multi-asset trading environment for reinforcement learning.
-    
-    This environment simulates a trading scenario with multiple assets,
-    allowing an agent to learn optimal trading strategies through interaction.
+    A comprehensive, multi-asset trading environment for reinforcement learning.
+
+    This environment integrates all the components of the trading system:
+    - Data Loading: Uses ChunkedDataLoader to get data in chunks for memory efficiency.
+    - State Management: Uses StateBuilder to construct 3D observation space.
+    - Portfolio Management: Uses PortfolioManager to track finances across multiple assets.
+    - Order Execution: Uses OrderManager to simulate trades with fees and slippage.
+    - Reward Calculation: Uses RewardCalculator for reward shaping with optimal trade bonus.
     """
+    metadata = {'render_modes': ['human']}
     
-    metadata = {'render.modes': ['human']}
-    
-    # scaler parameter removed from __init__ as StateBuilder now loads the global scaler
-    def __init__(self, df_received, config, encoder=None, max_episode_steps_override=None):
+    def __init__(self, config: Dict[str, Any], mode: str = 'train'):
         """
-        Initialize the trading environment.
-        
+        Initialize the environment.
+
         Args:
-            df_received: DataFrame with market data.
-            config: Configuration dictionary.
-            # scaler: Optional pre-fitted scaler for market features. (Removed)
-            encoder: Optional pre-fitted encoder for dimensionality reduction.
-            max_episode_steps_override: Optional override for max episode steps.
+            config: Configuration dictionary with sections for data, portfolio, trading, etc.
+            mode: Either 'train', 'val', or 'test' to determine which data split to use.
         """
-        super(MultiAssetEnv, self).__init__()
-        
-        # Stocker la configuration
+        super().__init__()
         self.config = config
-        
-        # Initialiser les assets AVANT toute autre chose
-        self.assets = sorted(list(set(self.config.get('data', {}).get('assets', []))))
-        if not self.assets:
-            logger.critical("MultiAssetEnv __init__: ERREUR CRITIQUE - Aucun actif défini dans data_config['assets']!")
-            raise ValueError("Aucun actif défini dans la configuration.")
-        logger.info(f"MultiAssetEnv __init__: Utilisation des actifs de data_config: {self.assets}")
-        
-        # Logs détaillés pour le diagnostic du DataFrame reçu EN ARGUMENT
-        logger.info(f"MultiAssetEnv __init__ - DataFrame REÇU EN ARGUMENT (df_received). Shape: {df_received.shape if df_received is not None else 'None'}")
-        if df_received is not None and not df_received.empty:
-            logger.info(f"MultiAssetEnv __init__ - Colonnes du DataFrame REÇU (premières 30): {df_received.columns.tolist()[:30]}")
-            if not any(col.startswith('open_') and col.endswith(tuple(config.get('data', {}).get('assets', []))) for col in df_received.columns):
-                logger.error("MultiAssetEnv __init__ - ERREUR CRITIQUE : Le DataFrame REÇU par __init__ ne semble PAS être fusionné (pas de colonnes comme open_ADAUSDT) !")
-            else:
-                logger.info("MultiAssetEnv __init__ - DataFrame REÇU semble correct (colonnes fusionnées).")
-            
-            # Vérifier la présence des colonnes clés pour les 2 premiers actifs
-            for asset in self.assets[:2]:  # Juste vérifier les 2 premiers actifs pour éviter trop de logs
-                logger.info(f"MultiAssetEnv __init__ - df_received contient-il 'open_{asset}' ? {'open_' + asset in df_received.columns}")
-                logger.info(f"MultiAssetEnv __init__ - df_received contient-il 'close_{asset}' ? {'close_' + asset in df_received.columns}")
-        else:
-            logger.critical("MultiAssetEnv __init__ - ERREUR CRITIQUE : DataFrame REÇU est vide ou None!")
-            # Lever une exception pour arrêter proprement
-            raise ValueError("MultiAssetEnv a reçu un DataFrame vide ou None.")
-        
-        # Stocker le DataFrame (travailler sur une copie pour éviter les modifications inattendues)
-        self.df = df_received.copy()
-        
-        # Logs détaillés pour le diagnostic du DataFrame APRÈS affectation
-        logger.info(f"MultiAssetEnv __init__ - self.df APRÈS copie. Shape: {self.df.shape if self.df is not None else 'None'}")
-        if self.df is not None and not self.df.empty:
-            logger.info(f"MultiAssetEnv __init__ - self.df.shape: {self.df.shape}")
-            logger.info(f"MultiAssetEnv __init__ - Premières colonnes (10 max): {self.df.columns.tolist()[:10]}")
-            logger.info(f"MultiAssetEnv __init__ - Aperçu des 2 premières lignes:")
-            for index, row in self.df.head(2).iterrows():
-                logger.info(f"  Index: {index}, Premières valeurs (5 max): {[str(val)[:15] for val in row.values[:5]]}")
-        else:
-            logger.critical("MultiAssetEnv __init__ - ERREUR CRITIQUE - self.df APRÈS copie est vide ou None!")
-        
-        # self.scaler = scaler # Scaler is no longer passed directly, StateBuilder handles global scaler
-        self.encoder = encoder
-        
-        # Environment configuration
-        env_config = config.get('environment', {})
-        
-        # Charger les configurations depuis le fichier environment_config.yaml
-        # Capital initial
-        self.initial_capital = env_config.get('initial_capital', 10000.0)
-        
-        # Configurations des transactions, ordres et pénalités
-        self.transaction_config = env_config.get('transaction', {})
-        self.order_rules_config = env_config.get('order_rules', {})
-        self.penalties_config = env_config.get('penalties', {})
-        
-        # Charger les paramètres de transaction
-        self.fee_percent = self.transaction_config.get('fee_percent', 0.001)
-        self.fixed_fee = self.transaction_config.get('fixed_fee', 0.0)
-        
-        # Charger les règles d'ordre
-        self.min_order_value_tolerable = self.order_rules_config.get('min_value_tolerable', 10.0)
-        self.min_order_value_absolute = self.order_rules_config.get('min_value_absolute', 9.0)
-        
-        # Afficher les premières colonnes du DataFrame pour le débogage
-        logger.info(f"Colonnes disponibles dans le DataFrame fusionné (premières 15): {self.df.columns.tolist()[:15]}")
-        
-        # Vérification de la présence des colonnes attendues pour les actifs
-        expected_columns = []
-        for asset in self.assets:
-            expected_columns.extend([f"open_{asset}", f"high_{asset}", f"low_{asset}", f"close_{asset}"])
-        
-        found_columns = [col for col in expected_columns if col in self.df.columns]
-        missing_columns = [col for col in expected_columns if col not in self.df.columns]
-        
-        if found_columns:
-            logger.info(f"Trouvé {len(found_columns)}/{len(expected_columns)} colonnes attendues pour les actifs")
-            logger.info(f"Exemples de colonnes trouvées: {found_columns[:5]}")
-        
-        if missing_columns:
-            logger.error(f"ATTENTION: {len(missing_columns)} colonnes attendues sont MANQUANTES!")
-            logger.error(f"Exemples de colonnes manquantes: {missing_columns[:10]}")
-            logger.error("Le DataFrame ne contient pas toutes les colonnes attendues pour les actifs définis dans la configuration.")
-            # Ne pas lever d'exception ici pour permettre l'utilisation de notre solution temporaire
-            logger.warning(f"Continuons avec les actifs définis dans la configuration: {self.assets}")
-        
-        # Limit to 5 assets maximum (for the 11 discrete actions)
-        if len(self.assets) > 5:
-            logger.warning(f"More than 5 assets found ({len(self.assets)}). Using only the first 5: {self.assets[:5]}")
-            self.assets = self.assets[:5]
-        elif not self.assets:  # Si la liste est vide pour une raison quelconque
-            logger.error("CRITICAL: No assets defined or detected. Defaulting to 5 placeholder assets.")
-            self.assets = [f'ASSET_{i}' for i in range(5)]
-        
-        logger.info(f"Final assets being used by environment: {self.assets}")
-        
-        # Get CNN configuration from data_config
-        data_config = config.get('data', {})
-        self.cnn_input_window_size = data_config.get('cnn_input_window_size', 20)
-        
-        # Get training timeframe
-        self.training_timeframe = data_config.get('training_timeframe', '1h')
-        logger.info(f"Training timeframe set to: {self.training_timeframe}")
-        
-        # Dynamically build base_feature_names
-        current_base_features_per_asset = []
-        logger.info(f"Determining base features for training timeframe: {self.training_timeframe}...")
-
-        if self.training_timeframe == '1m':
-            base_1m_features = data_config.get('base_market_features', ['open', 'high', 'low', 'close', 'volume'])
-            current_base_features_per_asset.extend(base_1m_features)
-            logger.info(f"For 1m timeframe, using 'base_market_features' from config: {base_1m_features}")
-        else: # For '1h' or '1d'
-            current_base_features_per_asset.extend(['open', 'high', 'low', 'close', 'volume'])
-            logger.info(f"Base OHLCV features for {self.training_timeframe}: {['open', 'high', 'low', 'close', 'volume']}")
-
-            # Fetching indicators_by_timeframe from the root of the config object (self.config)
-            # This aligns with how convert_real_data.py accesses it.
-            indicators_config_for_timeframe = self.config.get('indicators_by_timeframe', {}).get(self.training_timeframe, [])
-
-            if indicators_config_for_timeframe:
-                logger.info(f"Found {len(indicators_config_for_timeframe)} indicator configurations for {self.training_timeframe} from self.config.")
-                for indicator_spec in indicators_config_for_timeframe:
-                    # Use 'alias' if available, otherwise 'name'. 'output_col_name' or 'output_col_names' from feature_engineer.py seems more robust
-                    # For consistency with feature_engineer.py, let's try to use 'output_col_name' or first of 'output_col_names'
-                    indicator_base_name = None
-                    if 'output_col_name' in indicator_spec:
-                        indicator_base_name = indicator_spec['output_col_name']
-                    elif 'output_col_names' in indicator_spec and isinstance(indicator_spec['output_col_names'], list) and indicator_spec['output_col_names']:
-                        indicator_base_name = indicator_spec['output_col_names'][0] # Take the first one
-                    elif 'alias' in indicator_spec: # Fallback to alias
-                         indicator_base_name = indicator_spec['alias']
-                    elif 'name' in indicator_spec: # Fallback to name
-                         indicator_base_name = indicator_spec['name']
-
-                    if indicator_base_name:
-                        feature_name_with_suffix = f"{indicator_base_name}_{self.training_timeframe}"
-                        current_base_features_per_asset.append(feature_name_with_suffix)
-                        logger.debug(f"Added indicator feature: {feature_name_with_suffix}")
-                    else:
-                        logger.warning(f"Could not determine base name for indicator spec: {indicator_spec}")
-            else:
-                logger.info(f"No specific indicator configurations found for {self.training_timeframe} in data_config['indicators_by_timeframe']. Only OHLCV will be used.")
-
-        self.base_feature_names = list(dict.fromkeys(current_base_features_per_asset)) # Remove duplicates while preserving order
-        logger.info(f"Dynamically determined base_feature_names for {self.training_timeframe}: {self.base_feature_names}")
-        
-        # Determine the number of market features per step
-        self.num_market_features_per_step = len(self.base_feature_names) * len(self.assets)
-        
-        # Define the image shape for CNN
-        self.num_input_channels = 1  # Default to 1 channel
-        self.image_shape = (self.num_input_channels, self.cnn_input_window_size, self.num_market_features_per_step)
-        
-        logger.info(f"CNN input shape: {self.image_shape}")
-        logger.info(f"Base feature names: {self.base_feature_names}")
+        self.mode = mode
         
         # Initialize components
-        # Scaler argument removed from StateBuilder instantiation
-        self.state_builder = StateBuilder(config, self.assets, encoder=encoder,
-                                         base_feature_names=self.base_feature_names, 
-                                         cnn_input_window_size=self.cnn_input_window_size)
-        self.order_manager = OrderManager(config) # OrderManager might also need config for fees, etc.
-        self.reward_calculator = RewardCalculator(config)
+        self._init_components()
         
-        # Define action and observation spaces
-        self.action_space = spaces.Discrete(1 + 2 * len(self.assets))  # HOLD + BUY/SELL for each asset
+        # Initialize state tracking
+        self.current_step = 0
+        self.step_in_chunk = 0
+        self.current_chunk_idx = 0
+        self.optimal_chunk_pnl = 0.0
+        self.done = False
         
-        # Get observation space dimensions FROM StateBuilder to ensure consistency
-        obs_space_dims = self.state_builder.get_observation_space_dim()
-        self.image_shape = obs_space_dims["image_features"] # Update self.image_shape to be consistent
-        self.num_market_features_per_step = self.image_shape[2] # Update num_market_features_per_step based on actual width
-        logger.info(f"Updated self.image_shape from StateBuilder: {self.image_shape}")
-        logger.info(f"Updated self.num_market_features_per_step from StateBuilder: {self.num_market_features_per_step}")
-
-        # Define observation space as a dictionary using the consistent image_shape
+        logger.info(f"AdanTradingEnv initialized in {mode} mode")
+    
+    def _init_components(self) -> None:
+        """Initialize all environment components."""
+        # 1. Initialize data loader for the current split
+        self._init_data_loader()
+        
+        # 2. Initialize state builder with window size
+        self.state_builder = StateBuilder(
+            window_size=self.config['state'].get('window_size', 30),
+            timeframes=self.config['data'].get('timeframes', ['5m', '1h', '4h'])
+        )
+        
+        # 3. Initialize portfolio manager
+        self.portfolio = PortfolioManager(
+            initial_balance=self.config['portfolio'].get('initial_balance', 10000.0),
+            max_leverage=self.config['portfolio'].get('max_leverage', 3.0),
+            risk_per_trade=self.config['portfolio'].get('risk_per_trade', 0.01)
+        )
+        
+        # 4. Initialize order manager
+        self.order_manager = OrderManager(
+            slippage=self.config['trading'].get('slippage', 0.0005),
+            commission=self.config['trading'].get('commission', 0.0005)
+        )
+        
+        # 5. Initialize reward calculator
+        self.reward_calculator = RewardCalculator(
+            config=self.config.get('rewards', {})
+        )
+        
+        # Set up action and observation spaces
+        self._setup_spaces()
+    
+    def _init_data_loader(self) -> None:
+        """
+        Initialize the chunked data loader for the current split.
+        
+        This method sets up the ChunkedDataLoader with the appropriate configuration
+        for the current mode (train/val/test) and extracts the list of available assets.
+        """
+        data_config = self.config['data']
+        
+        # Get the base data directory
+        base_data_dir = Path(data_config.get('data_dir', 'data/final'))
+        
+        # Get features configuration
+        features_config = self._get_features_config()
+        
+        # Initialize the data loader with the new structure
+        self.data_loader = ChunkedDataLoader(
+            data_dir=base_data_dir,
+            chunk_size=data_config.get('chunk_size', 10000),
+            assets_list=data_config.get('assets'),
+            features_by_timeframe=features_config,
+            split=self.mode,  # 'train', 'val', or 'test'
+            timeframes=data_config.get('timeframes', ['5m', '1h', '4h'])
+        )
+        
+        # Store assets list for easy access
+        self.assets = self.data_loader.assets_list
+        if not self.assets:
+            raise ValueError("No assets available for trading")
+            
+        logger.info(f"Initialized {self.mode} data loader with {len(self.assets)} assets")
+        logger.debug(f"Available assets: {self.assets}")
+    
+    def _get_features_config(self) -> Dict[str, List[str]]:
+        """Extract features configuration from the main config."""
+        features_config = {}
+        
+        if 'feature_engineering' in self.config and 'timeframes' in self.config['feature_engineering']:
+            for tf in self.config['feature_engineering']['timeframes']:
+                features_config[tf] = self.config['feature_engineering'].get('features', {}).get(tf, [
+                    'open', 'high', 'low', 'close', 'volume'
+                ])
+        else:
+            # Default features if not specified
+            features_config = {
+                '5m': ['open', 'high', 'low', 'close', 'volume'],
+                '1h': ['open', 'high', 'low', 'close'],
+                '4h': ['open', 'close']
+            }
+            
+        return features_config
+    
+    def _setup_spaces(self) -> None:
+        """Set up action and observation spaces."""
+        # Action space: [hold, buy, sell] for each asset
+        self.action_space = spaces.MultiDiscrete(
+            [3] * len(self.assets)  # 0=hold, 1=buy, 2=sell for each asset
+        )
+        
+        # Get observation space shape from state builder
+        obs_shape = self.state_builder.get_observation_shape()
+        
+        # Create observation space as a dictionary with an entry per asset
         self.observation_space = spaces.Dict({
-            "image_features": spaces.Box(
-                low=-np.inf, high=np.inf, 
-                shape=self.image_shape, # Use the updated self.image_shape
-                dtype=np.float32
-            ),
-            "vector_features": spaces.Box(
-                low=-np.inf, high=np.inf, 
-                shape=(obs_space_dims["vector_features"],), 
+            asset: spaces.Box(
+                low=-np.inf,
+                high=np.inf,
+                shape=obs_shape,
                 dtype=np.float32
             )
+            for asset in self.assets
         })
-        
-        # Initialize state variables (will be reset before use)
-        self.capital = self.initial_capital
-        self.positions = {}  # {asset_id: {"qty": quantity, "price": price}}
-        self.current_step = 0
-        self.history = []
-        self.trade_log = []
-        self.cumulative_reward = 0.0
-        
-        # Determine the number of steps in an episode
-        self.max_steps = len(self.df) if 'pair' not in self.df.columns else len(self.df) // len(self.assets)
-        
-        # Override max steps if provided
-        if max_episode_steps_override is not None:
-            self.max_steps = min(max_episode_steps_override, self.max_steps)
-            logger.info(f"Max episode steps overridden to: {self.max_steps}")
-        
-        # Export settings
-        self.export_history = env_config.get('export_history', True)
-        self.export_dir = env_config.get('export_dir', None)
-        
-        logger.info(f"MultiAssetEnv initialized with {len(self.assets)} assets and {self.max_steps} steps")
     
-    def reset(self, *, seed=None, options=None):
+    def reset(self, **kwargs) -> Tuple[Dict[str, np.ndarray], Dict[str, Any]]:
         """
-        Reset the environment to its initial state.
+        Reset the environment to start a new episode.
+        
+        This method performs the following steps:
+        1. Resets all environment state variables
+        2. Resets the portfolio
+        3. Loads the first chunk of data
+        4. Initializes chunk metrics
+        5. Returns the initial observation and info
         
         Args:
-            seed: Random seed for reproducibility.
-            options: Additional options for reset.
+            **kwargs: Additional arguments that might be used by wrappers
             
         Returns:
-            tuple: (observation, info)
+            Tuple containing:
+            - observation: Initial observation for each asset
+            - info: Additional information about the environment state
+            
+        Raises:
+            RuntimeError: If the environment cannot be reset (e.g., no data available)
         """
-        super().reset(seed=seed)
-        
-        # Reset state variables
-        self.capital = self.initial_capital
-        self.positions = {}
-        self.current_step = 0
-        self.history = []
-        self.trade_log = []
-        self.cumulative_reward = 0.0
-        
-        # Clear pending orders
-        self.order_manager.clear_pending_orders()
-        
-        # Get initial observation
-        observation = self._get_observation()
-        
-        # Initial info
-        info = {
-            "portfolio_value": self.initial_capital,
-            "capital": self.capital,
-            "positions": self.positions.copy(),
-            "step": self.current_step
-        }
-        
-        return observation, info
+        try:
+            # Reset environment state
+            self.current_step = 0
+            self.step_in_chunk = 0
+            self.current_chunk_idx = 0
+            self.done = False
+            
+            # Reset reward history
+            if hasattr(self, 'reward_history'):
+                self.reward_history = []
+            
+            # Reset portfolio
+            if not hasattr(self, 'portfolio'):
+                raise RuntimeError("Portfolio not initialized. Call _init_components() first.")
+                
+            self.portfolio.reset()
+            
+            # Reset data loader if needed
+            if not hasattr(self, 'data_loader'):
+                self._init_data_loader()
+            
+            # Load the first chunk of data
+            self.current_chunk = self.data_loader.load_chunk(0)
+            if not self.current_chunk:
+                raise ValueError("No data available in the data loader")
+            
+            # Log chunk information
+            chunk_start = next(iter(self.current_chunk.values()))['timestamp'].iloc[0]
+            chunk_end = next(iter(self.current_chunk.values()))['timestamp'].iloc[-1]
+            logger.info(
+                f"Reset environment. Loaded chunk 0 with data from {chunk_start} to {chunk_end} "
+                f"({len(next(iter(self.current_chunk.values())))} steps)"
+            )
+            
+            # Initialize chunk metrics
+            self._initialize_chunk_metrics()
+            
+            # Initialize observation space if not already done
+            if not hasattr(self, 'observation_space'):
+                self._initialize_observation_space()
+            
+            # Get initial observation
+            observation = self._get_observation()
+            info = self._get_info()
+            
+            # Log successful reset
+            logger.info("Environment reset completed successfully")
+            
+            return observation, info
+            
+        except Exception as e:
+            error_msg = f"Error resetting environment: {str(e)}"
+            logger.error(error_msg, exc_info=True)
+            raise RuntimeError(error_msg) from e
     
-    def step(self, action):
+    def step(self, action: np.ndarray) -> Tuple[Dict[str, np.ndarray], float, bool, bool, Dict[str, Any]]:
         """
-        Take a step in the environment by executing the given action.
+        Execute one time step within the environment.
         
         Args:
-            action: Action to take (index in the action space).
+            action: Action to take (0=hold, 1=buy, 2=sell for each asset)
             
         Returns:
-            tuple: (observation, reward, terminated, truncated, info)
+            observation: Next observation for each asset
+            reward: Reward for the current step
+            terminated: Whether the episode is done
+            truncated: Whether the episode was truncated
+            info: Additional information
         """
-        # Ensure action is valid
-        assert self.action_space.contains(action), f"Invalid action: {action}"
+        if self.done:
+            raise RuntimeError("Episode has already terminated. Call reset() to start a new episode.")
         
-        # Store portfolio value before action
-        old_portfolio_value = self._calculate_portfolio_value()
+        # Execute trades based on actions
+        self._execute_trades(action)
         
-        # Get current prices for all assets
-        current_prices = self._get_current_prices()
+        # Move to next step
+        self.current_step += 1
+        self.step_in_chunk += 1
         
-        # Process pending orders
-        reward_mod, executed_orders, self.capital, self.positions = self.order_manager.process_pending_orders(
-            current_prices, self.capital, self.positions, self.current_step
-        )
-        
-        # Log executed orders
-        for order_info in executed_orders:
-            self.trade_log.append({
-                "step": self.current_step,
-                "type": "EXECUTED_ORDER",
-                **order_info
-            })
-        
-        # Translate action to order parameters
-        asset_id, action_type = self._translate_action(action)
-        
-        # Execute the action if not HOLD
-        trade_info = {}
-        if action_type != HOLD:
-            # Get current price for the asset
-            if asset_id in current_prices:
-                current_price = current_prices[asset_id]
+        # Check if we need to load the next chunk
+        chunk_size = len(next(iter(self.current_chunk.values())))
+        if self.step_in_chunk >= chunk_size:
+            # Calculate agent's PnL for the completed chunk
+            agent_chunk_pnl = self.portfolio.get_portfolio_value() - self.portfolio.initial_balance
+            
+            # Calculate optimal trade bonus (if any)
+            optimal_bonus = self.reward_calculator.calculate_optimal_bonus(
+                agent_pnl=agent_chunk_pnl,
+                optimal_pnl=self.optimal_chunk_pnl
+            )
+            
+            # Store for info
+            self.last_chunk_pnl = agent_chunk_pnl
+            self.last_optimal_bonus = optimal_bonus
+            
+            # Load next chunk
+            self.current_chunk_idx += 1
+            try:
+                self.current_chunk = self.data_loader.load_chunk(self.current_chunk_idx)
+                self.step_in_chunk = 0
                 
-                # Get current tier
-                current_tier = self.reward_calculator.get_current_tier(self.capital)
-                logger.info(f"[step] Action: {action}, Asset: {asset_id}, Action Type: {action_type}")
-                logger.info(f"[step] Current capital: ${self.capital:.2f}, Current price: ${current_price:.4f}")
-                logger.info(f"[step] Current tier: {current_tier}")
-                logger.info(f"[step] Current positions: {self.positions}")
-                
-                # Check max positions constraint for BUY
-                if action_type == BUY:
-                    if len(self.positions) >= current_tier["max_positions"] and asset_id not in self.positions:
-                        # Can't open new position, max reached
-                        logger.warning(f"[step] Cannot open new position: max positions ({current_tier['max_positions']}) reached")
-                        # Utiliser la pénalité configurée pour max_positions_reached
-                        penalty = self.penalties_config.get('max_positions_reached', -0.2)
-                        reward_mod_action, status, trade_info = penalty, "INVALID_MAX_POSITIONS", {
-                            "reason": f"Max positions ({current_tier['max_positions']}) reached",
-                            "reward_mod": penalty
-                        }
-                    else:
-                        # Execute BUY order
-                        logger.info(f"[step] Calculating allocation value for {asset_id}")
-                        allocated_value_usdt = self._get_position_size(asset_id, current_price, current_tier)
-                        logger.info(f"[step] Allocated value: ${allocated_value_usdt:.2f}")
-                        
-                        reward_mod_action, status, trade_info = self.order_manager.execute_order(
-                            asset_id, action_type, current_price, self.capital, self.positions,
-                            allocated_value_usdt=allocated_value_usdt, order_type=ORDER_TYPE_MARKET, current_step=self.current_step
-                        )
-                        logger.info(f"[step] Order execution result: status={status}, reward_mod={reward_mod_action}")
-                        
-                        # Update capital if order was successful
-                        if status == "BUY_EXECUTED":
-                            old_capital = self.capital
-                            self.capital = self.capital - trade_info["total_cost"]
-                            logger.info(f"[step] BUY executed: capital ${old_capital:.2f} -> ${self.capital:.2f}, cost: ${trade_info['total_cost']:.2f}")
-                            logger.info(f"[step] New position: {asset_id}, quantity: {trade_info['quantity']:.6f}, price: ${trade_info['price']:.4f}")
-                else:
-                    # Execute SELL order
-                    reward_mod_action, status, trade_info = self.order_manager.execute_order(
-                        asset_id, action_type, current_price, self.capital, self.positions,
-                        order_type=ORDER_TYPE_MARKET, current_step=self.current_step
-                    )
-                    
-                    # Update capital if order was successful
-                    if status == "SELL_EXECUTED":
-                        old_capital = self.capital
-                        self.capital = self.capital + trade_info["value"] - trade_info["fee"]
-                        logger.info(f"[step] SELL executed: capital ${old_capital:.2f} -> ${self.capital:.2f}, value: ${trade_info['value']:.2f}, fee: ${trade_info['fee']:.2f}")
-                        logger.info(f"[step] Position closed: {asset_id}")
-                
-                # Add to reward modifier
-                reward_mod += reward_mod_action
-                
-                # Log the trade
-                self.trade_log.append({
-                    "step": self.current_step,
-                    "action": action,
-                    "action_type": action_type,
-                    "asset_id": asset_id,
-                    "status": status,
-                    "reward_mod": reward_mod_action,
-                    **trade_info
-                })
-            else:
-                # Asset price not available
-                logger.warning(f"[step] Cannot execute order: price not available for {asset_id}")
-                # Utiliser la pénalité configurée pour price_not_available
-                penalty = self.penalties_config.get('price_not_available', -0.1)
-                reward_mod_action, status, trade_info = penalty, "PRICE_NOT_AVAILABLE", {
-                    "reason": f"Price not available for {asset_id}",
-                    "reward_mod": penalty
-                }
-        else:
-            # HOLD action
-            # Appliquer une petite pénalité pour chaque pas de temps (time_step penalty)
-            reward_mod += self.penalties_config.get('time_step', -0.001)
-            trade_info = {"reason": "HOLD action"}
+                # Calculate optimal PnL for the new chunk
+                self.optimal_chunk_pnl = self.data_loader.calculate_optimal_pnl_for_chunk(
+                    self.current_chunk
+                )
+            except IndexError:
+                # No more chunks available
+                self.done = True
         
-        # Calculate new portfolio value
-        new_portfolio_value = self._calculate_portfolio_value()
+        # Calculate reward for this step (includes any optimal trade bonus)
+        reward = self._calculate_reward()
         
-        # Calculate reward
-        current_tier = self.reward_calculator.get_current_tier(self.capital)
-        reward = self.reward_calculator.calculate_reward(
-            old_portfolio_value, new_portfolio_value, penalties=-reward_mod, tier=current_tier
-        )
-        
-        # Update cumulative reward
-        self.cumulative_reward += reward
-        
-        # Get new observation
+        # Get next observation
         observation = self._get_observation()
         
         # Check if episode is done
-        done = False
+        terminated = self.done
+        truncated = False  # Can be set by wrappers
         
-        # Bankruptcy check (capital too low and no positions)
-        if self.capital <= self.min_order_value_absolute and not self.positions:
-            done = True
+        # Get additional info
+        info = self._get_info()
         
-        # End of data check
-        if self.current_step >= self.max_steps - 1:
-            done = True
+        return observation, reward, terminated, truncated, info
+    
+    def _init_components(self) -> None:
+        """Initialize all environment components."""
+        # 1. Initialize data loader for the current split
+        self._init_data_loader()
         
-        # Record state in history
-        self.history.append({
-            "step": self.current_step,
-            "action": action,
-            "reward": reward,
-            "cumulative_reward": self.cumulative_reward,
-            "portfolio_value": new_portfolio_value,
-            "capital": self.capital,
-            "positions": self.positions.copy(),
-            "old_portfolio_value": old_portfolio_value,
-            "reward_mod": reward_mod,
-            "done": done
+        # 2. Initialize state builder with window size
+        self.state_builder = StateBuilder(
+            window_size=self.config['state'].get('window_size', 30),
+            timeframes=self.config['data'].get('timeframes', ['5m', '1h', '4h'])
+        )
+        
+        # 3. Initialize portfolio manager
+        self.portfolio = PortfolioManager(
+            initial_balance=self.config['portfolio'].get('initial_balance', 10000.0),
+            max_leverage=self.config['portfolio'].get('max_leverage', 3.0),
+            risk_per_trade=self.config['portfolio'].get('risk_per_trade', 0.01)
+        )
+        
+        # 4. Initialize order manager
+        self.order_manager = OrderManager(
+            slippage=self.config['trading'].get('slippage', 0.0005),
+            commission=self.config['trading'].get('commission', 0.0005)
+        )
+        
+        # 5. Initialize reward calculator
+        self.reward_calculator = RewardCalculator(
+            config=self.config.get('rewards', {})
+        )
+        
+        # 5. Initialize state builder
+        self.state_builder = StateBuilder(
+            config=self.config.get('state', {})
+        )
+    
+    def _init_data_loader(self) -> None:
+        """Initialize the chunked data loader."""
+        data_config = self.config['data']
+        
+        # Get timeframes from config or use default
+        timeframes = self.config.get('feature_engineering', {}).get('timeframes', ['5m', '1h', '4h'])
+        
+        # Initialize the data loader with correct parameters
+        self.data_loader = ChunkedDataLoader(
+            data_dir=Path(data_config.get('data_dir', 'data/final')),
+            chunk_size=data_config.get('chunk_size', 10000),
+            assets_list=data_config.get('assets'),
+            features_by_timeframe=self._get_features_config(),
+            split=self.mode,  # 'train', 'val', or 'test'
+            timeframes=timeframes
+        )
+        
+        # Store assets list for easy access
+        self.assets = self.data_loader.assets_list
+        if not self.assets:
+            raise ValueError("No assets available for trading")
+            
+        logger.info(f"Initialized data loader with {len(self.assets)} assets and timeframes: {timeframes}")
+    
+    def _get_features_config(self) -> Dict[str, List[str]]:
+        """Extract features configuration from the main config."""
+        features_config = {}
+        
+        if 'feature_engineering' in self.config and 'timeframes' in self.config['feature_engineering']:
+            for tf in self.config['feature_engineering']['timeframes']:
+                features_config[tf] = self.config['feature_engineering'].get('features', {}).get(tf, [
+                    'open', 'high', 'low', 'close', 'volume'
+                ])
+        else:
+            # Default features if not specified
+            features_config = {
+                '5m': ['open', 'high', 'low', 'close', 'volume'],
+                '1h': ['open', 'high', 'low', 'close'],
+                '4h': ['open', 'close']
+            }
+            
+        return features_config
+    
+    def _setup_spaces(self) -> None:
+        """Set up action and observation spaces."""
+        # Action space: [hold, buy, sell] for each asset
+        self.action_space = spaces.MultiDiscrete(
+            [3] * len(self.assets)  # 0=hold, 1=buy, 2=sell for each asset
+        )
+        
+        # Get observation space shape from state builder
+        obs_shape = self.state_builder.get_observation_shape()
+        
+        # Create observation space as a dictionary with an entry per asset
+        self.observation_space = spaces.Dict({
+            asset: spaces.Box(
+                low=-np.inf,
+                high=np.inf,
+                shape=obs_shape,
+                dtype=np.float32
+            )
+            for asset in self.assets
         })
         
-        # Display trading table
-        self._display_trading_table(
-            action, old_portfolio_value, new_portfolio_value, 
-            reward, reward_mod, trade_info
-        )
+        # Load the first chunk of data
+        self.current_data = self.data_loader.load_chunk(0)
         
-        # Prepare info dictionary
-        info = {
-            "portfolio_value": new_portfolio_value,
-            "capital": self.capital,
-            "positions": self.positions.copy(),
-            "step": self.current_step,
-            "reward_mod": reward_mod,
-            "trade_info": trade_info,
-            "tier": current_tier
-        }
-        
-        # Increment step counter
-        self.current_step += 1
-        
-        return observation, reward, done, False, info
+        # Initialize observation space
+        self._initialize_observation_space()
     
-    def _get_observation(self):
+    def _initialize_observation_space(self) -> None:
         """
-        Get the current observation.
+        Initialize the observation space based on the first data point.
+        
+        This method sets up the observation space as a dictionary of Box spaces,
+        one for each asset, with shapes determined by the StateBuilder.
+        """
+        if not self.current_data:
+            raise ValueError("No data available to initialize observation space")
+        
+        # Get state shape from the state builder
+        sample_asset = next(iter(self.current_data.keys()))
+        sample_data = self.current_data[sample_asset].iloc[0:1]
+        state_shape = self.state_builder.get_observation_shape()
+        
+        # Create observation space as a dictionary with an entry per asset
+        self.observation_space = spaces.Dict({
+            asset: spaces.Box(
+                low=-np.inf,
+                high=np.inf,
+                shape=state_shape,
+                dtype=np.float32
+            )
+            for asset in self.assets
+        })
+
+    def step(self, action: np.ndarray) -> Tuple[Dict[str, np.ndarray], float, bool, bool, Dict[str, Any]]:
+        """
+        Execute one time step within the environment.
+        
+        This method executes the following steps:
+        1. Validates the current environment state
+        2. Executes trades based on the action vector
+        3. Updates the environment state
+        4. Calculates the reward
+        5. Checks termination conditions
+        
+        Args:
+            action: Array of actions (0=hold, 1=buy, 2=sell) for each asset
+            
+        Returns:
+            Tuple containing:
+            - observation: Dict mapping asset names to their 3D observation tensors
+            - reward: Float representing the reward for the current step
+            - terminated: Boolean indicating if the episode has ended
+            - truncated: Boolean indicating if the episode was truncated
+            - info: Dictionary containing diagnostic information
+            
+        Raises:
+            RuntimeError: If the environment is in an invalid state
+            ValueError: If the action is invalid
+        """
+        if not hasattr(self, 'current_data') or not self.current_data:
+            raise RuntimeError("Environment not properly initialized. Call reset() first.")
+            
+        if self.done:
+            raise RuntimeError("Episode has already terminated. Call reset() to start a new episode.")
+        
+        # Validate action
+        if not isinstance(action, (np.ndarray, list)):
+            raise ValueError(f"Action must be a numpy array or list, got {type(action)}")
+            
+        if len(action) != len(self.assets):
+            raise ValueError(
+                f"Action dimension {len(action)} does not match "
+                f"number of assets {len(self.assets)}"
+            )
+        
+        try:
+            # Execute trades based on actions
+            self._execute_trades(np.asarray(action))
+            
+            # Update step counters
+            self.current_step += 1
+            self.step_in_chunk += 1
+            
+            # Check if we need to load the next chunk
+            current_chunk_length = len(next(iter(self.current_data.values())))
+            if self.step_in_chunk >= current_chunk_length:
+                self._handle_chunk_transition()
+            
+            # Get next observation
+            observation = self._get_observation()
+            
+            # Calculate reward
+            reward = self._calculate_reward()
+            
+            # Check if episode is done
+            terminated = self.done
+            truncated = False  # Can be set by wrappers or custom logic
+            
+            # Get additional info
+            info = self._get_info()
+            
+            # Add step information to info
+            info.update({
+                'current_step': self.current_step,
+                'step_in_chunk': self.step_in_chunk,
+                'chunk_idx': self.current_chunk_idx,
+                'timestamp': self._get_current_timestamp().isoformat()
+            })
+            
+            # Log progress
+            if self.current_step % 100 == 0:
+                logger.info(
+                    f"Step {self.current_step} (Chunk {self.current_chunk_idx}, "
+                    f"Step {self.step_in_chunk}): Reward={reward:.4f}, "
+                    f"Portfolio Value={self.portfolio.portfolio_value:.2f}"
+                )
+            
+            return observation, reward, terminated, truncated, info
+            
+        except Exception as e:
+            logger.error(f"Error in step {self.current_step}: {str(e)}")
+            # Return a zero observation and negative reward on error
+            obs_shape = self.state_builder.get_observation_shape()
+            zero_obs = {asset: np.zeros(obs_shape, dtype=np.float32) for asset in self.assets}
+            return zero_obs, -10.0, True, False, {'error': str(e)}
+
+    def _initialize_chunk_metrics(self) -> None:
+        """
+        Initialize metrics for the current chunk.
+        
+        This method is called at the start of each new chunk to set up tracking
+        of chunk-specific metrics like optimal PnL and bonus calculations.
+        It performs the following operations:
+        1. Calculates the optimal PnL for the chunk based on price movements
+        2. Initializes tracking metrics for the chunk
+        3. Sets up reward calculation parameters
+        4. Logs the initialization details
+        
+        The optimal PnL is calculated based on the highest frequency timeframe
+        available in the data (typically 5m). This provides a realistic benchmark
+        for the agent's performance.
+        """
+        if not hasattr(self, 'portfolio') or not hasattr(self, 'current_data') or not self.current_data:
+            logger.warning("Cannot initialize chunk metrics: Portfolio or data not available")
+            return
+            
+        try:
+            # Get the highest frequency timeframe (first in the list)
+            highest_tf = self.state_builder.timeframes[0] if hasattr(self.state_builder, 'timeframes') else '5m'
+            close_col = f"{highest_tf}_close"
+            
+            # Get the first available asset's data for optimal PnL calculation
+            asset_name, chunk_data = next(iter(self.current_data.items()))
+            
+            if chunk_data.empty:
+                logger.warning(f"Empty data for {asset_name} in chunk {self.current_chunk_idx}")
+                return
+                
+            # Ensure we have the required columns
+            if close_col not in chunk_data.columns:
+                # Fall back to any close column if the exact one isn't found
+                close_cols = [col for col in chunk_data.columns if col.endswith('_close')]
+                if not close_cols:
+                    logger.warning(f"No close price column found in chunk {self.current_chunk_idx}")
+                    return
+                close_col = close_cols[0]
+            
+            # Calculate price changes and optimal PnL
+            prices = chunk_data[close_col]
+            if len(prices) < 2:
+                logger.warning(f"Not enough data points for PnL calculation in chunk {self.current_chunk_idx}")
+                return
+                
+            price_changes = prices.pct_change().dropna()
+            
+            if len(price_changes) == 0:
+                logger.warning(f"No valid price changes in chunk {self.current_chunk_idx}")
+                return
+            
+            # Calculate optimal PnL: sum of all positive returns (perfect trades)
+            optimal_returns = (1 + price_changes[price_changes > 0]).prod()
+            optimal_pnl = (optimal_returns - 1) * self.portfolio.initial_value
+            optimal_pnl = max(0, optimal_pnl)  # Ensure non-negative
+            
+            # Get reward configuration with defaults
+            reward_config = self.config.get('reward', {})
+            max_chunk_bonus = reward_config.get('max_chunk_bonus', 10.0)
+            min_chunk_size = reward_config.get('min_chunk_size', 100)  # Minimum steps for meaningful PnL
+            
+            # Adjust bonus based on chunk size
+            chunk_size = len(chunk_data)
+            size_factor = min(1.0, chunk_size / min_chunk_size) if min_chunk_size > 0 else 1.0
+            adjusted_bonus = max_chunk_bonus * size_factor
+            
+            # Set chunk metrics
+            self.chunk_metrics = {
+                'start_value': float(self.portfolio.get_portfolio_value()),
+                'start_cash': float(self.portfolio.cash),
+                'optimal_pnl': float(optimal_pnl),
+                'max_bonus': float(adjusted_bonus),
+                'start_step': int(self.current_step),
+                'start_timestamp': self._get_current_timestamp().isoformat(),
+                'chunk_size': int(chunk_size),
+                'asset': str(asset_name),
+                'price_range': f"{prices.min():.8f}-{prices.max():.8f}",
+                'volatility': float(price_changes.std() * np.sqrt(365 * 24 * 60 / 5))  # Annualized
+            }
+            
+            # Log detailed initialization info
+            logger.info(
+                f"Initialized chunk {self.current_chunk_idx} metrics:\n"
+                f"  Asset: {asset_name} ({chunk_size} steps, {highest_tf} timeframe)\n"
+                f"  Price range: {prices.min():.8f} - {prices.max():.8f} "
+                f"({((prices.max() - prices.min()) / prices.min() * 100):.2f}%)\n"
+                f"  Volatility: {self.chunk_metrics['volatility']:.2%} (annualized)\n"
+                f"  Start value: {self.chunk_metrics['start_value']:.2f} "
+                f"(Cash: {self.chunk_metrics['start_cash']:.2f})\n"
+                f"  Target PnL: {optimal_pnl:.2f} (max bonus: {adjusted_bonus:.2f})"
+            )
+            
+            # Log sample price changes for debugging
+            if logger.isEnabledFor(logging.DEBUG):
+                sample_changes = price_changes.head(5).to_list()
+                logger.debug(
+                    f"Sample price changes for {asset_name} (first 5): "
+                    f"{[f'{x:.2%}' for x in sample_changes]}"
+                )
+                
+        except Exception as e:
+            logger.error(
+                f"Error initializing metrics for chunk {self.current_chunk_idx}: {str(e)}",
+                exc_info=True
+            )
+            # Initialize with safe defaults
+            self.chunk_metrics = {
+                'start_value': float(self.portfolio.get_portfolio_value()),
+                'start_cash': float(self.portfolio.cash),
+                'optimal_pnl': 0.0,
+                'max_bonus': 0.0,
+                'start_step': int(self.current_step),
+                'start_timestamp': self._get_current_timestamp().isoformat(),
+                'error': str(e)
+            }
+    
+    def _handle_chunk_transition(self) -> None:
+        """
+        Handle the transition to the next chunk of data.
+        
+        This method is called when we've reached the end of the current chunk
+        and need to load the next one or terminate the episode. It performs the
+        following steps:
+        1. Saves metrics for the completed chunk
+        2. Loads the next chunk of data
+        3. Validates the loaded data
+        4. Initializes metrics for the new chunk
+        5. Updates portfolio and other components
+        
+        If any error occurs during the transition, the episode is marked as done.
+        """
+        # Save chunk metrics before transitioning
+        prev_chunk_idx = self.current_chunk_idx
+        
+        try:
+            if hasattr(self, 'chunk_metrics'):
+                chunk_pnl = self.portfolio.get_portfolio_value() - self.chunk_metrics['start_value']
+                chunk_duration = self.current_step - self.chunk_metrics.get('start_step', 0)
+                optimal_pnl = self.chunk_metrics.get('optimal_pnl', 0)
+                pnl_ratio = (chunk_pnl / optimal_pnl) * 100 if optimal_pnl > 0 else 0.0
+                
+                logger.info(
+                    f"Completed chunk {prev_chunk_idx} (Steps: {chunk_duration}):\n"
+                    f"  PnL: {chunk_pnl:+.2f} ({pnl_ratio:.1f}% of optimal {optimal_pnl:.2f})\n"
+                    f"  Portfolio: {self.portfolio.get_portfolio_value():.2f} "
+                    f"(Start: {self.chunk_metrics['start_value']:.2f}, "
+                    f"Change: {chunk_pnl/self.chunk_metrics['start_value']*100 if self.chunk_metrics['start_value'] > 0 else 0:.1f}%)\n"
+                    f"  Positions: {len(self.portfolio.positions)} active"
+                )
+                
+                # Log detailed position information
+                if self.portfolio.positions:
+                    pos_info = []
+                    for asset, pos in self.portfolio.positions.items():
+                        if pos.amount > 0:  # Only show open positions
+                            pnl_pct = (pos.current_value / pos.cost_basis - 1) * 100 if pos.cost_basis > 0 else 0
+                            pos_info.append(
+                                f"{asset}: {pos.amount:.4f} @ {pos.avg_price:.8f} "
+                                f"(Cur: {pos.current_price:.8f}, PnL: {pnl_pct:+.1f}%)"
+                            )
+                    if pos_info:
+                        logger.info("  Positions detail:\n  - " + "\n  - ".join(pos_info))
+            
+            # Move to next chunk
+            self.current_chunk_idx += 1
+            
+            # Check if we've reached the end of available chunks
+            if self.current_chunk_idx >= len(self.data_loader):
+                self.done = True
+                logger.info(
+                    f"Episode complete: Reached the end of available data "
+                    f"(chunk {prev_chunk_idx} of {len(self.data_loader)-1})"
+                )
+                return
+                
+            # Load the next chunk
+            logger.debug(f"Loading chunk {self.current_chunk_idx}...")
+            self.current_data = self.data_loader.load_chunk(self.current_chunk_idx)
+            self.step_in_chunk = 0
+            
+            # Validate the loaded chunk
+            if not self.current_data:
+                raise ValueError(f"Chunk {self.current_chunk_idx} is empty")
+                
+            # Log chunk transition details
+            first_asset = next(iter(self.current_data.keys()))
+            chunk_df = self.current_data[first_asset]
+            chunk_start = chunk_df['timestamp'].iloc[0] if 'timestamp' in chunk_df.columns else 'N/A'
+            chunk_end = chunk_df['timestamp'].iloc[-1] if 'timestamp' in chunk_df.columns else 'N/A'
+            num_steps = len(chunk_df)
+            
+            # Log available assets and their data points
+            asset_info = []
+            for asset, df in self.current_data.items():
+                asset_info.append(f"{asset}: {len(df)} steps")
+                
+                # Log sample data for the first few assets
+                if len(asset_info) <= 3 and not df.empty:
+                    logger.debug(
+                        f"Sample data for {asset} (chunk {self.current_chunk_idx}):\n"
+                        f"  Time range: {df['timestamp'].iloc[0]} to {df['timestamp'].iloc[-1]}\n"
+                        f"  Columns: {', '.join(df.columns)}\n"
+                        f"  First row: {df.iloc[0].to_dict()}\n"
+                        f"  Last row: {df.iloc[-1].to_dict()}"
+                    )
+            
+            logger.info(
+                f"Loaded chunk {self.current_chunk_idx} with {len(self.current_data)} assets:\n"
+                f"  Time range: {chunk_start} to {chunk_end} ({num_steps} steps)\n"
+                f"  Assets: {', '.join(asset_info[:5])}"
+                + (f" (+{len(asset_info)-5} more)" if len(asset_info) > 5 else "")
+            )
+            
+            # Initialize metrics for the new chunk
+            self._initialize_chunk_metrics()
+            
+            # Update components with new chunk information
+            if hasattr(self.portfolio, 'on_new_chunk'):
+                self.portfolio.on_new_chunk(self.current_chunk_idx)
+                
+            # Log memory usage for debugging
+            try:
+                import psutil
+                process = psutil.Process()
+                mem_info = process.memory_info()
+                logger.debug(
+                    f"Memory usage after loading chunk {self.current_chunk_idx}: "
+                    f"RSS={mem_info.rss / 1024 / 1024:.1f}MB, "
+                    f"VMS={mem_info.vms / 1024 / 1024:.1f}MB"
+                )
+            except ImportError:
+                pass  # psutil not available, skip memory logging
+                
+        except Exception as e:
+            logger.error(
+                f"Error during transition to chunk {self.current_chunk_idx}: {str(e)}\n"
+                f"Current chunk: {prev_chunk_idx}, Step: {self.current_step}",
+                exc_info=True
+            )
+            self.done = True
+            raise  # Re-raise to be handled by the caller
+    
+    def _execute_trades(self, action: np.ndarray) -> None:
+        """
+        Execute trades based on the action vector.
+        
+        This method processes each action in the action vector and executes the corresponding
+        trade (buy/sell) for each asset. It handles errors gracefully and logs all actions.
+        
+        Args:
+            action: Array of actions (0=hold, 1=buy, 2=sell) for each asset
+            
+        Raises:
+            ValueError: If the action vector has incorrect dimensions
+            RuntimeError: If there's an error executing a trade
+        """
+        if not hasattr(self, 'assets') or not self.assets:
+            raise RuntimeError("No assets available for trading")
+            
+        if len(action) != len(self.assets):
+            raise ValueError(
+                f"Action dimension {len(action)} does not match number of assets {len(self.assets)}"
+            )
+        
+        try:
+            # Get current prices and timestamp once for all assets
+            current_prices = self._get_current_prices()
+            current_timestamp = self._get_current_timestamp()
+            
+            # Process each asset's action
+            for asset, action_idx in zip(self.assets, action):
+                try:
+                    if action_idx == 0:  # Hold
+                        continue
+                        
+                    if asset not in current_prices:
+                        logger.warning(f"No price available for asset {asset}, skipping trade")
+                        continue
+                        
+                    price = current_prices[asset]
+                    
+                    # Log the action for debugging
+                    action_str = {1: 'BUY', 2: 'SELL'}.get(action_idx, 'INVALID')
+                    logger.debug(
+                        f"Executing {action_str} order for {asset} at price {price:.8f} "
+                        f"(Step {self.current_step}, Chunk {self.current_chunk_idx})"
+                    )
+                    
+                    if action_idx == 1:  # Buy
+                        position_size = self.portfolio.calculate_position_size(price)
+                        if position_size > 0:
+                            self.order_manager.enter_trade(
+                                asset=asset,
+                                price=price,
+                                size=position_size,
+                                direction='long',
+                                timestamp=current_timestamp
+                            )
+                            logger.info(
+                                f"Entered long position: {asset} x{position_size:.6f} @ {price:.8f} "
+                                f"(Value: {position_size * price:.2f})"
+                            )
+                        
+                    elif action_idx == 2:  # Sell
+                        # Check if we have a position to close
+                        if asset in self.portfolio.positions and self.portfolio.positions[asset].amount > 0:
+                            self.order_manager.exit_trade(
+                                asset=asset,
+                                price=price,
+                                timestamp=current_timestamp
+                            )
+                            logger.info(f"Exited position: {asset} @ {price:.8f}")
+                        else:
+                            logger.debug(f"No position to close for {asset}, ignoring SELL action")
+                    
+                    else:
+                        logger.warning(f"Invalid action {action_idx} for asset {asset}")
+                        
+                except Exception as e:
+                    logger.error(
+                        f"Error executing trade for {asset} (action={action_idx}): {str(e)}",
+                        exc_info=True
+                    )
+                    # Continue with other assets even if one fails
+                    
+        except Exception as e:
+            logger.error(f"Error in _execute_trades: {str(e)}", exc_info=True)
+            # Re-raise to be handled by the caller
+            raise
+
+    def _calculate_reward(self) -> float:
+        """
+        Calculate the reward for the current step with multi-timeframe support.
+        
+        This enhanced method computes rewards based on:
+        1. Multi-timeframe portfolio performance metrics
+        2. Risk-adjusted returns across different time horizons
+        3. Drawdown analysis per timeframe
+        4. Signal consistency across timeframes
+        5. Position sizing and risk management
+        
+        The reward calculation considers:
+        - Short-term (5m), medium-term (1h), and long-term (4h) performance
+        - Risk-adjusted metrics (Sharpe, Sortino, Calmar ratios)
+        - Drawdown analysis and recovery factors
+        - Position concentration and diversification
+        - Transaction costs and slippage impact
         
         Returns:
-            dict: Observation dictionary with 'image_features' and 'vector_features'.
-        """
-        # Get market data window for CNN
-        market_data_window = self._get_market_data_window()
-        
-        # Check if we have data in the window
-        if market_data_window.empty:
-            logger.warning(f"Empty market data window at step {self.current_step}. Using zeros for observation.")
-            # Create a dummy observation with zeros
-            image_features = np.zeros(self.image_shape, dtype=np.float32)
-            vector_features = np.zeros(1 + len(self.assets), dtype=np.float32)
-            # Set normalized capital to 1.0 (initial state)
-            vector_features[0] = 1.0
+            float: The calculated reward, incorporating multi-timeframe analysis
             
-            return {
-                "image_features": image_features,
-                "vector_features": vector_features
+        Raises:
+            RuntimeError: If required components are not properly initialized
+        """
+        if not hasattr(self, 'portfolio') or not hasattr(self, 'reward_calculator'):
+            raise RuntimeError("Portfolio or reward calculator not initialized")
+            
+        try:
+            # Initialize metrics dictionary
+            metrics = {}
+            
+            # 1. Basic Portfolio Metrics
+            portfolio_value = self.portfolio.get_portfolio_value()
+            current_pnl = portfolio_value - self.portfolio.initial_value
+            returns = self.portfolio.returns if hasattr(self.portfolio, 'returns') else []
+            
+            # 2. Multi-timeframe Analysis
+            timeframes = getattr(self.state_builder, 'timeframes', ['5m', '1h', '4h'])
+            timeframe_metrics = {}
+            
+            for tf in timeframes:
+                tf_returns = getattr(self.portfolio, f'returns_{tf}', returns)
+                tf_vol = np.std(tf_returns) * np.sqrt(252 * 24 * (60 / int(tf[:-1]))) if tf_returns else 0
+                
+                timeframe_metrics[tf] = {
+                    'returns': tf_returns[-1] if tf_returns else 0,
+                    'volatility': tf_vol,
+                    'sharpe': (np.mean(tf_returns) / (tf_vol + 1e-9) * np.sqrt(252)) if tf_vol > 0 else 0,
+                    'max_drawdown': getattr(self.portfolio, f'max_drawdown_{tf}', 0)
+                }
+            
+            # 3. Signal Consistency Analysis
+            signal_strength = self._analyze_signal_consistency()
+            
+            # 4. Position Analysis
+            position_metrics = self._analyze_positions()
+            
+            # 5. Risk Metrics
+            risk_metrics = {
+                'max_drawdown': getattr(self.portfolio, 'max_drawdown', 0),
+                'calmar_ratio': getattr(self.portfolio, 'calmar_ratio', 0),
+                'value_at_risk': self._calculate_var(),
+                'expected_shortfall': self._calculate_expected_shortfall()
+            }
+            
+            # 6. Combine all metrics for reward calculation
+            reward_components = {
+                **{'tf_' + k: v for tf, metrics in timeframe_metrics.items() for k, v in metrics.items()},
+                **{'signal_' + k: v for k, v in signal_strength.items()},
+                **{'pos_' + k: v for k, v in position_metrics.items()},
+                **{'risk_' + k: v for k, v in risk_metrics.items()},
+                'portfolio_value': portfolio_value,
+                'current_pnl': current_pnl,
+                'total_return': (portfolio_value / self.portfolio.initial_value - 1) if self.portfolio.initial_value > 0 else 0
+            }
+            
+            # 1. Calculate base reward using the reward calculator with all components
+            base_reward = self.reward_calculator.calculate_reward(**reward_components)
+            
+            # 2. Calculate chunk-based performance bonus
+            chunk_bonus = self._calculate_chunk_bonus(portfolio_value)
+            
+            # 3. Calculate signal consistency bonus/penalty
+            signal_bonus = signal_strength.get('consistency_score', 0) * 0.1  # Scale factor
+            
+            # 4. Apply drawdown penalty
+            drawdown_penalty = self._calculate_drawdown_penalty(risk_metrics['max_drawdown'])
+            
+            # 5. Calculate final reward with all components
+            final_reward = (
+                base_reward * 0.7 +  # Base performance
+                chunk_bonus * 0.2 +  # Chunk performance
+                signal_bonus * 0.1 -  # Signal consistency
+                drawdown_penalty      # Risk penalty
+            )
+            
+            # 6. Update reward history with detailed metrics
+            self._update_reward_history(
+                portfolio_value=portfolio_value,
+                base_reward=base_reward,
+                chunk_bonus=chunk_bonus,
+                signal_bonus=signal_bonus,
+                drawdown_penalty=drawdown_penalty,
+                final_reward=final_reward,
+                metrics={
+                    'timeframe_metrics': timeframe_metrics,
+                    'signal_strength': signal_strength,
+                    'position_metrics': position_metrics,
+                    'risk_metrics': risk_metrics
+                }
+            )
+            
+            return final_reward
+            
+        except Exception as e:
+            logger.error(f"Error calculating reward: {str(e)}")
+            # Return a small negative reward on error to encourage exploration
+            return -0.1
+
+    def _analyze_signal_consistency(self) -> Dict[str, float]:
+        """
+        Analyze signal consistency across different timeframes.
+        
+        Returns:
+            Dict containing signal consistency metrics:
+            - consistency_score: Overall consistency score (0-1)
+            - direction_agreement: Percentage of timeframes agreeing on direction
+            - strength_score: Average signal strength
+        """
+        if not hasattr(self, 'state_builder'):
+            return {'consistency_score': 0.5, 'direction_agreement': 0.5, 'strength_score': 0.5}
+            
+        signals = {}
+        timeframes = getattr(self.state_builder, 'timeframes', ['5m', '1h', '4h'])
+        
+        # Get signals from state builder or indicators
+        for tf in timeframes:
+            # This is a simplified example - replace with actual signal extraction
+            signals[tf] = {
+                'direction': np.random.choice([-1, 0, 1]),  # Replace with real signal
+                'strength': np.random.random()  # Replace with real strength
             }
         
-        # Build observation using state builder
-        observation = self.state_builder.build_observation(
-            market_data_window=market_data_window,
-            capital=self.capital,
-            positions=self.positions,
-            image_shape=self.image_shape, # Pass the consistent image_shape
-            apply_scaling=False # Data from data_loader is already scaled
+        # Calculate consistency metrics
+        directions = [s['direction'] for s in signals.values() if s['direction'] != 0]
+        if not directions:
+            return {'consistency_score': 0.5, 'direction_agreement': 0.5, 'strength_score': 0.5}
+            
+        direction_agreement = max(
+            sum(1 for d in directions if d == 1) / len(directions),
+            sum(1 for d in directions if d == -1) / len(directions)
         )
         
-        return observation
+        avg_strength = np.mean([s['strength'] for s in signals.values()])
+        consistency_score = direction_agreement * avg_strength
         
-    def _get_market_data_window(self):
+        return {
+            'consistency_score': float(consistency_score),
+            'direction_agreement': float(direction_agreement),
+            'strength_score': float(avg_strength)
+        }
+        
+    def _analyze_positions(self) -> Dict[str, float]:
         """
-        Get a window of market data for the CNN.
+        Analyze current positions and calculate position-based metrics.
         
         Returns:
-            pandas.DataFrame: Window of market data.
+            Dict containing position metrics:
+            - concentration: Portfolio concentration index (0-1)
+            - diversification: Number of positions / max possible
+            - avg_position_size: Average position size as % of portfolio
         """
-        # Calculate the start index for the window
-        start_idx = max(0, self.current_step - self.cnn_input_window_size + 1)
-        end_idx = self.current_step + 1  # +1 because end index is exclusive
+        if not hasattr(self, 'portfolio') or not hasattr(self.portfolio, 'positions'):
+            return {'concentration': 0.0, 'diversification': 1.0, 'avg_position_size': 0.0}
+            
+        positions = self.portfolio.positions
+        if not positions:
+            return {'concentration': 0.0, 'diversification': 1.0, 'avg_position_size': 0.0}
+            
+        position_sizes = [
+            pos.current_value / self.portfolio.portfolio_value 
+            for pos in positions.values() 
+            if pos.amount != 0
+        ]
         
-        # Extract the window from the dataframe
-        window = self.df.iloc[start_idx:end_idx].copy()
+        if not position_sizes:
+            return {'concentration': 0.0, 'diversification': 1.0, 'avg_position_size': 0.0}
+            
+        # Herfindahl-Hirschman Index for concentration
+        hhi = sum(s**2 for s in position_sizes)
         
-        # Log the columns in the window for debugging (toujours, pas seulement en DEBUG)
-        logger.info(f"_get_market_data_window: Shape de la fenêtre: {window.shape}")
-        logger.info(f"_get_market_data_window: Premières colonnes (10 max): {window.columns.tolist()[:10]}")
-        logger.info(f"_get_market_data_window: Index de la fenêtre (type): {type(window.index)}")
+        return {
+            'concentration': float(hhi),
+            'diversification': len(position_sizes) / len(positions) if positions else 0.0,
+            'avg_position_size': float(np.mean(position_sizes) if position_sizes else 0.0)
+        }
+    
+    def _calculate_var(self, confidence_level: float = 0.95, window: int = 252) -> float:
+        """
+        Calculate Value at Risk (VaR) for the portfolio.
         
-        # Vérifier que les colonnes contiennent bien les noms d'actifs dans le format attendu
-        expected_columns = []
-        for asset in self.assets:
-            for base_feature in self.base_feature_names:
-                expected_columns.append(f"{base_feature}_{asset}")
+        Args:
+            confidence_level: Confidence level for VaR (e.g., 0.95 for 95%)
+            window: Lookback window in days
+            
+        Returns:
+            Value at Risk as a percentage of portfolio value
+        """
+        if not hasattr(self, 'portfolio') or not hasattr(self.portfolio, 'returns'):
+            return 0.0
+            
+        returns = np.array(self.portfolio.returns[-window:])
+        if len(returns) < 2:
+            return 0.0
+            
+        return float(np.percentile(returns, (1 - confidence_level) * 100))
+    
+    def _calculate_expected_shortfall(self, confidence_level: float = 0.95, window: int = 252) -> float:
+        """
+        Calculate Expected Shortfall (CVaR) for the portfolio.
         
-        # Vérifier les colonnes attendues
-        found_columns = [col for col in expected_columns if col in window.columns]
-        missing_columns = [col for col in expected_columns if col not in window.columns]
+        Args:
+            confidence_level: Confidence level for ES (e.g., 0.95 for 95%)
+            window: Lookback window in days
+            
+        Returns:
+            Expected Shortfall as a percentage of portfolio value
+        """
+        if not hasattr(self, 'portfolio') or not hasattr(self.portfolio, 'returns'):
+            return 0.0
+            
+        returns = np.array(self.portfolio.returns[-window:])
+        if len(returns) < 2:
+            return 0.0
+            
+        var = np.percentile(returns, (1 - confidence_level) * 100)
+        return float(np.mean(returns[returns <= var]))
+    
+    def _calculate_chunk_bonus(self, current_value: float) -> float:
+        """
+        Calculate performance bonus based on chunk metrics.
         
-        if found_columns:
-            logger.info(f"Trouvé {len(found_columns)}/{len(expected_columns)} colonnes attendues")
-            logger.info(f"Exemples de colonnes trouvées: {found_columns[:5]}")
+        Args:
+            current_value: Current portfolio value
+            
+        Returns:
+            Bonus value (can be negative)
+        """
+        if not hasattr(self, 'chunk_metrics') or not self.chunk_metrics:
+            return 0.0
+            
+        chunk_pnl = current_value - self.chunk_metrics['start_value']
+        chunk_optimal_pnl = self.chunk_metrics.get('optimal_pnl', 0.0)
         
-        if missing_columns:
-            logger.error(f"ATTENTION: {len(missing_columns)} colonnes attendues sont MANQUANTES!")
-            logger.error(f"Exemples de colonnes manquantes: {missing_columns[:10]}")
+        if chunk_optimal_pnl <= 0:
+            return 0.0
+            
+        performance_ratio = min(1.0, chunk_pnl / chunk_optimal_pnl)
+        chunk_bonus = performance_ratio * self.chunk_metrics.get('max_bonus', 0.0)
         
-        # Vérifier les colonnes avec noms d'actifs (méthode générale)
-        asset_columns = [col for col in window.columns if any(asset in col for asset in self.assets)]
-        if not asset_columns:
-            logger.error(f"ERREUR CRITIQUE: Aucune colonne avec les noms d'actifs trouvée dans market_data_window!")
-            logger.error(f"Assets attendus: {self.assets}")
-            logger.error(f"Colonnes disponibles (premières 15): {window.columns.tolist()[:15]}")
+        logger.debug(
+            f"Chunk {self.current_chunk_idx}: PnL={chunk_pnl:.2f}, "
+            f"Optimal={chunk_optimal_pnl:.2f}, "
+            f"Performance={performance_ratio:.2f}, "
+            f"Bonus={chunk_bonus:.4f}"
+        )
+        
+        return float(chunk_bonus)
+    
+    def _calculate_drawdown_penalty(self, max_drawdown: float) -> float:
+        """
+        Calculate penalty based on maximum drawdown.
+        
+        Args:
+            max_drawdown: Maximum drawdown as a decimal (e.g., 0.1 for 10%)
+            
+        Returns:
+            Penalty value (always positive)
+        """
+        if max_drawdown <= 0.05:  # No penalty for <5% drawdown
+            return 0.0
+        elif max_drawdown > 0.20:  # Max penalty for >20% drawdown
+            return 1.0
         else:
-            logger.info(f"Trouvé {len(asset_columns)} colonnes contenant les noms d'actifs sur {len(window.columns)} colonnes totales")
-            logger.info(f"Exemples de colonnes avec actifs: {asset_columns[:5]}")
-        
-        # Log specific information about timeframe indicators
-        timeframe_columns = [col for col in window.columns if self.training_timeframe in col]
-        if timeframe_columns:
-            logger.info(f"Trouvé {len(timeframe_columns)} colonnes avec timeframe {self.training_timeframe}")
-            logger.info(f"Exemples: {timeframe_columns[:5]}")
-        
-        # Vérification finale des colonnes de la fenêtre retournée
-        logger.info(f"MultiAssetEnv _get_market_data_window - Colonnes de la 'window' retournée (premières 30): {window.columns.tolist()[:30] if window is not None and not window.empty else 'Window vide/None'}")
-        if window is not None and not window.empty and not any(col.startswith('open_') and col.endswith(tuple(self.assets)) for col in window.columns):
-            logger.error("MultiAssetEnv _get_market_data_window - ERREUR : La 'window' retournée n'a PAS les colonnes fusionnées !")
-        elif window is not None and not window.empty:
-            logger.info("MultiAssetEnv _get_market_data_window - 'window' retournée semble avoir les colonnes fusionnées.")
-        
-        return window
+            # Linear scaling between 5% and 20% drawdown
+            return (max_drawdown - 0.05) / 0.15
     
-    def _get_current_data_row(self):
+    def _update_reward_history(
+        self, 
+        portfolio_value: float,
+        base_reward: float,
+        chunk_bonus: float,
+        signal_bonus: float,
+        drawdown_penalty: float,
+        final_reward: float,
+        metrics: Dict[str, Any]
+    ) -> None:
         """
-        Get the current data row based on the current step.
+        Update reward history with detailed metrics.
+        
+        Args:
+            portfolio_value: Current portfolio value
+            base_reward: Base reward from reward calculator
+            chunk_bonus: Bonus from chunk performance
+            signal_bonus: Bonus from signal consistency
+            drawdown_penalty: Penalty from drawdown
+            final_reward: Final calculated reward
+            metrics: Dictionary containing all metrics
+        """
+        if not hasattr(self, 'reward_history'):
+            self.reward_history = []
+            
+        entry = {
+            'step': self.current_step,
+            'chunk': self.current_chunk_idx,
+            'portfolio_value': portfolio_value,
+            'base_reward': base_reward,
+            'chunk_bonus': chunk_bonus,
+            'signal_bonus': signal_bonus,
+            'drawdown_penalty': drawdown_penalty,
+            'total_reward': final_reward,
+            'timestamp': self._get_current_timestamp().isoformat(),
+            'metrics': metrics
+        }
+        
+        self.reward_history.append(entry)
+        
+        # Log reward details periodically
+        if self.current_step % 100 == 0:
+            logger.info(
+                f"Step {self.current_step}: "
+                f"Portfolio={portfolio_value:.2f}, "
+                f"Base={base_reward:.4f}, "
+                f"Chunk={chunk_bonus:+.4f}, "
+                f"Signal={signal_bonus:+.4f}, "
+                f"Penalty={-drawdown_penalty:.4f}, "
+                f"Total={final_reward:.4f}"
+            )
+
+    def _get_observation(self) -> Dict[str, np.ndarray]:
+        """
+        Get the current observation for all assets.
+        
+        This method constructs a 3D observation tensor for each asset using the StateBuilder.
+        The observation has shape (num_timeframes, window_size, num_features) where:
+        - num_timeframes: Number of timeframes (e.g., 3 for 5m, 1h, 4h)
+        - window_size: Number of time steps in the lookback window
+        - num_features: Number of features per timeframe
+        
+        For each asset, the method:
+        1. Extracts the relevant data window for each timeframe
+        2. Combines data from all timeframes into a single DataFrame
+        3. Adds portfolio state information if enabled
+        4. Builds a 3D observation tensor using the StateBuilder
+        5. Validates the observation shape
         
         Returns:
-            pandas.Series: Current data row.
+            Dict[str, np.ndarray]: Dictionary mapping asset names to their 3D observation tensors
+            
+        Raises:
+            RuntimeError: If no data is available for any asset or if the StateBuilder is not properly initialized
         """
-        # For merged data, each row already contains data for all assets
-        data_row = self.df.iloc[self.current_step]
+        if not hasattr(self, 'current_data') or not self.current_data:
+            raise RuntimeError("No data available in current chunk")
+            
+        if not hasattr(self, 'state_builder') or not self.state_builder:
+            raise RuntimeError("StateBuilder not initialized")
+            
+        observation = {}
         
-        # Log détaillé pour le diagnostic
-        logger.info(f"MultiAssetEnv _get_current_data_row - Type de data_row: {type(data_row)}")
-        logger.info(f"MultiAssetEnv _get_current_data_row - Index de data_row (premières 30): {data_row.index.tolist()[:30] if data_row is not None and not data_row.empty else 'data_row vide/None'}")
+        for asset, tf_data in self.current_data.items():
+            if not tf_data:
+                logger.warning(f"No timeframe data available for asset {asset}")
+                continue
+                
+            try:
+                # Log the current step and chunk for debugging
+                logger.debug(
+                    f"Building observation for {asset} at step {self.step_in_chunk}/"
+                    f"{max(len(df) for df in tf_data.values() if df is not None)} in chunk {self.current_chunk_idx}"
+                )
+                
+                # Get the current window of data for each timeframe
+                combined_data = []
+                
+                for tf, df in tf_data.items():
+                    if df is None or df.empty:
+                        logger.warning(f"No data for {asset} on {tf} timeframe")
+                        continue
+                        
+                    # Get the current window of data (up to current step)
+                    window_start = max(0, self.step_in_chunk - self.state_builder.window_size + 1)
+                    window_end = min(self.step_in_chunk + 1, len(df))
+                    
+                    if window_start >= window_end:
+                        logger.warning(
+                            f"Invalid window for {asset} {tf}: start={window_start}, end={window_end}, "
+                            f"data_length={len(df)}"
+                        )
+                        continue
+                    
+                    # Get the data slice for this window
+                    data_slice = df.iloc[window_start:window_end].copy()
+                    
+                    # Add prefix to column names to indicate timeframe
+                    data_slice = data_slice.add_prefix(f"{tf}_")
+                    
+                    # Ensure we have a timestamp column for merging
+                    if 'timestamp' in data_slice.columns:
+                        data_slice = data_slice.rename(columns={f"{tf}_timestamp": 'timestamp'})
+                    
+                    combined_data.append(data_slice)
+                
+                if not combined_data:
+                    logger.warning(f"No valid data for {asset} across any timeframe")
+                    continue
+                
+                # Merge data from all timeframes on timestamp
+                if len(combined_data) > 1:
+                    # Start with the first dataframe
+                    merged_data = combined_data[0]
+                    
+                    # Merge with remaining dataframes
+                    for df in combined_data[1:]:
+                        if 'timestamp' in merged_data.columns and 'timestamp' in df.columns:
+                            merged_data = pd.merge(
+                                merged_data, 
+                                df, 
+                                on='timestamp', 
+                                how='outer',
+                                suffixes=('', '_dup')
+                            )
+                            
+                            # Handle any duplicate columns from the merge
+                            dup_cols = [col for col in merged_data.columns if col.endswith('_dup')]
+                            if dup_cols:
+                                logger.warning(f"Duplicate columns after merge for {asset}: {dup_cols}")
+                                merged_data = merged_data.drop(columns=dup_cols)
+                        else:
+                            logger.warning("Missing timestamp column for merge")
+                            merged_data = pd.concat([merged_data, df], axis=1)
+                else:
+                    merged_data = combined_data[0]
+                
+                # Sort by timestamp to ensure correct order
+                if 'timestamp' in merged_data.columns:
+                    merged_data = merged_data.sort_values('timestamp')
+                
+                # Fill any NaN values with zeros (or another appropriate fill method)
+                merged_data = merged_data.fillna(0.0)
+                
+                # Log the timestamp range for this observation
+                if not merged_data.empty and 'timestamp' in merged_data.columns:
+                    logger.debug(
+                        f"Data window for {asset}: {merged_data['timestamp'].iloc[0]} to "
+                        f"{merged_data['timestamp'].iloc[-1]} ({len(merged_data)} steps)"
+                    )
+                
+                # Add portfolio state to the observation if enabled
+                if hasattr(self, 'include_portfolio_state') and self.include_portfolio_state:
+                    self._add_portfolio_state_to_observation(merged_data)
+                
+                # Build the 3D observation using the StateBuilder
+                obs_tensor = self.state_builder.build_observation(merged_data)
+                
+                # Validate the observation shape
+                expected_shape = self.state_builder.get_observation_shape()
+                if obs_tensor.shape != expected_shape:
+                    logger.warning(
+                        f"Unexpected observation shape for {asset}: {obs_tensor.shape} "
+                        f"(expected {expected_shape})"
+                    )
+                
+                # Log observation details for debugging
+                if self.current_step % 100 == 0:
+                    logger.info(
+                        f"Observation for {asset}: shape={obs_tensor.shape}, "
+                        f"min={obs_tensor.min():.4f}, max={obs_tensor.max():.4f}, "
+                        f"mean={obs_tensor.mean():.4f}, NaN={np.isnan(obs_tensor).any()}"
+                    )
+                
+                observation[asset] = obs_tensor
+                
+            except Exception as e:
+                logger.error(
+                    f"Error building observation for {asset}: {str(e)}",
+                    exc_info=True
+                )
+                
+                # Return a zero observation with correct shape if possible
+                if hasattr(self.state_builder, 'get_observation_shape'):
+                    obs_shape = self.state_builder.get_observation_shape()
+                    observation[asset] = np.zeros(obs_shape, dtype=np.float32)
+                    logger.warning(
+                        f"Using zero observation for {asset} due to error. "
+                        f"Shape: {obs_shape}"
+                    )
+                else:
+                    # If we can't get the shape, re-raise the exception
+                    raise RuntimeError(
+                        f"Failed to build observation for {asset} and cannot create fallback: {str(e)}"
+                    )
         
-        # Vérification de la présence des colonnes fusionnées dans l'index
-        if data_row is not None and not any(idx.startswith('open_') and idx.endswith(tuple(self.assets)) for idx in data_row.index):
-            logger.error("MultiAssetEnv _get_current_data_row - ERREUR : L'index de 'data_row' n'a PAS les noms de colonnes fusionnées !")
-        elif data_row is not None:
-            logger.info("MultiAssetEnv _get_current_data_row - L'index de 'data_row' semble avoir les colonnes fusionnées.")
+        if not observation:
+            raise RuntimeError(
+                f"Failed to build observations for any asset in chunk {self.current_chunk_idx} "
+                f"at step {self.step_in_chunk}"
+            )
+            
+        return observation
+
+    def _add_portfolio_state_to_observation(self, data_slice: pd.DataFrame) -> None:
+        """
+        Add portfolio state information to the observation data.
         
-        return data_row
+        This method enriches the market data with portfolio-related features
+        like current positions, cash balance, and portfolio metrics.
+        
+        Args:
+            data_slice: DataFrame containing the current window of market data
+        """
+        if not hasattr(self, 'portfolio') or not hasattr(self.portfolio, 'positions'):
+            return
+            
+        # Get the last row of the data (current timestep)
+        last_row = data_slice.iloc[-1:].copy()
+        
+        # Add portfolio state features
+        data_slice['portfolio_cash'] = self.portfolio.cash
+        data_slice['portfolio_value'] = self.portfolio.portfolio_value
+        data_slice['portfolio_returns'] = self.portfolio.returns
+        data_slice['portfolio_sharpe'] = getattr(self.portfolio, 'sharpe_ratio', 0.0)
+        data_slice['portfolio_drawdown'] = getattr(self.portfolio, 'max_drawdown', 0.0)
+        
+        # Add position information for each asset
+        for asset, position in self.portfolio.positions.items():
+            pos_col = f'position_{asset}'
+            data_slice[pos_col] = position.amount
+            
+            # Add position value and PnL if available
+            if hasattr(position, 'value'):
+                data_slice[f'{pos_col}_value'] = position.value
+            if hasattr(position, 'unrealized_pnl'):
+                data_slice[f'{pos_col}_pnl'] = position.unrealized_pnl
     
-    def _get_current_prices(self):
+    def _get_info(self) -> Dict[str, Any]:
+        """
+        Get additional information about the environment state.
+        
+        Returns:
+            Dictionary containing diagnostic information
+        """
+        info = {
+            'step': self.current_step,
+            'chunk_idx': self.current_chunk_idx,
+            'step_in_chunk': self.step_in_chunk,
+            'portfolio_value': float(self.portfolio.get_portfolio_value()),
+            'cash': float(self.portfolio.cash),
+            'positions': {k: float(v) for k, v in self.portfolio.positions.items()},
+            'current_prices': self._get_current_prices(),
+            'optimal_chunk_pnl': float(self.optimal_chunk_pnl) if hasattr(self, 'optimal_chunk_pnl') else 0.0,
+        }
+        
+        # Add last chunk's PnL and bonus if available
+        if hasattr(self, 'last_chunk_pnl'):
+            info.update({
+                'last_chunk_pnl': float(self.last_chunk_pnl),
+                'last_optimal_bonus': float(self.last_optimal_bonus)
+            })
+            
+        return info
+
+    def _get_current_timestamp(self) -> pd.Timestamp:
+        """
+        Get the current timestamp.
+        
+        Returns:
+            pd.Timestamp: The current timestamp
+            
+        Raises:
+            RuntimeError: If no data is available or if the current step is out of bounds
+        """
+        if not hasattr(self, 'current_data') or not self.current_data:
+            raise RuntimeError("No data available in current chunk")
+            
+        # Get the first available asset's data
+        sample_asset = next(iter(self.current_data.keys()))
+        if sample_asset not in self.current_data or not self.current_data[sample_asset]:
+            raise RuntimeError(f"No timeframe data available for asset {sample_asset}")
+            
+        # Get the highest frequency timeframe (first in the list)
+        highest_tf = self.state_builder.timeframes[0] if hasattr(self, 'state_builder') and hasattr(self.state_builder, 'timeframes') and self.state_builder.timeframes else None
+        
+        # Try to get data from the highest frequency timeframe first
+        if highest_tf and highest_tf in self.current_data[sample_asset] and self.current_data[sample_asset][highest_tf] is not None:
+            df = self.current_data[sample_asset][highest_tf]
+            if not df.empty and self.step_in_chunk < len(df):
+                if hasattr(df, 'index') and hasattr(df.index, '__getitem__'):
+                    return df.index[self.step_in_chunk]
+                elif hasattr(df, 'iloc') and hasattr(df.iloc, '__getitem__'):
+                    return df.iloc[self.step_in_chunk].name
+        
+        # Fall back to any available timeframe
+        for tf, df in self.current_data[sample_asset].items():
+            if df is not None and not df.empty and self.step_in_chunk < len(df):
+                if hasattr(df, 'index') and hasattr(df.index, '__getitem__'):
+                    return df.index[self.step_in_chunk]
+                elif hasattr(df, 'iloc') and hasattr(df.iloc, '__getitem__'):
+                    return df.iloc[self.step_in_chunk].name
+        
+        # If we get here, we couldn't find a valid timestamp
+        raise RuntimeError(
+            f"Could not determine timestamp for asset {sample_asset} at step {self.step_in_chunk}. "
+            f"Available timeframes: {list(self.current_data[sample_asset].keys()) if sample_asset in self.current_data else 'none'}"
+        )
+        
+    def _get_current_prices(self) -> Dict[str, float]:
         """
         Get current prices for all assets.
         
+        This method retrieves the most recent 'close' price for each asset
+        from the highest frequency timeframe (typically '5m').
+        
         Returns:
-            dict: Dictionary mapping asset IDs to current prices.
+            Dict[str, float]: Mapping of asset names to their current prices
+            
+        Raises:
+            RuntimeError: If no data is available or if the price data is invalid
         """
-        current_prices = {}
+        if not hasattr(self, 'current_data') or not self.current_data:
+            raise RuntimeError("No data available to get current prices")
+            
+        prices = {}
+        highest_tf = self.state_builder.timeframes[0]  # First timeframe is highest frequency
         
-        # Get current data row
-        data_row = self._get_current_data_row()
-        
-        # Log les colonnes disponibles dans data_row pour le débogage
-        logger.info(f"MultiAssetEnv _get_current_prices - Index de data_row REÇU (premières 30): {data_row.index.tolist()[:30] if data_row is not None else 'data_row vide/None'}")
-        
-        # Détecter le format des données
-        format_multi_asset = any(f"_{asset}" in col for col in data_row.index for asset in self.assets)
-        format_with_asset_column = 'asset' in data_row
-        
-        logger.info(f"_get_current_prices: Format multi-actif détecté: {format_multi_asset}")
-        logger.info(f"_get_current_prices: Format avec colonne 'asset' détecté: {format_with_asset_column}")
-        
-        # Vérifier le nombre de prix que nous sommes capables de trouver
-        found_prices = 0
-        missing_prices = []
-        
-        # Traitement selon le format détecté
-        for asset in self.assets:
-            # Format principal: multi-actif avec colonnes comme 'close_ADAUSDT'
-            close_col = f'close_{asset}'
-            if format_multi_asset and close_col in data_row:
-                price = data_row[close_col]
-                logger.info(f"MultiAssetEnv _get_current_prices - Prix trouvé pour {asset} via '{close_col}': {price}")
-                current_prices[asset] = price
-                found_prices += 1
+        for asset, tf_data in self.current_data.items():
+            if not tf_data or highest_tf not in tf_data or tf_data[highest_tf] is None or tf_data[highest_tf].empty:
+                logger.warning(f"No {highest_tf} data available for asset {asset}")
                 continue
-            
-            # Essayer de trouver une colonne alternative si le nom exact n'a pas été trouvé
-            if format_multi_asset:
-                possible_close_columns = [col for col in data_row.index if col.startswith('close_') and asset in col]
-                if possible_close_columns:
-                    chosen_col = possible_close_columns[0]
-                    price = data_row[chosen_col]
-                    logger.info(f"MultiAssetEnv _get_current_prices - Prix trouvé pour {asset} via '{chosen_col}' (alternative): {price}")
-                    current_prices[asset] = price
-                    found_prices += 1
-                    continue
-                else:
-                    logger.error(f"MultiAssetEnv _get_current_prices - ERREUR : Aucune colonne 'close_*' trouvée pour {asset}")
-                    logger.error(f"MultiAssetEnv _get_current_prices - Colonnes disponibles (extrait): {sorted([col for col in data_row.index if 'close' in col.lower()][:10])}")
-                    missing_prices.append(asset)
-                    # NE PAS utiliser de valeur par défaut, retourner np.nan pour ce prix
-                    current_prices[asset] = np.nan
-                    continue
-        
-        # Générer un message récapitulatif
-        if found_prices == len(self.assets):
-            logger.info(f"MultiAssetEnv _get_current_prices - SUCCÈS: Tous les prix ({found_prices}/{len(self.assets)}) ont été trouvés correctement")
-        elif found_prices > 0:
-            logger.warning(f"MultiAssetEnv _get_current_prices - INCOMPLET: Seulement {found_prices}/{len(self.assets)} prix trouvés.")
-            logger.warning(f"MultiAssetEnv _get_current_prices - Prix manquants pour: {missing_prices}")
-        else:
-            logger.error(f"MultiAssetEnv _get_current_prices - ÉCHEC TOTAL: Aucun prix ({found_prices}/{len(self.assets)}) n'a été trouvé!")
-            logger.error(f"MultiAssetEnv _get_current_prices - Vérifiez que les fichiers fusionnés ont bien été créés et contiennent les bonnes colonnes close_ASSET")
-            logger.error(f"MultiAssetEnv _get_current_prices - Le format de données multi-actif est-il détecté? {format_multi_asset}")
-        
-        # Log summary of found prices
-        found_prices = {k: v for k, v in current_prices.items() if not np.isnan(v)}
-        logger.info(f"MultiAssetEnv _get_current_prices - Résumé des prix trouvés: {len(found_prices)}/{len(self.assets)} actifs")
-        logger.info(f"MultiAssetEnv _get_current_prices - Tous les prix: {current_prices}")
-        
-        # Vérification des prix manquants
-        missing_prices = {k: v for k, v in current_prices.items() if np.isnan(v)}
-        if missing_prices:
-            logger.error(f"MultiAssetEnv _get_current_prices - ERREUR CRITIQUE : Prix manquants pour {len(missing_prices)} actifs: {list(missing_prices.keys())}")
-        
-        return current_prices
-    
-    def _translate_action(self, action):
-        """
-        Translate action index to asset ID and action type.
-        
-        Args:
-            action: Action index.
-        
-        Returns:
-            tuple: (asset_id, action_type)
-        """
-        if action == ACTION_HOLD:
-            return None, HOLD
-        
-        num_assets = len(self.assets)
-        
-        if ACTION_BUY_ASSET_0 <= action < ACTION_BUY_ASSET_0 + num_assets:
-            # BUY action
-            asset_idx = action - ACTION_BUY_ASSET_0
-            return self.assets[asset_idx], BUY
-        
-        if ACTION_SELL_ASSET_0 <= action < ACTION_SELL_ASSET_0 + num_assets:
-            # SELL action
-            asset_idx = action - ACTION_SELL_ASSET_0
-            return self.assets[asset_idx], SELL
-        
-        # Should not reach here
-        logger.error(f"Invalid action: {action}")
-        return None, HOLD
-    
-    def _calculate_portfolio_value(self):
-        """
-        Calculate the current portfolio value (capital + positions).
-        
-        Returns:
-            float: Total portfolio value.
-        """
-        # Start with available capital (limité pour éviter les overflows)
-        MAX_CAPITAL = 1e6  # 1 million USD maximum
-        capped_capital = min(self.capital, MAX_CAPITAL)
-        total_value = capped_capital
-        
-        # Add value of all positions
-        current_prices = self._get_current_prices()
-        for asset, position in self.positions.items():
-            if asset in current_prices:
-                # Limiter la taille des positions pour éviter les overflows
-                MAX_POSITION_SIZE = 1e8  # 100 millions de jetons maximum
-                position_qty = min(position['qty'], MAX_POSITION_SIZE)
-                position_value = position_qty * current_prices[asset]
                 
-                # Limiter la valeur de la position pour éviter les overflows
-                MAX_POSITION_VALUE = 1e6  # 1 million USD maximum par position
-                capped_position_value = min(position_value, MAX_POSITION_VALUE)
-                total_value += capped_position_value
-        
-        return total_value
-    
-    def _get_position_size(self, asset_id, price, current_tier):
-        """
-        Calculate the position size for a given asset based on the current tier.
-        
-        Args:
-            asset_id: Asset ID.
-            price: Current price of the asset.
-            current_tier: Current tier configuration.
-            
-        Returns:
-            float: Position size in USDT.
-        """
-        # Log input parameters for debugging
-        logger.info(f"[_get_position_size] Input parameters: asset_id={asset_id}, price=${price:.7f}")
-        logger.info(f"[_get_position_size] Tier details: {current_tier}")
-        
-        # Get allocation fraction from tier
-        allocation_frac = current_tier.get('allocation_frac_per_pos', 0.95)
-        logger.info(f"[_get_position_size] Allocation fraction from tier: {allocation_frac:.7f}")
-        
-        # Limiter le capital à une valeur raisonnable pour éviter les overflows
-        MAX_CAPITAL = 1e6  # 1 million USD maximum pour les calculs d'allocation
-        capped_capital = min(self.capital, MAX_CAPITAL)
-        
-        # Calculate allocated value
-        allocated_value_usdt = capped_capital * allocation_frac
-        
-        # Log allocation details
-        logger.info(f"[_get_position_size] Capital original: ${self.capital:.7f}, capital plafonné: ${capped_capital:.7f}")
-        logger.info(f"[_get_position_size] Allocation_frac: {allocation_frac:.7f}, allocated_value_usdt: ${allocated_value_usdt:.7f}")
-        logger.info(f"[_get_position_size] Asset: {asset_id}, price: ${price:.7f}, min_order_value_tolerable: ${self.min_order_value_tolerable:.4f}, min_order_value_absolute: ${self.min_order_value_absolute:.4f}")
-        
-        return allocated_value_usdt
-    
-    def _interpret_action_for_display(self, action):
-        """
-        Traduit l'action numérique en une chaîne de caractères lisible.
-        
-        Args:
-            action: Action numérique.
-            
-        Returns:
-            str: Chaîne de caractères décrivant l'action.
-        """
-        if action == ACTION_HOLD:
-            return "[bold yellow]HOLD[/bold yellow]"
-        
-        num_assets = len(self.assets)
-        
-        if ACTION_BUY_ASSET_0 <= action < ACTION_BUY_ASSET_0 + num_assets:
-            # BUY action
-            asset_idx = action - ACTION_BUY_ASSET_0
-            asset_id = self.assets[asset_idx]
-            return f"[bold green]BUY[/bold green] {asset_id}"
-        
-        if ACTION_SELL_ASSET_0 <= action < ACTION_SELL_ASSET_0 + num_assets:
-            # SELL action
-            asset_idx = action - ACTION_SELL_ASSET_0
-            asset_id = self.assets[asset_idx]
-            return f"[bold red]SELL[/bold red] {asset_id}"
-        
-        return f"[bold red]UNKNOWN ACTION: {action}[/bold red]"
-    
-    def _display_trading_table(self, action, old_value, new_value, reward, reward_mod, trade_info):
-        """
-        Display a trading table with current state information.
-        
-        Args:
-            action: Action taken.
-            old_value: Portfolio value before action.
-            new_value: Portfolio value after action.
-            reward: Reward received.
-            reward_mod: Reward modifier.
-            trade_info: Trade information.
-        """
-        # Obtenir l'interprétation de l'action
-        action_str = self._interpret_action_for_display(action)
-        
-        # Créer un titre pour la table principale
-        title = f"[bold blue]Step {self.current_step}/{self.max_steps}[/bold blue]"
-        
-        # Créer un panneau pour l'action
-        action_panel = Panel.fit(
-            action_str,
-            title="Action",
-            border_style="green" if ACTION_BUY_ASSET_0 <= action < ACTION_BUY_ASSET_0 + len(self.assets) else 
-                      "red" if ACTION_SELL_ASSET_0 <= action < ACTION_SELL_ASSET_0 + len(self.assets) else "yellow"
-        )
-        
-        # Afficher le panneau d'action
-        console.print(Rule(title))
-        console.print(action_panel)
-        
-        # Créer une table pour la performance du portefeuille
-        portfolio_table = Table(title="Performance du Portefeuille", show_header=True, box=box.ROUNDED)
-        portfolio_table.add_column("Métrique", style="cyan")
-        portfolio_table.add_column("Avant", style="yellow")
-        portfolio_table.add_column("Après", style="green")
-        portfolio_table.add_column("Variation", style="magenta")
-        
-        # Calculer les variations de valeur
-        value_change = new_value - old_value
-        value_change_pct = (value_change / old_value) * 100 if old_value > 0 else 0
-        value_change_style = "green" if value_change >= 0 else "red"
-        
-        # Ajouter les lignes de performance
-        portfolio_table.add_row(
-            "Valeur Totale",
-            f"${old_value:.2f}",
-            f"${new_value:.2f}",
-            Text(f"${value_change:.2f} ({value_change_pct:.2f}%)", style=value_change_style)
-        )
-        
-        # Ajouter la ligne de capital
-        capital_before = self.history[-1]['capital'] if self.history else self.initial_capital
-        capital_change = self.capital - capital_before
-        capital_change_style = "green" if capital_change >= 0 else "red"
-        portfolio_table.add_row(
-            "Capital Disponible",
-            f"${capital_before:.2f}",
-            f"${self.capital:.2f}",
-            Text(f"${capital_change:.2f}", style=capital_change_style)
-        )
-        
-        # Afficher la table de performance
-        console.print(portfolio_table)
-        
-        # Créer une table pour les positions actives
-        positions_table = Table(title="Positions Actives", show_header=True, box=box.ROUNDED)
-        positions_table.add_column("Actif", style="cyan")
-        positions_table.add_column("Quantité", style="yellow")
-        positions_table.add_column("Prix d'Entrée", style="green")
-        positions_table.add_column("Prix Actuel", style="blue")
-        positions_table.add_column("Valeur", style="magenta")
-        positions_table.add_column("PnL Latent", style="white")
-        
-        # Obtenir les prix actuels
-        current_prices = self._get_current_prices()
-        
-        # Ajouter les positions à la table
-        if self.positions:
-            for asset_id, position in self.positions.items():
-                current_price = current_prices.get(asset_id, position["price"])
-                position_value = position["qty"] * current_price
-                pnl = position["qty"] * (current_price - position["price"])
-                pnl_pct = (pnl / (position["qty"] * position["price"])) * 100 if position["qty"] * position["price"] > 0 else 0
-                pnl_style = "green" if pnl >= 0 else "red"
+            df = tf_data[highest_tf]
+            if self.step_in_chunk >= len(df):
+                logger.warning(f"Step {self.step_in_chunk} out of bounds for {asset} {highest_tf} data (length {len(df)})")
+                continue
                 
-                positions_table.add_row(
-                    asset_id,
-                    f"{position['qty']:.6f}",
-                    f"${position['price']:.4f}",
-                    f"${current_price:.4f}",
-                    f"${position_value:.2f}",
-                    Text(f"${pnl:.2f} ({pnl_pct:.2f}%)", style=pnl_style)
-                )
-        else:
-            positions_table.add_row("Aucune position active", "", "", "", "", "")
-        
-        # Afficher la table des positions
-        console.print(positions_table)
-        
-        # Créer une table pour les trades exécutés
-        if trade_info and 'status' in trade_info:
-            trades_table = Table(title="Trade Exécuté", show_header=True, box=box.ROUNDED)
-            trades_table.add_column("Statut", style="cyan")
-            trades_table.add_column("Type", style="yellow")
-            trades_table.add_column("Actif", style="green")
-            trades_table.add_column("Quantité", style="blue")
-            trades_table.add_column("Prix", style="magenta")
-            trades_table.add_column("Valeur", style="white")
-            trades_table.add_column("Frais", style="red")
+            try:
+                # Get the close price for the current step from the highest frequency timeframe
+                close_col = 'close'  # Column name without timeframe prefix in the per-timeframe DataFrames
+                if close_col not in df.columns:
+                    # Try to find a close column with any suffix
+                    close_cols = [col for col in df.columns if 'close' in col.lower()]
+                    if not close_cols:
+                        raise ValueError(f"No close price column found for {asset} in {highest_tf} timeframe")
+                    close_col = close_cols[0]
+                    
+                price = df[close_col].iloc[self.step_in_chunk]
+                if pd.isna(price):
+                    raise ValueError(f"Price is NaN for {asset} at step {self.step_in_chunk}")
+                    
+                prices[asset] = float(price)
+                
+                # Log the first few prices for debugging
+                if len(prices) <= 3:  # Only log first few to avoid flooding logs
+                    logger.debug(f"Current price for {asset}: {price:.8f} ({close_col})")
+                    
+            except Exception as e:
+                logger.error(f"Error getting price for {asset}: {str(e)}")
+                # Skip this asset but continue with others
+                continue
+                
+        if not prices:
+            raise RuntimeError("Failed to get prices for any asset")
             
-            # Déterminer le style du statut
-            status_style = "green" if trade_info['status'].endswith("_EXECUTED") else "red"
-            
-            # Extraire les informations du trade
-            asset_id = trade_info.get('asset_id', 'N/A')
-            action_type = trade_info.get('action_type', 'N/A')
-            quantity = trade_info.get('quantity', 0)
-            price = trade_info.get('price', 0)
-            value = trade_info.get('value', trade_info.get('total_cost', 0))
-            fee = trade_info.get('fee', 0)
-            
-            # Ajouter la ligne à la table
-            trades_table.add_row(
-                Text(trade_info['status'], style=status_style),
-                "BUY" if action_type == BUY else "SELL" if action_type == SELL else "N/A",
-                asset_id,
-                f"{quantity:.6f}" if quantity else "N/A",
-                f"${price:.4f}" if price else "N/A",
-                f"${value:.2f}" if value else "N/A",
-                f"${fee:.2f}" if fee else "N/A"
-            )
-            
-            # Afficher la table des trades
-            console.print(trades_table)
-            
-            # Si le trade a échoué, afficher la raison
-            if 'reason' in trade_info and not trade_info['status'].endswith("_EXECUTED"):
-                console.print(Panel(f"[bold red]Raison: {trade_info['reason']}[/bold red]", title="Échec du Trade"))
+        return prices
         
-        # Créer une table pour les ordres en attente
-        if hasattr(self.order_manager, 'pending_orders') and self.order_manager.pending_orders:
-            pending_orders_table = Table(title="Ordres en Attente", show_header=True, box=box.ROUNDED)
-            pending_orders_table.add_column("ID", style="cyan")
-            pending_orders_table.add_column("Type", style="yellow")
-            pending_orders_table.add_column("Actif", style="green")
-            pending_orders_table.add_column("Quantité", style="blue")
-            pending_orders_table.add_column("Prix", style="magenta")
-            pending_orders_table.add_column("Expiration", style="white")
-            
-            # Ajouter les ordres en attente à la table
-            for order_id, order in self.order_manager.pending_orders.items():
-                pending_orders_table.add_row(
-                    str(order_id),
-                    order.get('action_type_str', 'BUY' if order.get('action_type') == BUY else 'SELL' if order.get('action_type') == SELL else 'N/A'),
-                    order.get('asset_id', 'N/A'),
-                    f"{order.get('quantity', 0):.6f}",
-                    f"${order.get('price', 0):.4f}",
-                    f"Step {order.get('expiration', 'N/A')}"
-                )
-            
-            # Afficher la table des ordres en attente
-            console.print(pending_orders_table)
-        
-        # Créer une table pour la récompense
-        reward_table = Table(title="Récompense", show_header=True, box=box.ROUNDED)
-        reward_table.add_column("Type", style="cyan")
-        reward_table.add_column("Valeur", style="yellow")
-        
-        # Déterminer les styles de récompense
-        reward_style = "green" if reward >= 0 else "red"
-        cum_reward_style = "green" if self.cumulative_reward >= 0 else "red"
-        
-        # Ajouter les lignes de récompense
-        reward_table.add_row("Modificateur", f"{reward_mod:.6f}")
-        reward_table.add_row("Récompense Nette", Text(f"{reward:.6f}", style=reward_style))
-        reward_table.add_row("Récompense Cumulative", Text(f"{self.cumulative_reward:.6f}", style=cum_reward_style))
-        
-        # Afficher la table de récompense
-        console.print(reward_table)
-        
-        # Créer une table pour les informations du palier actuel
-        current_tier = self.reward_calculator.get_current_tier(self.capital)
-        tier_table = Table(title="Palier Actuel", show_header=True, box=box.ROUNDED)
-        tier_table.add_column("Paramètre", style="cyan")
-        tier_table.add_column("Valeur", style="yellow")
-        
-        # Debug: Loguer les détails du palier actuel
-        logger.info(f"[_display_trading_table] Capital actuel: ${self.capital:.2f}")
-        logger.info(f"[_display_trading_table] Palier actuel: {current_tier}")
-        alloc_frac_debug = current_tier.get('allocation_frac_per_pos', -1.0)  # -1.0 pour signaler une erreur si la clé manque
-        logger.info(f"[_display_trading_table] allocation_frac_per_pos: {alloc_frac_debug:.4f}")
-        
-        # Ajouter les informations du palier
-        tier_table.add_row("Seuil", f"${current_tier.get('threshold', 0):.2f}")
-        tier_table.add_row("Positions Max", str(current_tier.get('max_positions', 0)))
-        tier_table.add_row("Allocation par Position", f"{current_tier.get('allocation_frac_per_pos', 0) * 100:.2f}%")
-        tier_table.add_row("Multiplicateur Récompense", f"{current_tier.get('reward_pos_mult', 1):.2f}x")
-        tier_table.add_row("DEBUG alloc_frac_per_pos", f"{alloc_frac_debug * 100:.2f}%")
-        tier_table.add_row("Capital utilisé pour tier", f"${self.capital:.2f}")
-        
-        # Afficher la table du palier
-        console.print(tier_table)
-        
-        # Afficher une ligne de séparation
-        console.print(Rule())
-    
-    def render(self, mode='human'):
+    def render(self, mode: str = 'human') -> Optional[str]:
         """
-        Render the environment.
+        Render the environment state.
         
         Args:
-            mode: Rendering mode.
+            mode: Rendering mode ('human' or 'ansi')
             
         Returns:
-            None
+            Optional[str]: String representation if mode is 'ansi', None otherwise
         """
-        # Rendering is handled by _display_trading_table in step()
-        pass
-    
-    def close(self):
-        """
-        Clean up resources.
-        """
-        # Export trading data if requested
-        if self.export_history and self.history:
-            self.export_trading_data(self.export_dir)
-    
-    def export_trading_data(self, export_dir=None):
-        """
-        Export trading history and logs to files.
+        if mode == 'human':
+            print(f"Step: {self.current_step} (Chunk {self.current_chunk_idx}, Step {self.step_in_chunk})")
+            print(f"Portfolio Value: {self.portfolio.get_portfolio_value():.2f} | "
+                  f"Cash: {self.portfolio.cash:.2f} | "
+                  f"Positions: {self.portfolio.positions}")
+            
+            if hasattr(self, 'last_chunk_pnl'):
+                print(f"Last Chunk PnL: {self.last_chunk_pnl:.2f} | "
+                      f"Optimal Bonus: {self.last_optimal_bonus:.4f}")
+            return None
         
-        Args:
-            export_dir: Directory to export data to.
-        """
-        if export_dir is None:
-            export_dir = os.path.join(os.getcwd(), 'exports')
+        if mode == 'ansi':
+            # Return a string instead of printing
+            output = [
+                f"Step: {self.current_step} (Chunk {self.current_chunk_idx}, Step {self.step_in_chunk})",
+                f"Portfolio Value: {self.portfolio.get_portfolio_value():.2f} | "
+                f"Cash: {self.portfolio.cash:.2f} | "
+                f"Positions: {self.portfolio.positions}"
+            ]
+            
+            if hasattr(self, 'last_chunk_pnl'):
+                output.extend([
+                    f"Last Chunk PnL: {self.last_chunk_pnl:.2f}",
+                    f"Optimal Bonus: {self.last_optimal_bonus:.4f}"
+                ])
+                
+            return "\n".join(output)
         
-        ensure_dir_exists(export_dir)
-        
-        # Generate timestamp
-        timestamp = int(time.time())
-        
-        # Export history
-        if self.history:
-            history_df = pd.DataFrame(self.history)
-            history_path = os.path.join(export_dir, f'trading_history_{timestamp}.csv')
-            history_df.to_csv(history_path, index=False)
-            logger.info(f"Exported trading history to {history_path}")
-        
-        # Export trade log
-        if self.trade_log:
-            trade_log_df = pd.DataFrame(self.trade_log)
-            trade_log_path = os.path.join(export_dir, f'trade_log_{timestamp}.csv')
-            trade_log_df.to_csv(trade_log_path, index=False)
-            logger.info(f"Exported trade log to {trade_log_path}")
-        
-        # Calculate and export performance metrics
-        metrics = self._calculate_performance_metrics()
-        metrics_path = os.path.join(export_dir, f'performance_metrics_{timestamp}.csv')
-        pd.DataFrame([metrics]).to_csv(metrics_path, index=False)
-        logger.info(f"Exported performance metrics to {metrics_path}")
-    
-    def _calculate_performance_metrics(self):
-        """
-        Calculate performance metrics from trading history.
-        
-        Returns:
-            dict: Performance metrics.
-        """
-        if not self.history:
-            return {}
-        
-        # Extract relevant data
-        portfolio_values = [h['portfolio_value'] for h in self.history]
-        initial_value = portfolio_values[0]
-        final_value = portfolio_values[-1]
-        
-        # Calculate metrics
-        total_return = (final_value - initial_value) / initial_value
-        
-        # Calculate daily returns (assuming each step is a day)
-        returns = [(v2 - v1) / v1 for v1, v2 in zip(portfolio_values[:-1], portfolio_values[1:])]
-        
-        # Sharpe ratio (assuming risk-free rate of 0)
-        sharpe_ratio = np.mean(returns) / np.std(returns) * np.sqrt(252) if len(returns) > 1 and np.std(returns) > 0 else 0
-        
-        # Maximum drawdown
-        max_drawdown = 0
-        peak = portfolio_values[0]
-        
-        for value in portfolio_values:
-            if value > peak:
-                peak = value
-            drawdown = (peak - value) / peak
-            max_drawdown = max(max_drawdown, drawdown)
-        
-        # Win rate
-        trades = [t for t in self.trade_log if t.get('pnl') is not None]
-        winning_trades = [t for t in trades if t.get('pnl', 0) > 0]
-        win_rate = len(winning_trades) / len(trades) if trades else 0
-        
-        # Average PnL
-        avg_pnl = np.mean([t.get('pnl', 0) for t in trades]) if trades else 0
-        
-        return {
-            'initial_value': initial_value,
-            'final_value': final_value,
-            'total_return': total_return,
-            'sharpe_ratio': sharpe_ratio,
-            'max_drawdown': max_drawdown,
-            'win_rate': win_rate,
-            'avg_pnl': avg_pnl,
-            'num_trades': len(trades),
-            'num_steps': len(self.history)
-        }
+        return None

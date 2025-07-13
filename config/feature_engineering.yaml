@@ -1,0 +1,59 @@
+# Configuration avancée du feature engineering pour ADAN
+feature_engineering:
+  # Timeframes à utiliser pour le traitement
+  timeframes: ["5m", "1h", "4h"]
+  
+  # Configuration des indicateurs techniques par timeframe
+  indicators:
+    # Indicateurs de tendance
+    - type: "sma"
+      period: 20
+    - type: "ema"
+      period: 9
+    - type: "ema"
+      period: 21
+    - type: "ema"
+      period: 50
+    - type: "ema"
+      period: 200
+    - type: "macd"
+      fast: 12
+      slow: 26
+      signal: 9
+    
+    # Indicateurs de momentum
+    - type: "rsi"
+      period: 14
+    - type: "stoch"
+      k: 14
+      d: 3
+      smooth_k: 3
+    - type: "cci"
+      period: 20
+    - type: "adx"
+      period: 14
+    - type: "williams"
+      period: 14
+    
+    # Indicateurs de volatilité
+    - type: "bbands"
+      period: 20
+      std: 2.0
+    - type: "atr"
+      period: 14
+    
+    # Indicateurs de volume
+    - type: "obv"
+    - type: "vwap"
+    - type: "mfi"
+      period: 14
+  
+  # Options de traitement
+  preprocessing:
+    fillna: true  # Remplir les valeurs manquantes
+    normalize: true  # Normaliser les caractéristiques
+    remove_outliers: true  # Supprimer les valeurs aberrantes
+    
+  # Paramètres de performance
+  chunk_size: 10000  # Taille des lots pour le traitement par lots
+  n_jobs: -1  # Utiliser tous les cœurs CPU disponibles

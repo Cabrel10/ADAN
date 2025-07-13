@@ -5,11 +5,139 @@ Calcule les récompenses basées sur les résultats réels des trades sur l'exch
 
 import time
 import logging
-from datetime import datetime, timedelta
-from typing import Dict, Any, Optional, List
 import numpy as np
+import pandas as pd
+import operator
+from datetime import datetime, timedelta
+from typing import Dict, Any, Optional, List, Callable
 
 logger = logging.getLogger(__name__)
+
+
+class SegmentTree:
+    """Implémentation d'un arbre de segments pour des requêtes de plage efficaces."""
+    
+    def __init__(self, capacity: int, operation: Callable, neutral_element: float):
+        """
+        Initialise un arbre de segments.
+        
+        Args:
+            capacity: Taille maximale de l'arbre (doit être une puissance de 2)
+            operation: Fonction d'agrégation (par exemple, operator.add pour une somme)
+            neutral_element: Élément neutre pour l'opération (par exemple, 0 pour la somme)
+        """
+        assert capacity > 0 and capacity & (capacity - 1) == 0, \
+            "La capacité doit être une puissance de 2 positive."
+        
+        self.capacity = capacity
+        self.operation = operation
+        self.neutral_element = neutral_element
+        self.values = [neutral_element] * (2 * capacity)
+    
+    def __setitem__(self, idx: int, val: float):
+        """Définit la valeur à l'index donné et met à jour l'arbre."""
+        idx += self.capacity
+        self.values[idx] = val
+        
+        # Remonter l'arbre pour mettre à jour les nœuds parents
+        idx >>= 1  # idx = idx // 2
+        while idx >= 1:
+            self.values[idx] = self.operation(
+                self.values[2 * idx],
+                self.values[2 * idx + 1]
+            )
+            idx >>= 1
+    
+    def query(self, start: int, end: int) -> float:
+        """
+        Effectue une requête de plage sur l'intervalle [start, end].
+        
+        Args:
+            start: Index de début (inclus)
+            end: Index de fin (inclus)
+            
+        Returns:
+            Résultat de l'opération sur la plage
+        """
+        # Ajuster les indices pour la représentation interne
+        start += self.capacity
+        end += self.capacity
+        
+        # Initialiser les résultats partiels avec l'élément neutre
+        res_start = self.neutral_element
+        res_end = self.neutral_element
+        
+        # Parcourir l'arbre de haut en bas
+        while start <= end:
+            if start % 2 == 1:  # Fils droit
+                res_start = self.operation(res_start, self.values[start])
+                start += 1
+            if end % 2 == 0:  # Fils gauche
+                res_end = self.operation(self.values[end], res_end)
+                end -= 1
+            
+            # Remonter d'un niveau
+            start >>= 1
+            end >>= 1
+        
+        return self.operation(res_start, res_end)
+
+
+class SumSegmentTree(SegmentTree):
+    """Arbre de segments pour les sommes de plages."""
+    
+    def __init__(self, capacity: int):
+        super().__init__(
+            capacity=capacity,
+            operation=operator.add,
+            neutral_element=0.0
+        )
+    
+    def sum(self, start: int = 0, end: Optional[int] = None) -> float:
+        """Retourne la somme des éléments dans l'intervalle [start, end]."""
+        if end is None:
+            end = self.capacity - 1
+        return self.query(start, end)
+    
+    def find_prefixsum_idx(self, prefixsum: float) -> int:
+        """
+        Trouve le plus grand i tel que la somme des éléments [0..i] <= prefixsum.
+        
+        Args:
+            prefixsum: Somme de préfixe cible
+            
+        Returns:
+            Index i tel que sum(arr[0..i]) <= prefixsum < sum(arr[0..i+1])
+        """
+        assert 0 <= prefixsum <= self.sum() + 1e-5, f"Prefixsum {prefixsum} hors limites"
+        
+        idx = 1  # Commencer à la racine
+        while idx < self.capacity:  # Tant que nous ne sommes pas à une feuille
+            left = 2 * idx
+            if self.values[left] > prefixsum:
+                idx = left  # Aller à gauche
+            else:
+                prefixsum -= self.values[left]
+                idx = left + 1  # Aller à droite
+        
+        return idx - self.capacity  # Convertir l'index en base 0
+
+
+class MinSegmentTree(SegmentTree):
+    """Arbre de segments pour les requêtes de minimum sur des plages."""
+    
+    def __init__(self, capacity: int):
+        super().__init__(
+            capacity=capacity,
+            operation=min,
+            neutral_element=float('inf')
+        )
+    
+    def min(self, start: int = 0, end: Optional[int] = None) -> float:
+        """Retourne le minimum des éléments dans l'intervalle [start, end]."""
+        if end is None:
+            end = self.capacity - 1
+        return self.query(start, end)
 
 
 class OnlineRewardCalculator:
@@ -319,22 +447,40 @@ class OnlineRewardCalculator:
 
 class ExperienceBuffer:
     """
-    Buffer d'expérience pour l'apprentissage continu.
-    Stocke les transitions (state, action, reward, next_state, done) pour l'apprentissage.
+    Buffer d'expérience pour l'apprentissage continu avec Prioritized Experience Replay (PER).
+    Implémente un échantillonnage prioritaire basé sur l'erreur TD pour un apprentissage plus efficace.
     """
     
-    def __init__(self, max_size: int = 10000):
+    def __init__(self, max_size: int = 10000, alpha: float = 0.6, beta: float = 0.4, beta_increment: float = 0.001):
         """
-        Initialise le buffer d'expérience.
+        Initialise le buffer d'expérience avec PER.
         
         Args:
-            max_size: Taille maximale du buffer
+            max_size: Taille maximale du buffer (doit être une puissance de 2)
+            alpha: Paramètre de priorité (0 = pas de priorité, 1 = priorité maximale)
+            beta: Paramètre d'importance sampling (initial)
+            beta_increment: Incrément de beta à chaque mise à jour
         """
-        self.max_size = max_size
-        self.buffer = []
-        self.position = 0
+        # Ajuster la taille pour qu'elle soit une puissance de 2
+        capacity = 1
+        while capacity < max_size:
+            capacity *= 2
         
-        logger.info(f"✅ ExperienceBuffer initialized with max_size={max_size}")
+        self.max_size = capacity
+        self.alpha = alpha
+        self.beta = beta
+        self.beta_increment = beta_increment
+        self.buffer = []
+        self.priorities = np.zeros((capacity,), dtype=np.float32)
+        self.position = 0
+        self.size = 0
+        
+        # Pour l'échantillonnage efficace
+        self._it_sum = SumSegmentTree(capacity)
+        self._it_min = MinSegmentTree(capacity)
+        self._max_priority = 1.0
+        
+        logger.info(f"✅ ExperienceBuffer PER initialized (max_size={capacity}, α={alpha}, β={beta})")
     
     def add_experience(self, 
                       state: np.ndarray, 
@@ -342,9 +488,10 @@ class ExperienceBuffer:
                       reward: float, 
                       next_state: np.ndarray, 
                       done: bool,
-                      info: Optional[Dict[str, Any]] = None):
+                      info: Optional[Dict[str, Any]] = None,
+                      priority: Optional[float] = None):
         """
-        Ajoute une expérience au buffer.
+        Ajoute une expérience au buffer avec une priorité donnée.
         
         Args:
             state: État initial
@@ -353,6 +500,7 @@ class ExperienceBuffer:
             next_state: État suivant
             done: Indique si l'épisode est terminé
             info: Informations supplémentaires
+            priority: Priorité de l'expérience (si None, utilise la priorité max actuelle)
         """
         try:
             experience = {
@@ -365,42 +513,119 @@ class ExperienceBuffer:
                 'info': info or {}
             }
             
+            # Définir la priorité (max par défaut pour les nouvelles expériences)
+            if priority is None:
+                priority = self._max_priority
+            
+            # Mise à jour du buffer
+            idx = self.position
             if len(self.buffer) < self.max_size:
                 self.buffer.append(experience)
             else:
-                # Remplacer l'ancienne expérience (buffer circulaire)
-                self.buffer[self.position] = experience
-                self.position = (self.position + 1) % self.max_size
+                self.buffer[idx] = experience
             
-            logger.debug(f"📝 Experience added to buffer (size: {len(self.buffer)})")
+            # Mise à jour des priorités
+            self.priorities[idx] = priority
+            self._it_sum[idx] = priority ** self.alpha
+            self._it_min[idx] = priority ** self.alpha
+            
+            # Mise à jour de la position (buffer circulaire)
+            self.position = (self.position + 1) % self.max_size
+            self.size = min(self.size + 1, self.max_size)
+            
+            logger.debug(f"📝 Experience added to PER buffer (size: {self.size}, priority: {priority:.4f})")
             
         except Exception as e:
-            logger.error(f"❌ Error adding experience to buffer: {e}")
+            logger.error(f"❌ Error adding experience to PER buffer: {e}")
     
-    def sample_batch(self, batch_size: int = 64) -> List[Dict[str, Any]]:
+    def _sample_proportional(self, batch_size: int) -> List[int]:
+        """Échantillonne des indices proportionnellement à leurs priorités."""
+        res = []
+        p_total = self._it_sum.sum(0, self.size - 1)
+        every_range_len = p_total / batch_size
+        
+        for i in range(batch_size):
+            mass = np.random.random() * every_range_len + i * every_range_len
+            idx = self._it_sum.find_prefixsum_idx(mass)
+            res.append(idx)
+        
+        return res
+    
+    def sample_batch(self, batch_size: int = 64) -> Dict[str, Any]:
         """
-        Échantillonne un batch d'expériences pour l'apprentissage.
+        Échantillonne un batch d'expériences avec importance sampling.
         
         Args:
             batch_size: Taille du batch
             
         Returns:
-            List[Dict]: Batch d'expériences
+            Dict contenant les données du batch et les poids d'importance sampling
         """
         try:
-            if len(self.buffer) < batch_size:
-                logger.warning(f"⚠️ Buffer size ({len(self.buffer)}) < batch_size ({batch_size}), returning all")
-                return self.buffer.copy()
+            if self.size < batch_size:
+                logger.warning(f"⚠️ Buffer size ({self.size}) < batch_size ({batch_size})")
+                return {}
             
-            import random
-            batch = random.sample(self.buffer, batch_size)
+            # Mise à jour de beta
+            self.beta = min(1.0, self.beta + self.beta_increment)
             
-            logger.debug(f"📦 Sampled batch of {len(batch)} experiences")
+            # Échantillonnage proportionnel aux priorités
+            indices = self._sample_proportional(batch_size)
+            
+            # Calcul des poids d'importance sampling
+            weights = []
+            p_min = self._it_min.min() / self._it_sum.sum()
+            max_weight = (p_min * self.size) ** (-self.beta)
+            
+            for idx in indices:
+                p_sample = self.priorities[idx] ** self.alpha / self._it_sum.sum()
+                weight = (p_sample * self.size) ** (-self.beta)
+                weights.append(weight / max_weight)
+            
+            # Récupération des expériences
+            batch = {
+                'states': np.array([self.buffer[idx]['state'] for idx in indices]),
+                'actions': np.array([self.buffer[idx]['action'] for idx in indices]),
+                'rewards': np.array([self.buffer[idx]['reward'] for idx in indices]),
+                'next_states': np.array([self.buffer[idx]['next_state'] for idx in indices]),
+                'dones': np.array([self.buffer[idx]['done'] for idx in indices]),
+                'indices': indices,
+                'weights': np.array(weights, dtype=np.float32)
+            }
+            
+            logger.debug(f"📦 Sampled PER batch of size {batch_size} (β={self.beta:.3f})")
             return batch
             
         except Exception as e:
-            logger.error(f"❌ Error sampling batch: {e}")
-            return []
+            logger.error(f"❌ Error sampling PER batch: {e}")
+            return {}
+    
+    def update_priorities(self, indices: List[int], priorities: np.ndarray):
+        """
+        Met à jour les priorités des expériences échantillonnées.
+        
+        Args:
+            indices: Indices des expériences à mettre à jour
+            priorities: Nouvelles priorités (erreurs TD)
+        """
+        try:
+            assert len(indices) == len(priorities)
+            
+            for idx, priority in zip(indices, priorities):
+                assert 0 <= idx < self.size
+                
+                # Mise à jour de la priorité
+                self.priorities[idx] = float(priority) + 1e-6  # Éviter les priorités nulles
+                self._it_sum[idx] = self.priorities[idx] ** self.alpha
+                self._it_min[idx] = self.priorities[idx] ** self.alpha
+                
+                # Mise à jour de la priorité max
+                self._max_priority = max(self._max_priority, float(priority))
+            
+            logger.debug(f"🔄 Updated priorities for {len(indices)} experiences")
+            
+        except Exception as e:
+            logger.error(f"❌ Error updating priorities: {e}")
     
     def get_recent_experiences(self, n: int = 10) -> List[Dict[str, Any]]:
         """
@@ -413,11 +638,13 @@ class ExperienceBuffer:
             List[Dict]: Expériences récentes
         """
         try:
-            if not self.buffer:
+            if not self.buffer or n <= 0:
                 return []
             
             # Trier par timestamp et prendre les plus récentes
-            sorted_buffer = sorted(self.buffer, key=lambda x: x['timestamp'], reverse=True)
+            sorted_buffer = sorted(self.buffer[:self.size], 
+                                 key=lambda x: x['timestamp'], 
+                                 reverse=True)
             return sorted_buffer[:n]
             
         except Exception as e:
@@ -425,14 +652,15 @@ class ExperienceBuffer:
             return []
     
     def clear(self):
-        """Vide le buffer d'expérience."""
+        """Vide le buffer d'expérience et réinitialise les priorités."""
         self.buffer.clear()
+        self.priorities = np.zeros((self.max_size,), dtype=np.float32)
         self.position = 0
-        logger.info("🗑️ Experience buffer cleared")
-    
-    def size(self) -> int:
-        """Retourne la taille actuelle du buffer."""
-        return len(self.buffer)
+        self.size = 0
+        self._it_sum = SumSegmentTree(self.max_size)
+        self._it_min = MinSegmentTree(self.max_size)
+        self._max_priority = 1.0
+        logger.info("🗑️ PER buffer cleared and reset")
     
     def is_ready_for_learning(self, min_experiences: int = 100) -> bool:
         """
@@ -444,4 +672,4 @@ class ExperienceBuffer:
         Returns:
             bool: True si prêt pour l'apprentissage
         """
-        return len(self.buffer) >= min_experiences
+        return self.size >= min_experiences

@@ -1,592 +1,330 @@
+#!/usr/bin/env python
+# -*- coding: utf-8 -*-
 """
-Training module for the ADAN trading bot.
+Training module for the ADAN trading bot with support for CNN feature extraction.
 """
 import os
 import time
 import numpy as np
-from stable_baselines3.common.callbacks import EvalCallback, CheckpointCallback
+import torch as th
+import torch.nn as nn
+import pandas as pd
+from typing import Dict, Any, Optional, List, Tuple, Union
+from stable_baselines3 import PPO
+from stable_baselines3.common.callbacks import (
+    EvalCallback, 
+    CheckpointCallback,
+    CallbackList,
+    BaseCallback
+)
 from stable_baselines3.common.monitor import Monitor
-from stable_baselines3.common.evaluation import evaluate_policy
-from stable_baselines3.common.vec_env import SubprocVecEnv, DummyVecEnv
-from rich.console import Console
-from rich.table import Table
-from rich.panel import Panel
-from rich.rule import Rule
+from stable_baselines3.common.vec_env import DummyVecEnv, VecNormalize, VecFrameStack
+from stable_baselines3.common.policies import ActorCriticPolicy
+from stable_baselines3.common.utils import set_random_seed
+from stable_baselines3.common.type_aliases import GymEnv, MaybeCallback
 
-from ..common.utils import get_logger, get_path, ensure_dir_exists, load_config
-from ..data_processing.feature_engineer import prepare_data_pipeline
+from ..common.utils import get_logger, load_config, create_directories
+from ..data_processing.data_loader import load_merged_data, prepare_multi_timeframe_data
 from ..environment.multi_asset_env import MultiAssetEnv
-from ..agent.ppo_agent import create_ppo_agent, save_agent, TradingCallback
-from .callbacks import CustomTrainingInfoCallback, EvaluationCallback
+from ..models.feature_extractors import CustomCNNFeatureExtractor, get_feature_extractor
 
+# Configure logger
 logger = get_logger()
-console = Console()
 
-def adapt_config_for_training_timeframe(config):
+class CustomActorCriticPolicy(ActorCriticPolicy):
+    """Custom policy with CNN feature extractor for 3D observations."""
+    
+    def __init__(
+        self,
+        observation_space: gym.spaces.Space,
+        action_space: gym.spaces.Space,
+        lr_schedule: Callable[[float], float],
+        net_arch: Optional[List[Union[int, Dict[str, List[int]]]]] = None,
+        activation_fn: Type[nn.Module] = nn.Tanh,
+        *args,
+        **kwargs
+    ):
+        # Custom feature extractor for 3D observations
+        features_extractor_class = kwargs.pop('features_extractor_class', CustomCNNFeatureExtractor)
+        features_extractor_kwargs = kwargs.pop('features_extractor_kwargs', {})
+        
+        super().__init__(
+            observation_space,
+            action_space,
+            lr_schedule,
+            net_arch=net_arch or [dict(pi=[256, 128], vf=[256, 128])],
+            activation_fn=activation_fn,
+            features_extractor_class=features_extractor_class,
+            features_extractor_kwargs=features_extractor_kwargs,
+            *args,
+            **kwargs
+        )
+
+class TrainingConfig:
+    """Configuration class for model training."""
+    
+    def __init__(self, config: Dict[str, Any]):
+        # Training parameters
+        self.total_timesteps = config.get('total_timesteps', 1_000_000)
+        self.n_steps = config.get('n_steps', 2048)
+        self.batch_size = config.get('batch_size', 64)
+        self.n_epochs = config.get('n_epochs', 10)
+        self.learning_rate = config.get('learning_rate', 3e-4)
+        self.gamma = config.get('gamma', 0.99)
+        self.gae_lambda = config.get('gae_lambda', 0.95)
+        self.clip_range = config.get('clip_range', 0.2)
+        self.ent_coef = config.get('ent_coef', 0.0)
+        self.vf_coef = config.get('vf_coef', 0.5)
+        self.max_grad_norm = config.get('max_grad_norm', 0.5)
+        
+        # Environment parameters
+        self.n_envs = config.get('n_envs', 1)
+        self.use_frame_stack = config.get('use_frame_stack', True)
+        self.frame_stack = config.get('frame_stack', 4)
+        self.normalize = config.get('normalize', True)
+        
+        # Model saving
+        self.save_freq = config.get('save_freq', 10000)
+        self.eval_freq = config.get('eval_freq', 10000)
+        self.best_model_save_path = config.get('best_model_save_path', 'models/best')
+        self.log_path = config.get('log_path', 'logs')
+        self.tensorboard_log = config.get('tensorboard_log', 'logs/tensorboard')
+        
+        # Random seed for reproducibility
+        self.seed = config.get('seed', 42)
+        
+        # Device (GPU if available, else CPU)
+        self.device = 'cuda' if th.cuda.is_available() and config.get('use_gpu', True) else 'cpu'
+        
+        # Create necessary directories
+        create_directories([self.best_model_save_path, self.log_path, self.tensorboard_log])
+        
+        # Set random seeds for reproducibility
+        set_random_seed(self.seed)
+        th.manual_seed(self.seed)
+        np.random.seed(self.seed)
+        
+        if th.cuda.is_available():
+            th.backends.cudnn.deterministic = True
+            th.backends.cudnn.benchmark = False
+
+def create_envs(
+    train_data: Dict[str, pd.DataFrame],
+    val_data: Dict[str, pd.DataFrame],
+    config: TrainingConfig,
+    env_config: Dict[str, Any]
+) -> Tuple[GymEnv, GymEnv]:
     """
-    Adapte automatiquement la configuration selon le training_timeframe.
-    Cette fonction est maintenant simplifiée car la logique d'initialisation des features
-    est centralisée dans MultiAssetEnv.
+    Create training and evaluation environments.
     
     Args:
-        config: Configuration complète
+        train_data: Dictionary of training data DataFrames
+        val_data: Dictionary of validation data DataFrames
+        config: Training configuration
+        env_config: Environment configuration
         
     Returns:
-        config: Configuration adaptée (sans modification)
+        Tuple of (train_env, eval_env)
     """
-    training_timeframe = config.get('data', {}).get('training_timeframe', '1h')
-    data_source_type = config.get('data', {}).get('data_source_type', 'legacy_pipeline')
-    
-    logger.info(f"⏰ Training timeframe: {training_timeframe}")
-    logger.info(f"🔧 Data source type: {data_source_type}")
-    
-    # La logique d'initialisation des base_feature_names est maintenant dans MultiAssetEnv
-    # Plus besoin de warning car la sélection des features est automatique selon le timeframe
-    
-    return config
-
-def make_env(env_id, rank, seed=0, log_dir_base=None, df_env=None, config_env=None, scaler_env=None, encoder_env=None, max_episode_steps_override=None):
-    """
-    Utility function to create a single environment for parallel training.
-    
-    Args:
-        env_id: Environment identifier
-        rank: Process rank
-        seed: Random seed
-        log_dir_base: Base directory for logging
-        df_env: DataFrame for this environment
-        config_env: Configuration
-        scaler_env: Scaler
-        encoder_env: Encoder
-        max_episode_steps_override: Max steps override
+    def make_env(data: Dict[str, pd.DataFrame], is_training: bool = True) -> GymEnv:
+        """Create a single environment."""
+        def _init() -> MultiAssetEnv:
+            env = MultiAssetEnv(
+                data=data,
+                config=env_config,
+                is_training=is_training
+            )
+            return env
         
-    Returns:
-        Function that creates the environment
-    """
-    def _init():
-        env_log_dir = os.path.join(log_dir_base, f"worker_{rank}") if log_dir_base else None
-        env = MultiAssetEnv(df_env, config_env, scaler_env, encoder_env, max_episode_steps_override)
+        env = _init()
+        env = Monitor(env)
         
-        if env_log_dir:
-            ensure_dir_exists(env_log_dir)
-            env = Monitor(env, env_log_dir)
-        return env
-    return _init
-
-def setup_training_environment(config, train_df, val_df=None, scaler=None, encoder=None, max_episode_steps_override=None):
-    """
-    Setup training and validation environments with optional parallel processing.
-    
-    Args:
-        config: Configuration dictionary.
-        train_df: Training data.
-        val_df: Validation data (optional).
-        scaler: Pre-fitted scaler (optional).
-        encoder: Pre-fitted encoder (optional).
-        max_episode_steps_override: Optional override for maximum steps per episode.
-        
-    Returns:
-        tuple: (train_env, val_env)
-    """
-    # Get n_envs from agent config
-    n_envs = config.get('agent', {}).get('n_envs', 1)
-    seed = config.get('agent', {}).get('seed', 42)
-    
-    # Base log directory for monitor logs
-    log_dir_base_monitor = os.path.join(get_path('reports'), 'monitor_logs_vec')
-    ensure_dir_exists(log_dir_base_monitor)
-    
-    # Setup training environment(s)
-    if n_envs > 1:
-        logger.info(f"Setting up parallel training with {n_envs} environments using SubprocVecEnv")
-        train_env = SubprocVecEnv([
-            make_env(0, i, seed + i, log_dir_base_monitor, train_df, config, scaler, encoder, max_episode_steps_override) 
-            for i in range(n_envs)
-        ])
-    else:
-        logger.info("Setting up single training environment with DummyVecEnv")
-        train_env = DummyVecEnv([
-            make_env(0, 0, seed, log_dir_base_monitor, train_df, config, scaler, encoder, max_episode_steps_override)
-        ])
-    
-    # Setup validation environment (always single environment)
-    val_env = None
-    if val_df is not None and not val_df.empty:
-        logger.info("Setting up validation environment")
-        val_env = DummyVecEnv([
-            make_env(1, 0, seed, None, val_df, config, scaler, encoder, max_episode_steps_override)
-        ])
-    
-    return train_env, val_env
-
-def train_agent(config_paths=None, config=None, override_params=None):
-    """
-    Train the trading agent.
-    
-    Args:
-        config_paths: Dictionary of paths to configuration files.
-        config: Pre-loaded configuration dictionary.
-        override_params: Dictionary of parameters to override in the configuration.
-        
-    Returns:
-        tuple: (trained_agent, train_env)
-    """
-    # Load configurations if not provided
-    if config is None:
-        if config_paths is None:
-            config_paths = {
-                'main': os.path.join(get_path('config'), 'main_config.yaml'),
-                'data': os.path.join(get_path('config'), 'data_config.yaml'),
-                'environment': os.path.join(get_path('config'), 'environment_config.yaml'),
-                'agent': os.path.join(get_path('config'), 'agent_config.yaml')
-            }
-        
-        config = {}
-        for key, path in config_paths.items():
-            config[key] = load_config(path)
-        
-        # Combine configurations
-        config = {
-            'general': config['main'].get('general', {}),
-            'paths': config['main'].get('paths', {}),
-            'data': config['data'],
-            'environment': config['environment'],
-            'agent': config['agent']
-        }
-        
-        # Adapter la configuration selon le training_timeframe
-        config = adapt_config_for_training_timeframe(config)
-        # Apply override parameters if provided
-        if override_params:
-            logger.info("Applying override parameters to configuration")
-            
-            # Override initial_capital
-            if 'initial_capital' in override_params:
-                config['environment']['initial_capital'] = override_params['initial_capital']
-                logger.info(f"Overriding initial_capital: {override_params['initial_capital']}")
-            
-            # Override training_data_file
-            if 'training_data_file' in override_params:
-                config['data']['training_data_file'] = override_params['training_data_file']
-                logger.info(f"Overriding training_data_file: {override_params['training_data_file']}")
-            
-            # Override validation_data_file
-            if 'validation_data_file' in override_params:
-                config['data']['validation_data_file'] = override_params['validation_data_file']
-                logger.info(f"Overriding validation_data_file: {override_params['validation_data_file']}")
-
-            # Override training_timeframe in data config
-            if 'training_timeframe' in override_params and override_params['training_timeframe'] is not None:
-                if 'data' not in config:
-                    config['data'] = {} # Ensure 'data' key exists
-                config['data']['training_timeframe'] = override_params['training_timeframe']
-                logger.info(f"Overriding training_timeframe in config['data'] to: {override_params['training_timeframe']}")
-            
-            # Override total_timesteps
-            if 'total_timesteps' in override_params:
-                config['agent']['total_timesteps'] = override_params['total_timesteps']
-                logger.info(f"Overriding total_timesteps: {override_params['total_timesteps']}")
-            
-            # Override learning_rate
-            if 'learning_rate' in override_params:
-                config['agent']['policy']['learning_rate'] = override_params['learning_rate']
-                logger.info(f"Overriding learning_rate: {override_params['learning_rate']}")
-            
-            # Override batch_size
-            if 'batch_size' in override_params:
-                config['agent']['ppo']['batch_size'] = override_params['batch_size']
-                logger.info(f"Overriding batch_size: {override_params['batch_size']}")
-
-            # Override PPO n_steps
-            if 'n_steps' in override_params and override_params['n_steps'] is not None:
-                if 'ppo' not in config['agent']: # Ensure 'ppo' sub-dictionary exists
-                    config['agent']['ppo'] = {}
-                config['agent']['ppo']['n_steps'] = override_params['n_steps']
-                logger.info(f"Overriding PPO n_steps in config['agent']['ppo'] to: {override_params['n_steps']}")
-        
-    # Set random seed for reproducibility
-    random_seed = config.get('general', {}).get('random_seed', 42)
-    np.random.seed(random_seed)
-    
-    # Prepare data
-    logger.info("Preparing data for training...")
-    train_df, val_df, test_df = prepare_data_pipeline(config, is_training=True)
-    
-    # Logs détaillés pour vérifier le format du DataFrame fusionné
-    logger.info(f"TRAINER - train_df chargé par prepare_data_pipeline. Shape: {train_df.shape if train_df is not None else 'None'}")
-    if train_df is not None and not train_df.empty:
-        logger.info(f"TRAINER - Colonnes de train_df APRÈS prepare_data_pipeline (premières 30): {train_df.columns.tolist()[:30] if train_df is not None and not train_df.empty else 'DataFrame vide/None'}")
-        if train_df is not None and not train_df.empty and 'open_ADAUSDT' not in train_df.columns:  # Vérifier une colonne typique
-            logger.error("TRAINER - ERREUR : train_df ne contient PAS les colonnes fusionnées attendues (ex: open_ADAUSDT) !")
-        elif train_df is not None and not train_df.empty:
-            logger.info("TRAINER - SUCCÈS : train_df semble contenir les colonnes fusionnées.")
-        
-        # Vérification cruciale de la présence des colonnes fusionnées
-        assets = config.get('data', {}).get('assets', [])
-        if assets:
-            for asset in assets[:2]:  # Juste vérifier les 2 premiers actifs pour éviter trop de logs
-                logger.info(f"TRAINER - train_df contient-il 'open_{asset}' ? {'open_' + asset in train_df.columns}")
-                logger.info(f"TRAINER - train_df contient-il 'close_{asset}' ? {'close_' + asset in train_df.columns}")
+        # Wrap in DummyVecEnv if using multiple environments
+        if config.n_envs > 1:
+            env = DummyVecEnv([lambda: env] * config.n_envs)
         else:
-            logger.warning("TRAINER - Aucun actif défini dans config['data']['assets']")
-    else:
-        logger.critical("TRAINER - ERREUR CRITIQUE - train_df est vide ou None après prepare_data_pipeline!")
-        return None, None  # Arrêter si pas de données
+            env = DummyVecEnv([lambda: env])
+        
+        # Frame stacking if enabled
+        if config.use_frame_stack and len(env.observation_space.shape) >= 3:
+            env = VecFrameStack(env, n_stack=config.frame_stack)
+        
+        # Normalize observations and rewards if enabled
+        if config.normalize:
+            env = VecNormalize(env, norm_obs=True, norm_reward=True)
+        
+        return env
     
-    if train_df is None or train_df.empty:
-        logger.critical("ERREUR CRITIQUE: Données d'entraînement non disponibles ou vides")
-        return None, None
+    # Create training and evaluation environments
+    train_env = make_env(train_data, is_training=True)
+    eval_env = make_env(val_data, is_training=False) if val_data is not None else None
     
-    # Setup training environment
-    logger.info("Setting up training environment...")
-    max_episode_steps_override = override_params.get('max_episode_steps') if override_params else None
-    train_env, val_env = setup_training_environment(config, train_df, val_df, max_episode_steps_override=max_episode_steps_override)
-    
-    # Access training_timeframe for naming
-    training_timeframe = config.get('data', {}).get('training_timeframe', 'default_tf')
-    model_name_suffix = override_params.get('model_name_suffix', None) if override_params else None
-    logger.info(f"Using training_timeframe='{training_timeframe}' and suffix='{model_name_suffix}' for model save paths.")
+    return train_env, eval_env
 
+def train_agent(
+    config_path: str,
+    custom_config: Optional[Dict[str, Any]] = None,
+    callbacks: Optional[List[BaseCallback]] = None
+) -> PPO:
+    """
+    Train a PPO agent with the given configuration.
+    
+    Args:
+        config_path: Path to the configuration file
+        custom_config: Optional dictionary to override config values
+        callbacks: List of additional callbacks to use during training
+        
+    Returns:
+        Trained PPO agent
+    """
+    # Load configuration
+    config = load_config(config_path)
+    if custom_config:
+        config.update(custom_config)
+    
+    # Create training config
+    train_config = TrainingConfig(config.get('training', {}))
+    
+    # Load and prepare data
+    logger.info("Loading and preparing data...")
+    train_data = load_merged_data(config['data_sources']['train_dir'])
+    val_data = load_merged_data(config['data_sources']['val_dir']) if 'val_dir' in config['data_sources'] else None
+    
+    # Prepare multi-timeframe data
+    train_data = prepare_multi_timeframe_data(train_data, config)
+    if val_data is not None:
+        val_data = prepare_multi_timeframe_data(val_data, config)
+    
+    # Create environments
+    logger.info("Creating environments...")
+    train_env, eval_env = create_envs(train_data, val_data, train_config, config.get('environment', {}))
+    
+    # Define policy kwargs for custom feature extractor
+    policy_kwargs = dict(
+        features_extractor_class=CustomCNNFeatureExtractor,
+        features_extractor_kwargs=dict(
+            features_dim=512,
+            channels=config['environment'].get('num_channels', 3),
+            kernel_sizes=[3, 3, 3],
+            use_batch_norm=True,
+            dropout=0.1
+        ),
+        net_arch=dict(pi=[256, 128], vf=[256, 128]),
+        activation_fn=th.nn.ReLU,
+        ortho_init=True
+    )
+    
     # Create agent
-    logger.info("Creating PPO agent...")
-    # Tensorboard log directory could also be timeframe specific if desired, but not requested here.
-    tensorboard_log_dir = os.path.join(get_path('reports'), 'tensorboard_logs')
-    ensure_dir_exists(tensorboard_log_dir)
-    agent = create_ppo_agent(train_env, config, tensorboard_log_dir)
+    logger.info("Initializing PPO agent...")
+    agent = PPO(
+        policy=CustomActorCriticPolicy,
+        env=train_env,
+        learning_rate=train_config.learning_rate,
+        n_steps=train_config.n_steps,
+        batch_size=train_config.batch_size,
+        n_epochs=train_config.n_epochs,
+        gamma=train_config.gamma,
+        gae_lambda=train_config.gae_lambda,
+        clip_range=train_config.clip_range,
+        ent_coef=train_config.ent_coef,
+        vf_coef=train_config.vf_coef,
+        max_grad_norm=train_config.max_grad_norm,
+        policy_kwargs=policy_kwargs,
+        tensorboard_log=train_config.tensorboard_log,
+        verbose=1,
+        device=train_config.device,
+        seed=train_config.seed
+    )
     
     # Setup callbacks
-    callbacks = []
+    if callbacks is None:
+        callbacks = []
     
-    models_base_dir = get_path('models') # e.g., 'output/models'
-
-    # Evaluation callback if validation environment is available
-    if val_env is not None:
-        eval_suffix = f"_{model_name_suffix}" if model_name_suffix else ""
-        best_model_dir = os.path.join(models_base_dir, f'best_model_{training_timeframe}{eval_suffix}')
-        # EvalCallback saves the model as 'best_model.zip' inside this path
-        ensure_dir_exists(best_model_dir)
-        eval_callback = EvalCallback(
-            val_env,
-            best_model_save_path=best_model_dir,
-            log_path=os.path.join(get_path('reports'), 'eval_logs'), # Eval logs can stay common or be specific
-            eval_freq=config.get('agent', {}).get('eval_freq', 10000),
-            deterministic=True,
-            render=False
-        )
-        callbacks.append(eval_callback)
-    
-    # Checkpoint callback
-    checkpoint_freq = config.get('agent', {}).get('checkpoint_freq', 50000)
-    checkpoint_suffix = f"_{model_name_suffix}" if model_name_suffix else ""
-    checkpoints_dir = os.path.join(models_base_dir, f'checkpoints_{training_timeframe}{checkpoint_suffix}')
-    # CheckpointCallback creates this directory if it doesn't exist.
+    # Add checkpoint callback
     checkpoint_callback = CheckpointCallback(
-        save_freq=checkpoint_freq,
-        save_path=checkpoints_dir,
-        name_prefix=f"ppo_trading_{training_timeframe}{checkpoint_suffix}"
+        save_freq=max(train_config.save_freq // train_config.n_envs, 1),
+        save_path=train_config.best_model_save_path,
+        name_prefix='model',
+        save_replay_buffer=True,
+        save_vecnormalize=True
     )
     callbacks.append(checkpoint_callback)
     
-    # Custom trading callback
-    trading_cb_suffix = f"_{model_name_suffix}" if model_name_suffix else ""
-    best_trading_model_path = os.path.join(models_base_dir, f'best_trading_model_{training_timeframe}{trading_cb_suffix}.zip')
-    ensure_dir_exists(os.path.dirname(best_trading_model_path))
-    trading_callback = TradingCallback(
-        check_freq=config.get('agent', {}).get('check_freq', 10000),
-        save_path=best_trading_model_path,
-        verbose=1
-    )
-    callbacks.append(trading_callback)
+    # Add evaluation callback if validation data is available
+    if eval_env is not None:
+        eval_callback = EvalCallback(
+            eval_env,
+            best_model_save_path=train_config.best_model_save_path,
+            log_path=train_config.log_path,
+            eval_freq=max(train_config.eval_freq // train_config.n_envs, 1),
+            deterministic=True,
+            render=False,
+            n_eval_episodes=5,
+            warn=False
+        )
+        callbacks.append(eval_callback)
     
-    # Custom training info callback pour un affichage riche pendant l'entraînement
-    custom_info_freq = config.get('agent', {}).get('custom_log_freq_rollouts', 1)  # Log tous les X rollouts
-    custom_info_callback = CustomTrainingInfoCallback(check_freq=custom_info_freq, verbose=1)
-    callbacks.append(custom_info_callback)
-    
-    # Note: Un callback EarlyStopping avancé pourra être ajouté dans une version future
-    # pour arrêter l'entraînement selon des critères de performance spécifiques
+    # Create callback list
+    callback = CallbackList(callbacks)
     
     # Train the agent
-    logger.info("Starting training...")
-    total_timesteps = config.get('agent', {}).get('total_timesteps', 1000000)
-    
+    logger.info(f"Starting training for {train_config.total_timesteps} timesteps...")
     start_time = time.time()
-    # Use models_base_dir defined earlier for consistency
-    interrupted_model_save_dir = models_base_dir
-    ensure_dir_exists(interrupted_model_save_dir)
-    interrupted_suffix = f"_{model_name_suffix}" if model_name_suffix else ""
-    interrupted_model_path = os.path.join(interrupted_model_save_dir, f'interrupted_model_{training_timeframe}{interrupted_suffix}.zip')
     
     try:
-        logger.info("Starting agent training...")
         agent.learn(
-            total_timesteps=total_timesteps,
-            callback=callbacks,
-            log_interval=100 # Default SB3 log interval for console output
+            total_timesteps=train_config.total_timesteps,
+            callback=callback,
+            reset_num_timesteps=True,
+            tb_log_name="ppo_cnn_training"
         )
-        
-        # Save the final model
-        final_model_save_dir = models_base_dir
-        ensure_dir_exists(final_model_save_dir)
-        final_suffix = f"_{model_name_suffix}" if model_name_suffix else ""
-        final_model_path = os.path.join(final_model_save_dir, f'final_model_{training_timeframe}{final_suffix}.zip')
-        save_agent(agent, final_model_path)
-        training_time = time.time() - start_time
-        logger.info(f"Training completed in {training_time:.2f} seconds")
-        logger.info(f"Final model saved to {final_model_path}")
-        
-        # Afficher un tableau récapitulatif de la session d'entraînement
-        summary_table = Table(title="[bold magenta]Résumé de la Session d'Entraînement ADAN[/bold magenta]")
-        summary_table.add_column("Métrique", style="dim cyan")
-        summary_table.add_column("Valeur")
-        
-        summary_table.add_row("Durée Totale Entraînement", f"{training_time:.2f}s")
-        summary_table.add_row("Nombre Total de Timesteps", f"{agent.num_timesteps} / {total_timesteps}")
-        summary_table.add_row("Modèle Final Sauvegardé", final_model_path)
-        
-        # Récupérer les dernières valeurs de TensorBoard (si possible)
-        try:
-            latest_values = agent.logger.name_to_value
-            
-            if 'rollout/ep_rew_mean' in latest_values:
-                final_ep_rew = latest_values['rollout/ep_rew_mean']
-                summary_table.add_row("Dernière Récompense Moyenne Épisode", f"{final_ep_rew:.4f}")
-            
-            if 'train/policy_loss' in latest_values:
-                final_policy_loss = latest_values['train/policy_loss']
-                summary_table.add_row("Dernière Perte Politique", f"{final_policy_loss:.6f}")
-            
-            if 'train/value_loss' in latest_values:
-                final_value_loss = latest_values['train/value_loss']
-                summary_table.add_row("Dernière Perte Valeur", f"{final_value_loss:.6f}")
-        except Exception as e:
-            logger.warning(f"Erreur lors de la récupération des métriques finales: {e}")
-        
-        console.print(summary_table)
-        
-        # Evaluate the final model
-        if val_env is not None:
-            mean_reward, std_reward = evaluate_policy(agent, val_env, n_eval_episodes=10)
-            logger.info(f"Final model evaluation: mean_reward={mean_reward:.2f} +/- {std_reward:.2f}")
-            
-            # Ajouter les résultats d'évaluation au tableau récapitulatif
-            eval_table = Table(title="[bold cyan]Évaluation Finale du Modèle[/bold cyan]")
-            eval_table.add_column("Métrique", style="dim cyan")
-            eval_table.add_column("Valeur")
-            
-            eval_table.add_row("Récompense Moyenne", f"{mean_reward:.4f}")
-            eval_table.add_row("Écart-Type Récompense", f"{std_reward:.4f}")
-            
-            console.print(eval_table)
-            
     except KeyboardInterrupt:
-        # Save the model if training is interrupted
-        logger.info("Training interrupted. Saving model...")
-        save_agent(agent, interrupted_model_path)
-        logger.info(f"Interrupted model saved to {interrupted_model_path}")
-        console.print(Panel(f"[bold yellow]Entraînement interrompu. Modèle sauvegardé à:[/bold yellow]\n{interrupted_model_path}", title="Interruption"))
-    except Exception as e:
-        logger.error(f"Error during training: {e}")
-        # Try to save the model if possible
-        try:
-            save_agent(agent, interrupted_model_path)
-            logger.info(f"Model saved to {interrupted_model_path} despite error")
-            console.print(Panel(f"[bold red]Erreur pendant l'entraînement:[/bold red]\n{str(e)}\n\n[bold yellow]Modèle sauvegardé à:[/bold yellow]\n{interrupted_model_path}", title="Erreur"))
-        except Exception as save_error:
-            logger.error(f"Could not save model: {save_error}")
-            console.print(Panel(f"[bold red]Erreur pendant l'entraînement:[/bold red]\n{str(e)}\n\n[bold red]Impossible de sauvegarder le modèle:[/bold red]\n{str(save_error)}", title="Erreur Critique"))
+        logger.warning("Training interrupted by user.")
     
-    return agent, train_env
-
-def resume_training(model_path, config_paths=None, config=None, train_df=None, override_params=None):
-    """
-    Resume training from a saved model.
-    
-    Args:
-        model_path: Path to the saved model.
-        config_paths: Dictionary of paths to configuration files.
-        config: Pre-loaded configuration dictionary.
-        train_df: Training data (if None, will be loaded from config).
-        override_params: Dictionary of parameters to override in the configuration.
-        
-    Returns:
-        tuple: (trained_agent, train_env)
-    """
-    from ..agent.ppo_agent import load_agent
-    
-    # Load configurations if not provided
-    if config is None:
-        if config_paths is None:
-            config_paths = {
-                'main': os.path.join(get_path('config'), 'main_config.yaml'),
-                'data': os.path.join(get_path('config'), 'data_config.yaml'),
-                'environment': os.path.join(get_path('config'), 'environment_config.yaml'),
-                'agent': os.path.join(get_path('config'), 'agent_config.yaml')
-            }
-        
-        config = {}
-        for key, path in config_paths.items():
-            config[key] = load_config(path)
-        
-        # Combine configurations
-        combined_config = {
-            'general': config['main'].get('general', {}),
-            'data': config['data'],
-            'environment': config['environment'],
-            'agent': config['agent']
-        }
-        # Apply override parameters if provided
-        if override_params:
-            logger.info("Applying override parameters to configuration")
-            
-            # Override initial_capital
-            if 'initial_capital' in override_params:
-                config['environment']['initial_capital'] = override_params['initial_capital']
-                logger.info(f"Overriding initial_capital: {override_params['initial_capital']}")
-            
-            # Override training_data_file
-            if 'training_data_file' in override_params:
-                config['data']['training_data_file'] = override_params['training_data_file']
-                logger.info(f"Overriding training_data_file: {override_params['training_data_file']}")
-            
-            # Override validation_data_file
-            if 'validation_data_file' in override_params:
-                config['data']['validation_data_file'] = override_params['validation_data_file']
-                logger.info(f"Overriding validation_data_file: {override_params['validation_data_file']}")
-            
-            # Override total_timesteps
-            if 'total_timesteps' in override_params:
-                # Vérifier si total_timesteps est dans agent ou dans ppo
-                if 'total_timesteps' in config['agent']:
-                    config['agent']['total_timesteps'] = override_params['total_timesteps']
-                elif 'ppo' in config:
-                    config['ppo']['total_timesteps'] = override_params['total_timesteps']
-                else:
-                    # Créer la structure si elle n'existe pas
-                    config.setdefault('ppo', {})['total_timesteps'] = override_params['total_timesteps']
-                logger.info(f"Overriding total_timesteps: {override_params['total_timesteps']}")
-            
-            # Override learning_rate
-            if 'learning_rate' in override_params:
-                # Vérifier si learning_rate est dans policy ou dans ppo
-                if 'policy' in config and 'learning_rate' in config['policy']:
-                    config['policy']['learning_rate'] = override_params['learning_rate']
-                elif 'ppo' in config:
-                    config['ppo']['learning_rate'] = override_params['learning_rate']
-                else:
-                    # Créer la structure si elle n'existe pas
-                    config.setdefault('policy', {})['learning_rate'] = override_params['learning_rate']
-                logger.info(f"Overriding learning_rate: {override_params['learning_rate']}")
-            
-            # Override batch_size
-            if 'batch_size' in override_params:
-                # Vérifier si batch_size est dans ppo
-                if 'ppo' in config:
-                    config['ppo']['batch_size'] = override_params['batch_size']
-                else:
-                    # Créer la structure si elle n'existe pas
-                    config.setdefault('ppo', {})['batch_size'] = override_params['batch_size']
-                logger.info(f"Overriding batch_size: {override_params['batch_size']}")
-    
-    # Prepare data if not provided
-    if train_df is None:
-        logger.info("Preparing data for training...")
-        train_df, val_df, _ = prepare_data_pipeline(config, is_training=True)
-        
-        if train_df.empty:
-            logger.error("No training data available")
-            return None, None
-    else:
-        # Split the provided data for validation
-        data_config = config.get('data', {})
-        train_ratio = data_config.get('train_ratio', 0.7)
-        val_ratio = data_config.get('val_ratio', 0.15)
-        
-        from ..data_processing.feature_engineer import split_data
-        train_df, val_df, _ = split_data(
-            train_df,
-            train_ratio=train_ratio / (train_ratio + val_ratio),
-            val_ratio=val_ratio / (train_ratio + val_ratio),
-            test_ratio=0.0
-        )
-    
-    # Setup training environment
-    logger.info("Setting up training environment...")
-    max_episode_steps_override = override_params.get('max_episode_steps') if override_params else None
-    train_env, val_env = setup_training_environment(config, train_df, val_df, max_episode_steps_override=max_episode_steps_override)
-    
-    # Load the agent
-    logger.info(f"Loading agent from {model_path}...")
-    agent = load_agent(model_path, train_env)
-    
-    # Setup callbacks (same as in train_agent)
-    callbacks = []
-    
-    # Access training_timeframe for naming in resume_training as well
-    training_timeframe = config.get('data', {}).get('training_timeframe', 'default_tf') # Already available in config
-    model_name_suffix = override_params.get('model_name_suffix', None) if override_params else None # Get suffix for resume
-    logger.info(f"Using training_timeframe='{training_timeframe}' and suffix='{model_name_suffix}' for resumed model save paths.")
-
-    models_base_dir = get_path('models') # e.g., 'output/models'
-
-    # Evaluation callback if validation environment is available
-    if val_env is not None:
-        eval_suffix_resumed = f"_{model_name_suffix}" if model_name_suffix else ""
-        best_model_dir_resumed = os.path.join(models_base_dir, f'best_model_{training_timeframe}{eval_suffix_resumed}_resumed')
-        ensure_dir_exists(best_model_dir_resumed)
-        eval_callback = EvalCallback(
-            val_env,
-            best_model_save_path=best_model_dir_resumed, # Dir for best_model.zip
-            log_path=os.path.join(get_path('reports'), 'eval_logs'),
-            eval_freq=config.get('agent', {}).get('eval_freq', 10000),
-            deterministic=True,
-            render=False
-        )
-        callbacks.append(eval_callback)
-    
-    # Checkpoint callback
-    checkpoint_freq = config.get('agent', {}).get('checkpoint_freq', 50000)
-    checkpoint_suffix_resumed = f"_{model_name_suffix}" if model_name_suffix else ""
-    checkpoints_dir_resumed = os.path.join(models_base_dir, f'checkpoints_{training_timeframe}{checkpoint_suffix_resumed}_resumed')
-    checkpoint_callback = CheckpointCallback(
-        save_freq=checkpoint_freq,
-        save_path=checkpoints_dir_resumed,
-        name_prefix=f"ppo_trading_{training_timeframe}{checkpoint_suffix_resumed}_resumed"
-    )
-    callbacks.append(checkpoint_callback)
-    
-    # Custom trading callback
-    trading_cb_suffix_resumed = f"_{model_name_suffix}" if model_name_suffix else ""
-    best_trading_model_resumed_path = os.path.join(models_base_dir, f'best_trading_model_{training_timeframe}{trading_cb_suffix_resumed}_resumed.zip')
-    ensure_dir_exists(os.path.dirname(best_trading_model_resumed_path))
-    trading_callback = TradingCallback(
-        check_freq=config.get('agent', {}).get('check_freq', 10000),
-        save_path=best_trading_model_resumed_path,
-        verbose=1
-    )
-    callbacks.append(trading_callback)
-    
-    # Continue training
-    logger.info("Resuming training...")
-    additional_timesteps = config.get('agent', {}).get('additional_timesteps', 500000)
-    
-    start_time = time.time()
-    agent.learn(
-        total_timesteps=additional_timesteps,
-        callback=callbacks,
-        log_interval=100,
-        reset_num_timesteps=False  # Continue from previous timesteps
-    )
     training_time = time.time() - start_time
-    
-    logger.info(f"Training resumed and completed in {training_time:.2f} seconds")
+    logger.info(f"Training completed in {training_time:.2f} seconds.")
     
     # Save the final model
-    final_model_resumed_save_dir = models_base_dir
-    ensure_dir_exists(final_model_resumed_save_dir)
-    final_suffix_resumed = f"_{model_name_suffix}" if model_name_suffix else ""
-    final_model_resumed_path = os.path.join(final_model_resumed_save_dir, f'final_model_{training_timeframe}{final_suffix_resumed}_resumed.zip')
-    save_agent(agent, final_model_resumed_path)
-    logger.info(f"Resumed final model saved to {final_model_resumed_path}")
+    final_model_path = os.path.join(train_config.best_model_save_path, 'final_model')
+    agent.save(final_model_path)
+    logger.info(f"Final model saved to {final_model_path}")
     
-    return agent, train_env
+    # Save the environment stats if normalization was used
+    if train_config.normalize and hasattr(train_env, 'save'):
+        vec_normalize_path = os.path.join(train_config.best_model_save_path, 'vec_normalize.pkl')
+        train_env.save(vec_normalize_path)
+        logger.info(f"VecNormalize stats saved to {vec_normalize_path}")
+    
+    # Close environments
+    train_env.close()
+    if eval_env is not None:
+        eval_env.close()
+    
+    return agent
+
+if __name__ == "__main__":
+    import argparse
+    
+    parser = argparse.ArgumentParser(description='Train the ADAN trading bot with PPO')
+    parser.add_argument('--config', type=str, default='config/train_config.yaml',
+                      help='Path to the training configuration file')
+    parser.add_argument('--model-path', type=str, default='models/ppo_cnn',
+                      help='Path to save the trained model')
+    parser.add_argument('--timesteps', type=int, default=1_000_000,
+                      help='Number of timesteps to train for')
+    parser.add_argument('--gpu', action='store_true',
+                      help='Use GPU for training if available')
+    
+    args = parser.parse_args()
+    
+    # Override config with command line arguments
+    custom_config = {
+        'training': {
+            'total_timesteps': args.timesteps,
+            'use_gpu': args.gpu
+        },
+        'models_dir': args.model_path
+    }
+    
+    # Start training
+    train_agent(args.config, custom_config=custom_config)

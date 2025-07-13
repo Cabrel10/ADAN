@@ -3,21 +3,26 @@
 """
 Script pour traiter les données brutes et générer le dataset final avec les indicateurs techniques.
 """
-import os
 import sys
+import os
 import argparse
 import pandas as pd
 import numpy as np
+from pathlib import Path
 from datetime import datetime
 import joblib
+import yaml
+import logging
+import pandas_ta as ta
+from sklearn.preprocessing import StandardScaler
+from tqdm import tqdm
 
 # Assurer que le package src est dans le PYTHONPATH
-SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-sys.path.append(os.path.join(SCRIPT_DIR, '..'))
+SCRIPT_DIR = Path(__file__).resolve().parent
+sys.path.append(str(SCRIPT_DIR.parent))
 
 from src.adan_trading_bot.common.utils import load_config, get_path
-from src.adan_trading_bot.data_processing.feature_engineer import add_technical_indicators, normalize_features
-import logging
+from src.adan_trading_bot.data_processing.feature_engineer import FeatureEngineer, add_technical_indicators
 import gc
 from sklearn.preprocessing import StandardScaler
 
@@ -25,6 +30,69 @@ from sklearn.preprocessing import StandardScaler
 logger = logging.getLogger(__name__)
 if not logger.hasHandlers():
     logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+
+def normalize_features(df, scaler=None, scaler_path=None, fit=True, numeric_cols=None):
+    """
+    Normalise les features spécifiées du DataFrame.
+    
+    Args:
+        df: DataFrame à normaliser
+        scaler: Scaler à utiliser (si None, un nouveau sera créé)
+        scaler_path: Chemin pour charger/sauvegarder le scaler
+        fit: Si True, ajuste le scaler, sinon utilise un scaler existant
+        numeric_cols: Liste des noms de colonnes numériques à normaliser
+        
+    Returns:
+        Tuple[DataFrame, StandardScaler]: DataFrame normalisé et scaler utilisé
+    """
+    from sklearn.preprocessing import StandardScaler
+    import joblib
+    
+    if not numeric_cols:
+        numeric_cols = df.select_dtypes(include=['float64', 'int64']).columns.tolist()
+        logger.warning(f"Aucune colonne numérique spécifiée, utilisation de toutes les colonnes numériques: {numeric_cols}")
+    
+    if not numeric_cols:
+        logger.warning("Aucune colonne numérique à normaliser.")
+        return df, None
+    
+    # Vérifier que les colonnes existent
+    missing_cols = [col for col in numeric_cols if col not in df.columns]
+    if missing_cols:
+        logger.warning(f"Colonnes non trouvées pour la normalisation: {missing_cols}")
+        numeric_cols = [col for col in numeric_cols if col in df.columns]
+        if not numeric_cols:
+            return df, None
+    
+    # Créer une copie du DataFrame pour éviter les modifications inattendues
+    df_normalized = df.copy()
+    
+    # Initialiser ou utiliser le scaler fourni
+    if scaler is None and fit:
+        scaler = StandardScaler()
+        logger.info("Création d'un nouveau StandardScaler")
+    
+    # Normaliser les données
+    if fit:
+        logger.info(f"Ajustement du scaler sur {len(numeric_cols)} colonnes numériques")
+        df_normalized[numeric_cols] = scaler.fit_transform(df[numeric_cols])
+        
+        # Sauvegarder le scaler s'il y a un chemin spécifié
+        if scaler_path:
+            os.makedirs(os.path.dirname(scaler_path), exist_ok=True)
+            joblib.dump(scaler, scaler_path)
+            logger.info(f"Scaler sauvegardé dans {scaler_path}")
+    else:
+        if scaler is None:
+            if not scaler_path or not os.path.exists(scaler_path):
+                raise FileNotFoundError(f"Fichier de scaler non trouvé et aucun scaler fourni: {scaler_path}")
+            scaler = joblib.load(scaler_path)
+            logger.info(f"Scaler chargé depuis {scaler_path}")
+        
+        logger.info(f"Application du scaler sur {len(numeric_cols)} colonnes numériques")
+        df_normalized[numeric_cols] = scaler.transform(df[numeric_cols])
+    
+    return df_normalized, scaler
 
 def normalize_features_chunked(df, features_to_normalize, scaler_path, chunk_size, fit=True):
     """
@@ -112,15 +180,29 @@ def find_data_source_for_asset_timeframe(asset, timeframe, data_sources, data_di
     Returns:
         tuple: (source_info, file_path) ou (None, None) si non trouvé
     """
-    for source in data_sources:
-        if asset in source['assets'] and timeframe in source['timeframes']:
+    logger.debug(f"Recherche de la source pour {asset} ({timeframe}) parmi {len(data_sources)} sources")
+    
+    for i, source in enumerate(data_sources):
+        logger.debug(f"Source {i+1}: {source.get('name', 'sans nom')}")
+        logger.debug(f"  Assets: {source.get('assets', [])}")
+        logger.debug(f"  Timeframes: {source.get('timeframes', [])}")
+        
+        if asset in source.get('assets', []) and timeframe in source.get('timeframes', []):
             # Construire le chemin du fichier selon le pattern
-            filename = source['filename_pattern'].format(ASSET=asset, TIMEFRAME=timeframe)
-            file_path = os.path.join(data_dir, source['directory'], filename)
+            filename = source.get('filename_pattern', '').format(ASSET=asset, TIMEFRAME=timeframe)
+            directory = source.get('directory', '').format(TIMEFRAME=timeframe)
+            file_path = os.path.join(data_dir, directory, filename)
+            
+            logger.debug(f"  Chemin construit: {file_path}")
+            logger.debug(f"  Le fichier existe: {os.path.exists(file_path)}")
             
             if os.path.exists(file_path):
+                logger.debug(f"  Fichier trouvé: {file_path}")
                 return source, file_path
+            else:
+                logger.debug(f"  Fichier non trouvé: {file_path}")
     
+    logger.warning(f"Aucune source de données trouvée pour {asset} ({timeframe})")
     return None, None
 
 def process_asset_data(asset, timeframe, config, data_dir, processed_data_dir, scalers_dir):
@@ -138,8 +220,7 @@ def process_asset_data(asset, timeframe, config, data_dir, processed_data_dir, s
     Returns:
         bool: True si succès, False sinon
     """
-    # Support des lots de données
-    lot_id = config.get('lot_id', None)
+    # Configuration du traitement
     
     # Configuration pour traitement par chunks (éviter les erreurs de mémoire)
     chunk_size = config.get('processing_chunk_size', 50000)  # Par défaut 50k lignes par chunk
@@ -156,7 +237,8 @@ def process_asset_data(asset, timeframe, config, data_dir, processed_data_dir, s
             logger.error(f"Fichier de données non trouvé: {raw_file}")
             return False
         
-        df = pd.read_parquet(raw_file)
+        # Lire le fichier CSV avec le bon séparateur et gestion des dates
+        df = pd.read_csv(raw_file, parse_dates=['timestamp'], index_col='timestamp')
         logger.info(f"Données chargées pour {asset} ({timeframe}) depuis {source_info['group_name']}: {len(df)} lignes")
         
         # Gérer l'index temporel pour les nouvelles données
@@ -307,11 +389,8 @@ def process_asset_data(asset, timeframe, config, data_dir, processed_data_dir, s
         # Normaliser les features
         normalization_method = config.get('normalization', {}).get('method', 'standard')
         
-        # Créer le répertoire des scalers pour cet actif s'il n'existe pas (avec support des lots)
-        if lot_id:
-            asset_scalers_dir = os.path.join(scalers_dir, lot_id, asset)
-        else:
-            asset_scalers_dir = os.path.join(scalers_dir, asset)
+        # Créer le répertoire des scalers pour cet actif s'il n'existe pas
+        asset_scalers_dir = os.path.join(scalers_dir, asset)
         os.makedirs(asset_scalers_dir, exist_ok=True)
         
         # Normaliser les données par chunks pour éviter les problèmes de mémoire
@@ -353,11 +432,8 @@ def process_asset_data(asset, timeframe, config, data_dir, processed_data_dir, s
                 numeric_cols=features_to_normalize
             )
         
-        # Sauvegarder les données traitées (avec support des lots)
-        if lot_id:
-            asset_dir = os.path.join(processed_data_dir, lot_id, asset)
-        else:
-            asset_dir = os.path.join(processed_data_dir, asset)
+        # Sauvegarder les données traitées
+        asset_dir = os.path.join(processed_data_dir, asset)
         os.makedirs(asset_dir, exist_ok=True)
         
         train_df_normalized.to_parquet(os.path.join(asset_dir, f"{asset}_{timeframe}_train.parquet"))
@@ -373,29 +449,27 @@ def process_asset_data(asset, timeframe, config, data_dir, processed_data_dir, s
 
 def main():
     parser = argparse.ArgumentParser(description="Process raw market data and generate the final dataset.")
-    parser.add_argument(
-        '--exec_profile', 
-        type=str, 
-        default='cpu_lot1',
-        choices=['cpu', 'gpu', 'cpu_lot1', 'cpu_lot2', 'gpu_lot1', 'gpu_lot2'],
-        help="Profil d'exécution ('cpu', 'gpu', 'cpu_lot1', 'cpu_lot2', etc.) pour charger data_config_{profile}.yaml."
-    )
     parser.add_argument('--main_config', type=str, default='config/main_config.yaml', help='Path to the main configuration file.')
-    parser.add_argument('--data_config', type=str, default=None, help='Path to the data configuration file (default: config/data_config_{profile}.yaml).')
+    parser.add_argument('--data_config', type=str, default='config/data_config.yaml', help='Path to the data configuration file.')
+    parser.add_argument('--log-level', type=str, default='INFO',
+                      choices=['DEBUG', 'INFO', 'WARNING', 'ERROR', 'CRITICAL'],
+                      help='Set the logging level')
     args = parser.parse_args()
+    
+    # Configurer le niveau de journalisation
+    logging.basicConfig(level=getattr(logging, args.log_level),
+                      format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 
     try:
-        # Construire le chemin du fichier de configuration des données en fonction du profil
-        profile = args.exec_profile
-        logger.info(f"Utilisation du profil d'exécution: {profile}")
-        
-        data_config_path = args.data_config if args.data_config else f'config/data_config_{profile}.yaml'
         logger.info(f"Chargement de la configuration principale: {args.main_config}")
-        logger.info(f"Chargement de la configuration des données: {data_config_path}")
+        logger.info(f"Chargement de la configuration des données: {args.data_config}")
         
         # Charger les configurations
         main_cfg = load_config(args.main_config)
-        data_cfg = load_config(data_config_path)
+        logger.debug(f"Contenu de la configuration principale: {main_cfg}")
+        
+        data_cfg = load_config(args.data_config)
+        logger.debug(f"Contenu de la configuration des données: {data_cfg}")
     except FileNotFoundError as e:
         logger.error(f"Erreur de configuration : {e}. Assurez-vous que les chemins sont corrects.")
         return

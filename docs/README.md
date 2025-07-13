@@ -1,22 +1,12 @@
-# Documentation du Projet ADAN
+# Documentation
 
-Ce répertoire contient la documentation détaillée du projet ADAN, expliquant l'architecture, les concepts, les flux de données et les décisions de conception.
+This directory contains additional documentation for the ADAN project, providing more in-depth information about its architecture, design, and implementation details.
 
-## Contenu
+## Important Files:
 
-* `architecture.md`: Description détaillée de l'architecture globale d'ADAN, incluant les interactions entre les différents modules.
-* `data_pipeline.md`: Documentation du pipeline de données, de la collecte au prétraitement et à la création de features.
-* `model_explainability.md`: Notes sur l'explicabilité du modèle, comment interpréter les décisions de l'agent.
+- `README.md`: This file provides an overview of the documentation available in this directory.
 
-## Autres Documents
+## Related Documentation:
 
-D'autres documents peuvent être ajoutés au fur et à mesure du développement du projet, comme:
-* Guides d'utilisation
-* Documentation des API
-* Tutoriels
-* Notes de recherche
-* Références et bibliographie
-
-## Contribution à la Documentation
-
-La documentation est un élément vivant du projet. N'hésitez pas à la mettre à jour et à l'enrichir lorsque vous apportez des modifications significatives au code ou à l'architecture.
+- [Main README.md](../../README.md)
+- [Execution Guide (execution.md)](../execution.md)

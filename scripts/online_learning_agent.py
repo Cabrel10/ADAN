@@ -13,9 +13,10 @@ import time
 import json
 import numpy as np
 import pandas as pd
+import torch
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, List, Tuple, Union
 
 # Ajouter le répertoire src au PYTHONPATH
 current_dir = Path(__file__).parent.absolute()
@@ -26,7 +27,9 @@ from adan_trading_bot.common.utils import get_logger, load_config
 from adan_trading_bot.exchange_api.connector import get_exchange_client, validate_exchange_config
 from adan_trading_bot.environment.order_manager import OrderManager
 from adan_trading_bot.training.trainer import load_agent
-from adan_trading_bot.live_trading.online_reward_calculator import OnlineRewardCalculator, ExperienceBuffer
+from adan_trading_bot.live_trading.online_reward_calculator import OnlineRewardCalculator
+from adan_trading_bot.live_trading import PrioritizedExperienceReplayBuffer
+from adan_trading_bot.training import HyperparameterModulator
 
 logger = get_logger(__name__)
 
@@ -45,13 +48,411 @@ class OnlineLearningAgent:
             learning_config: Configuration spécifique à l'apprentissage continu
         """
         self.config = config
-        self.model_path = model_path
+        self.model_path = Path(model_path)
         self.initial_capital = initial_capital
+        
+        # Configuration de l'apprentissage
+        self.learning_config = learning_config or {}
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        
+        # Initialisation du buffer d'expérience prioritaire
+        self.buffer = PrioritizedExperienceReplayBuffer(
+            buffer_size=self.learning_config.get('buffer_size', 10000),
+            alpha=self.learning_config.get('alpha', 0.6),
+            beta=self.learning_config.get('beta', 0.4),
+            beta_increment=self.learning_config.get('beta_increment', 0.001),
+            epsilon=self.learning_config.get('epsilon', 1e-6)
+        )
+        
+        # Charger ou initialiser le modèle
+        self.agent, self.agent_config = self._load_or_initialize_agent()
+        
+        # Compteurs et états
+        self.episode_count = 0
+        self.step_count = 0
+        self.last_save_time = time.time()
+        self.save_interval = self.learning_config.get('save_interval', 3600)  # 1h par défaut
+        
+        # Répertoire de sauvegarde
+        self.save_dir = Path(self.learning_config.get('save_dir', 'saved_models/online_learning'))
+        self.save_dir.mkdir(parents=True, exist_ok=True)
+        
+        # Initialisation des états
         self.current_capital = initial_capital
         self.positions = {}
+        self.last_episode_metrics = {}
         
-        # Configuration d'apprentissage continu
-        self.learning_config = learning_config or config.get('online_learning', {})
+        # Initialisation du client d'échange
+        self.exchange_client = self._initialize_exchange_client()
+        
+        # Initialisation du calculateur de récompense
+        self.reward_calculator = OnlineRewardCalculator(self.config)
+        
+        logger.info(f"OnlineLearningAgent initialisé avec {len(self.buffer)} expériences dans le buffer")
+        logger.info(f"Modèle chargé depuis : {self.model_path}")
+    
+    def run_episode(self, env, max_steps=1000):
+        """
+        Exécute un épisode complet d'interaction avec l'environnement.
+        
+        Args:
+            env: L'environnement de trading
+            max_steps: Nombre maximum d'étapes par épisode
+            
+        Returns:
+            Dictionnaire contenant les métriques de l'épisode
+        """
+        # Réinitialiser l'environnement
+        state, info = env.reset()
+        episode_reward = 0
+        episode_steps = 0
+        done = False
+        metrics = {
+            'episode_reward': 0,
+            'episode_steps': 0,
+            'portfolio_value': [env.portfolio_manager.portfolio_value],
+            'actions': [],
+            'rewards': [],
+            'positions': [],
+            'market_prices': [],
+            'total_trades': 0,
+            'winning_trades': 0,
+            'losing_trades': 0,
+            'max_drawdown': 0,
+            'sharpe_ratio': 0
+        }
+        
+        # Boucle principale de l'épisode
+        while not done and episode_steps < max_steps:
+            # Sélectionner une action
+            action, _states = self.agent.predict(state, deterministic=False)
+            
+            # Exécuter l'action dans l'environnement
+            next_state, reward, done, truncated, info = env.step(action)
+            
+            # Mettre à jour les métriques
+            episode_reward += reward
+            episode_steps += 1
+            self.step_count += 1
+            
+            # Enregistrer les métriques
+            metrics['episode_reward'] = episode_reward
+            metrics['episode_steps'] = episode_steps
+            metrics['portfolio_value'].append(env.portfolio_manager.portfolio_value)
+            metrics['actions'].append(action)
+            metrics['rewards'].append(reward)
+            metrics['positions'].append(info.get('open_positions', 0))
+            metrics['market_prices'].append(info.get('prices', {}).get(env.assets[0], 0)) # Assuming single asset for simplicity
+            
+            # Note: trade_result is not directly available in info from MultiAssetEnv step
+            # You might need to add it to the info dict in MultiAssetEnv or calculate it here
+            # For now, we'll skip trade_result specific metrics
+            
+            # Calculer le drawdown actuel
+            current_value = metrics['portfolio_value'][-1]
+            peak_value = max(metrics['portfolio_value'])
+            current_drawdown = (peak_value - current_value) / peak_value if peak_value > 0 else 0
+            metrics['max_drawdown'] = max(metrics['max_drawdown'], current_drawdown)
+            
+            # Ajouter l'expérience au buffer
+            experience = {
+                'state': state,
+                'action': action,
+                'reward': reward,
+                'next_state': next_state,
+                'done': done
+            }
+            self.buffer.add(experience)
+            
+            # Apprentissage
+            if self.learning_config.get('enabled', True) and episode_steps % self.learning_config.get('learning_frequency', 10) == 0:
+                self.learn_from_experience()
+            
+            # Sauvegarder périodiquement
+            if self._should_save_checkpoint():
+                self._save_checkpoint_if_needed()
+            
+            # Mettre à jour l'état
+            state = next_state
+        
+        # Calculer le ratio de Sharpe
+        returns = np.diff(metrics['portfolio_value']) / np.array(metrics['portfolio_value'][:-1])
+        if len(returns) > 1:
+            metrics['sharpe_ratio'] = np.sqrt(252) * np.mean(returns) / (np.std(returns) + 1e-8)
+        
+        # Update trade metrics (placeholder, needs actual trade tracking in env)
+        metrics['total_trades'] = env.portfolio_manager.trades_count # Assuming trades_count is available
+        metrics['winning_trades'] = env.portfolio_manager.win_count # Assuming win_count is available
+        metrics['losing_trades'] = env.portfolio_manager.loss_count # Assuming loss_count is available
+        metrics['win_rate'] = metrics['winning_trades'] / max(1, metrics['total_trades'])
+        
+        # Enregistrer les métriques
+        logger.info(f"Épisode {self.episode_count} terminé - "
+                   f"Récompense: {episode_reward:.2f}, "
+                   f"Durée: {episode_steps} étapes, "
+                   f"Valeur du portefeuille: {metrics['portfolio_value'][-1]:.2f}, "
+                   f"Trades: {metrics['total_trades']} (G: {metrics['winning_trades']}, P: {metrics['losing_trades']}, "
+                   f"Win Rate: {metrics['win_rate']*100:.1f}%), "
+                   f"Drawdown Max: {metrics['max_drawdown']*100:.2f}%")
+        
+        # Incrémenter le compteur d'épisodes
+        self.episode_count += 1
+        self.last_episode_metrics = metrics
+        
+        return metrics
+    
+    def _load_or_initialize_agent(self):
+        """
+        Initialise l'agent d'apprentissage continu.
+        
+        Args:
+            config: Configuration complète du système
+            model_path: Chemin vers le modèle PPO pré-entraîné
+            initial_capital: Capital initial
+            learning_config: Configuration spécifique à l'apprentissage continu
+        """
+        self.config = config
+        self.model_path = Path(model_path)
+        self.initial_capital = initial_capital
+        
+        # Configuration de l'apprentissage
+        self.learning_config = learning_config or {}
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        
+        # Initialisation du buffer d'expérience prioritaire
+        self.buffer = PrioritizedExperienceReplayBuffer(
+            buffer_size=self.learning_config.get('buffer_size', 10000),
+            alpha=self.learning_config.get('alpha', 0.6),
+            beta=self.learning_config.get('beta', 0.4),
+            beta_increment=self.learning_config.get('beta_increment', 0.001),
+            epsilon=self.learning_config.get('epsilon', 1e-6)
+        )
+        
+        # Charger ou initialiser le modèle
+        self.agent, self.agent_config = self._load_or_initialize_agent()
+        
+        # Compteurs et états
+        self.episode_count = 0
+        self.step_count = 0
+        self.last_save_time = time.time()
+        self.save_interval = self.learning_config.get('save_interval', 3600)  # 1h par défaut
+        
+        # Répertoire de sauvegarde
+        self.save_dir = Path(self.learning_config.get('save_dir', 'saved_models/online_learning'))
+        self.save_dir.mkdir(parents=True, exist_ok=True)
+        
+        # Initialisation des états
+        self.current_capital = initial_capital
+        self.positions = {}
+        self.last_episode_metrics = {}
+        
+        # Initialisation du client d'échange
+        self.exchange_client = self._initialize_exchange_client()
+        
+        # Initialisation du calculateur de récompense
+        self.reward_calculator = OnlineRewardCalculator(self.config)
+        
+        logger.info(f"OnlineLearningAgent initialisé avec {len(self.buffer)} expériences dans le buffer")
+        logger.info(f"Modèle chargé depuis : {self.model_path}")
+    
+    def _load_or_initialize_agent(self):
+        """
+        Charge un modèle existant ou initialise un nouveau modèle.
+        
+        Returns:
+            Tuple contenant l'agent et sa configuration
+        """
+        try:
+            # Essayer de charger le modèle et le buffer
+            agent, agent_config = load_agent(self.model_path, self.device)
+            
+            # Vérifier s'il existe un état sauvegardé
+            state_path = self.save_dir / 'agent_state.pkl'
+            if state_path.exists():
+                try:
+                    with open(state_path, 'rb') as f:
+                        state = pickle.load(f)
+                    
+                    # Charger l'état du buffer
+                    buffer_path = self.save_dir / 'experience_buffer.pkl'
+                    if buffer_path.exists():
+                        self.buffer = PrioritizedExperienceReplayBuffer.load(buffer_path)
+                    
+                    # Charger les compteurs
+                    self.episode_count = state.get('episode_count', 0)
+                    self.step_count = state.get('step_count', 0)
+                    
+                    logger.info(f"État de l'agent chargé depuis {state_path}")
+                    logger.info(f"Buffer d'expérience chargé avec {len(self.buffer)} expériences")
+                    
+                except Exception as e:
+                    logger.error(f"Erreur lors du chargement de l'état de l'agent : {e}")
+            
+            return agent, agent_config
+            
+        except Exception as e:
+            logger.error(f"Erreur lors du chargement du modèle {self.model_path}: {e}")
+            logger.info("Initialisation d'un nouvel agent...")
+            # Ici, vous devriez initialiser un nouvel agent si le chargement échoue
+            raise NotImplementedError("L'initialisation d'un nouvel agent n'est pas encore implémentée")
+    
+    def _initialize_exchange_client(self):
+        """Initialise le client d'échange."""
+        try:
+            exchange_config = self.config['exchange']
+            validate_exchange_config(exchange_config)
+            return get_exchange_client(exchange_config, testnet=True)
+        except Exception as e:
+            logger.error(f"Erreur lors de l'initialisation du client d'échange : {e}")
+            raise
+    
+    def save_state(self):
+        """Sauvegarde l'état actuel de l'agent et du buffer d'expérience."""
+        try:
+            # Sauvegarder l'état de l'agent
+            agent_state = {
+                'episode_count': self.episode_count,
+                'step_count': self.step_count,
+                'current_capital': self.current_capital,
+                'last_episode_metrics': self.last_episode_metrics,
+                'model_version': self.agent_config.get('version', '1.0.0')
+            }
+            
+            # Sauvegarder l'état de l'agent
+            state_path = self.save_dir / 'agent_state.pkl'
+            with open(state_path, 'wb') as f:
+                pickle.dump(agent_state, f)
+            
+            # Sauvegarder le buffer d'expérience
+            buffer_path = self.save_dir / 'experience_buffer.pkl'
+            self.buffer.save(buffer_path)
+            
+            # Sauvegarder le modèle
+            model_version = agent_state['model_version']
+            model_save_path = self.save_dir / f'model_v{model_version}.pth'
+            torch.save({
+                'model_state_dict': self.agent.policy.state_dict(),
+                'optimizer_state_dict': self.agent.policy.optimizer.state_dict(),
+                'config': self.agent_config
+            }, model_save_path)
+            
+            logger.info(f"État de l'agent sauvegardé dans {self.save_dir}")
+            return True
+            
+        except Exception as e:
+            logger.error(f"Erreur lors de la sauvegarde de l'état de l'agent : {e}")
+            return False
+    
+    def _should_save_checkpoint(self):
+        """Détermine si un checkpoint doit être sauvegardé."""
+        current_time = time.time()
+        time_since_last_save = current_time - self.last_save_time
+        return time_since_last_save >= self.save_interval
+    
+    def _save_checkpoint_if_needed(self):
+        """Sauvegarde un checkpoint si nécessaire."""
+        if self._should_save_checkpoint():
+            self.save_state()
+            self.last_save_time = time.time()
+    
+    def _calculate_td_error(self, batch):
+        """
+        Calcule l'erreur TD (Temporal Difference) pour un batch d'expériences.
+        
+        Args:
+            batch: Dictionnaire contenant les données du batch
+            
+        Returns:
+            Tableau d'erreurs TD pour chaque expérience du batch
+        """
+        with torch.no_grad():
+            # Convertir les données en tenseurs
+            states = torch.FloatTensor(batch['states']).to(self.device)
+            actions = torch.FloatTensor(batch['actions']).to(self.device)
+            rewards = torch.FloatTensor(batch['rewards']).to(self.device)
+            next_states = torch.FloatTensor(batch['next_states']).to(self.device)
+            dones = torch.FloatTensor(batch['dones']).to(self.device)
+            
+            # Obtenir les valeurs d'état actuelles et suivantes
+            current_values = self.agent.policy.predict_values(states)
+            next_values = self.agent.policy.predict_values(next_states)
+            
+            # Calculer les cibles et l'erreur TD
+            targets = rewards + (1 - dones) * self.agent.gamma * next_values
+            td_errors = torch.abs(targets - current_values).squeeze()
+            
+            return td_errors.cpu().numpy()
+    
+    def learn_from_experience(self, batch_size=256, num_epochs=4):
+        """
+        Effectue une étape d'apprentissage sur un échantillon du buffer d'expérience.
+        
+        Args:
+            batch_size: Taille du batch d'apprentissage
+            num_epochs: Nombre d'époques d'entraînement
+            
+        Returns:
+            Dictionnaire contenant les métriques d'apprentissage
+        """
+        if len(self.buffer) < batch_size:
+            logger.warning(f"Pas assez d'expériences dans le buffer ({len(self.buffer)} < {batch_size})")
+            return {}
+        
+        metrics = {
+            'loss': [],
+            'policy_loss': [],
+            'value_loss': [],
+            'entropy': [],
+            'explained_variance': [],
+            'mean_td_error': []
+        }
+        
+        for epoch in range(num_epochs):
+            # Échantillonner un batch d'expériences
+            batch, batch_indices, weights = self.buffer.sample(batch_size)
+            
+            # Convertir les données en tenseurs
+            states = torch.FloatTensor(batch['states']).to(self.device)
+            actions = torch.FloatTensor(batch['actions']).to(self.device)
+            rewards = torch.FloatTensor(batch['rewards']).unsqueeze(1).to(self.device)
+            next_states = torch.FloatTensor(batch['next_states']).to(self.device)
+            dones = torch.FloatTensor(batch['dones']).unsqueeze(1).to(self.device)
+            weights = torch.FloatTensor(weights).unsqueeze(1).to(self.device)
+            
+            # Effectuer une étape d'apprentissage avec PPO
+            batch_metrics = self.agent.learn(
+                states=states,
+                actions=actions,
+                rewards=rewards,
+                next_states=next_states,
+                dones=dones,
+                weights=weights
+            )
+            
+            # Calculer les nouvelles priorités basées sur l'erreur TD
+            with torch.no_grad():
+                td_errors = self._calculate_td_error(batch)
+                self.buffer.update_priorities(batch_indices, td_errors)
+            
+            # Mettre à jour les métriques
+            for k, v in batch_metrics.items():
+                if k in metrics:
+                    metrics[k].append(v)
+            
+            metrics['mean_td_error'].append(float(td_errors.mean()))
+        
+        # Calculer les moyennes des métriques sur toutes les époques
+        avg_metrics = {k: np.mean(v) if v else 0.0 for k, v in metrics.items()}
+        
+        # Enregistrer les métriques
+        logger.info(f"Apprentissage - Loss: {avg_metrics['loss']:.4f}, "
+                   f"Policy Loss: {avg_metrics['policy_loss']:.4f}, "
+                   f"Value Loss: {avg_metrics['value_loss']:.4f}, "
+                   f"Entropy: {avg_metrics['entropy']:.4f}, "
+                   f"Explained Var: {avg_metrics['explained_variance']:.4f}, "
+                   f"Mean TD Error: {avg_metrics['mean_td_error']:.4f}")
+        
+        return avg_metrics
         self.learning_enabled = self.learning_config.get('enabled', True)
         self.learning_frequency = self.learning_config.get('learning_frequency', 10)
         self.learning_rate = self.learning_config.get('learning_rate', 0.00001)
@@ -72,7 +473,13 @@ class OnlineLearningAgent:
         self._initialize_order_manager()
         self._initialize_learning_components()
         
-        # Historique et métriques
+        # Initialisation du modulateur d'hyperparamètres
+        self.hyperparam_modulator = HyperparameterModulator(
+            agent=self.agent,
+            config=self.learning_config.get('hyperparameter_modulation', {})
+        )
+        
+        # Initialisation du buffer d'expérience prioritaires
         self.decision_history = []
         self.learning_steps = 0
         self.last_learning_time = time.time()
@@ -155,16 +562,31 @@ class OnlineLearningAgent:
             # Calculateur de récompenses
             self.reward_calculator = OnlineRewardCalculator(self.config)
             
-            # Buffer d'expérience
+            # Buffer d'expérience prioritaire
             buffer_size = self.learning_config.get('buffer_size', 1000)
-            self.experience_buffer = ExperienceBuffer(max_size=buffer_size)
+            alpha = self.learning_config.get('per_alpha', 0.6)  # Priorité des échantillons
+            beta = self.learning_config.get('per_beta', 0.4)    # Importance du sampling
+            
+            self.experience_buffer = PrioritizedExperienceReplayBuffer(
+                max_size=buffer_size,
+                alpha=alpha,
+                beta=beta
+            )
             
             # Métriques d'apprentissage
             self.learning_metrics = {
                 'total_updates': 0,
                 'average_reward': 0.0,
                 'last_loss': 0.0,
-                'exploration_rate': self.exploration_rate
+                'exploration_rate': self.exploration_rate,
+                'supervised_learning_triggers': 0
+            }
+            
+            # Configuration pour l'apprentissage supervisé
+            self.supervised_learning_config = {
+                'trigger_pct': self.learning_config.get('supervised_trigger_pct', 0.7),
+                'batch_size': self.learning_config.get('supervised_batch_size', 32),
+                'max_samples': self.learning_config.get('supervised_max_samples', 1000)
             }
             
             logger.info("✅ Learning components initialized")
@@ -172,6 +594,198 @@ class OnlineLearningAgent:
         except Exception as e:
             logger.error(f"❌ Failed to initialize learning components: {e}")
             raise
+            
+    def _should_apply_supervised_learning(self, metrics: Dict[str, Any]) -> bool:
+        """
+        Détermine si un apprentissage supervisé doit être déclenché.
+        
+        Args:
+            metrics: Métriques d'apprentissage actuelles
+            
+        Returns:
+            bool: True si l'apprentissage supervisé doit être déclenché, False sinon
+        """
+        # Vérifier si nous avons suffisamment de données
+        if len(self.experience_buffer) < self.supervised_learning_config['batch_size'] * 2:
+            return False
+            
+        # Vérifier la performance par rapport au seuil
+        avg_reward = metrics.get('avg_reward', 0)
+        avg_loss = metrics.get('avg_loss', float('inf'))
+        
+        # Seuil de déclenchement basé sur la configuration
+        reward_threshold = -0.1  # Seuil arbitraire à ajuster
+        loss_threshold = 1.0     # Seuil arbitraire à ajuster
+        
+        return (avg_reward < reward_threshold or 
+                avg_loss > loss_threshold)
+    
+    def _apply_supervised_learning(self, env, current_prices: Dict[str, float]) -> None:
+        """
+        Applique un apprentissage supervisé basé sur les meilleurs trades possibles.
+        
+        Args:
+            env: L'environnement de trading
+            current_prices: Dictionnaire des prix actuels des actifs
+        """
+        try:
+            logger.info("🎓 Démarrage de l'apprentissage supervisé...")
+            
+            # 1. Identifier les meilleurs trades possibles sur les données récentes
+            optimal_trades = self._identify_optimal_trades(env, current_prices)
+            
+            if not optimal_trades:
+                logger.warning("⚠️ Aucun trade optimal identifié pour l'apprentissage supervisé")
+                return
+                
+            # 2. Créer des expériences supervisées
+            supervised_experiences = []
+            
+            for trade in optimal_trades:
+                # Créer une expérience supervisée pour ce trade
+                state = trade['state']
+                action = trade['optimal_action']
+                reward = trade['expected_reward']
+                
+                # Ajouter au buffer avec une priorité élevée
+                self.experience_buffer.add(
+                    state=state,
+                    action=action,
+                    reward=reward,
+                    next_state=state,  # État suivant identique car c'est un objectif
+                    done=False,
+                    priority=1.0  # Haute priorité
+                )
+                
+                supervised_experiences.append({
+                    'state': state,
+                    'action': action,
+                    'reward': reward
+                })
+            
+            # 3. Effectuer une étape d'apprentissage supplémentaire
+            if supervised_experiences:
+                # Mélanger les expériences
+                np.random.shuffle(supervised_experiences)
+                
+                # Prendre un sous-ensemble selon la taille du batch
+                batch = supervised_experiences[:self.supervised_learning_config['batch_size']]
+                
+                # Préparer les données pour l'entraînement
+                states = np.array([exp['state'] for exp in batch])
+                actions = np.array([exp['action'] for exp in batch])
+                rewards = np.array([exp['reward'] for exp in batch])
+                
+                # Entraîner le modèle avec ces données supervisées
+                # Note: Cette partie dépend de l'implémentation spécifique de votre modèle
+                # Voici un exemple générique
+                try:
+                    # Exemple avec un modèle Stable Baselines 3
+                    if hasattr(self.agent, 'policy'):
+                        # Convertir les actions en format one-hot si nécessaire
+                        if len(actions.shape) == 1:
+                            n_actions = self.agent.action_space.n
+                            actions_one_hot = np.eye(n_actions)[actions]
+                            
+                        # Calculer la perte d'entropie croisée
+                        # Note: Cette partie est un exemple et doit être adaptée
+                        # à votre implémentation spécifique
+                        policy = self.agent.policy
+                        if hasattr(policy, 'evaluate_actions'):
+                            # Évaluer les actions avec la politique actuelle
+                            dist = policy.get_distribution(states)
+                            log_probs = dist.log_prob(actions)
+                            
+                            # Calculer la perte (négative car on maximise la vraisemblance)
+                            loss = -(log_probs * rewards).mean()
+                            
+                            # Mettre à jour les poids
+                            policy.optimizer.zero_grad()
+                            loss.backward()
+                            policy.optimizer.step()
+                            
+                            logger.info(f"✅ Apprentissage supervisé terminé - Perte: {loss.item():.4f}")
+                            
+                            # Mettre à jour les métriques
+                            self.learning_metrics['supervised_learning_triggers'] += 1
+                            self.learning_metrics['last_supervised_loss'] = loss.item()
+                            
+                except Exception as e:
+                    logger.error(f"❌ Erreur lors de l'apprentissage supervisé: {e}")
+        
+        except Exception as e:
+            logger.error(f"❌ Échec de l'apprentissage supervisé: {e}")
+    
+    def _identify_optimal_trades(self, env, current_prices: Dict[str, float]) -> List[Dict]:
+        """
+        Identifie les meilleurs trades possibles sur les données récentes.
+        
+        Args:
+            env: L'environnement de trading
+            current_prices: Dictionnaire des prix actuels des actifs
+            
+        Returns:
+            Liste des trades optimaux avec leurs états et actions
+        """
+        optimal_trades = []
+        
+        try:
+            # 1. Récupérer les données récentes
+            lookback = min(100, len(self.experience_buffer))  # Nombre d'états récents à considérer
+            
+            if lookback == 0:
+                return []
+                
+            # 2. Pour chaque état récent, déterminer l'action optimale
+            for i in range(max(0, len(self.experience_buffer) - lookback), len(self.experience_buffer)):
+                experience = self.experience_buffer.buffer[i]
+                state = experience['state']
+                
+                # 3. Évaluer chaque action possible
+                best_action = None
+                best_reward = -float('inf')
+                
+                # Pour chaque action possible
+                for action_idx in range(self.agent.action_space.n):
+                    # Simuler l'action et obtenir la récompense attendue
+                    # Note: Cette partie dépend de votre implémentation spécifique
+                    # Voici un exemple générique
+                    try:
+                        # Obtenir la distribution de probabilité des actions
+                        if hasattr(self.agent.policy, 'get_distribution'):
+                            dist = self.agent.policy.get_distribution(state.reshape(1, -1))
+                            action_probs = dist.distribution.probs.detach().numpy()[0]
+                            
+                            # La récompense attendue est la probabilité de l'action
+                            # pondérée par la qualité de l'état (à adapter)
+                            state_quality = 1.0  # À remplacer par une métrique de qualité d'état
+                            expected_reward = action_probs[action_idx] * state_quality
+                            
+                            if expected_reward > best_reward:
+                                best_reward = expected_reward
+                                best_action = action_idx
+                    except Exception as e:
+                        logger.warning(f"⚠️ Erreur lors de l'évaluation de l'action {action_idx}: {e}")
+                
+                # Si une action optimale a été trouvée, l'ajouter à la liste
+                if best_action is not None and best_reward > 0:
+                    optimal_trades.append({
+                        'state': state,
+                        'optimal_action': best_action,
+                        'expected_reward': best_reward,
+                        'timestamp': time.time()
+                    })
+                    
+                    # Limiter le nombre d'échantillons
+                    if len(optimal_trades) >= self.supervised_learning_config['max_samples']:
+                        break
+            
+            logger.info(f"🔍 {len(optimal_trades)} trades optimaux identifiés pour l'apprentissage supervisé")
+            
+        except Exception as e:
+            logger.error(f"❌ Erreur lors de l'identification des trades optimaux: {e}")
+        
+        return optimal_trades
     
     def get_live_market_data(self, symbol_ccxt, limit=50):
         """Récupère les données de marché en temps réel."""
@@ -388,64 +1002,155 @@ class OnlineLearningAgent:
             return {"status": "ERROR", "message": str(e), "real_reward": 0.0}
     
     def learn_from_experience(self):
-        """Effectue un step d'apprentissage basé sur l'expérience accumulée."""
+        """
+        Effectue un step d'apprentissage basé sur l'expérience accumulée avec PER.
+        
+        Returns:
+            bool: True si l'apprentissage a été effectué, False sinon
+            dict: Métriques d'apprentissage (loss, etc.)
+        """
         try:
             if not self.learning_enabled:
-                return False
+                return False, {}
             
-            if not self.experience_buffer.is_ready_for_learning(min_experiences=50):
-                logger.debug("📚 Not enough experiences for learning yet")
-                return False
+            batch_size = self.learning_config.get('batch_size', 64)
+            min_experiences = max(batch_size * 2, 100)  # Au moins 2x le batch size
             
-            # Échantillonner des expériences
-            batch_size = self.learning_config.get('batch_size', 32)
-            experiences = self.experience_buffer.sample_batch(batch_size)
+            if not self.experience_buffer.is_ready_for_learning(min_experiences=min_experiences):
+                logger.debug(f"📚 Not enough experiences for learning (need {min_experiences}, have {self.experience_buffer.size})")
+                return False, {}
             
-            if not experiences:
-                return False
+            # Échantillonner un batch avec PER
+            batch = self.experience_buffer.sample_batch(batch_size=batch_size)
+            if not batch:
+                logger.warning("⚠️ Failed to sample batch from experience buffer")
+                return False, {}
+            # Extraire les données du batch
+            states = batch['states']
+            actions = batch['actions']
+            rewards = batch['rewards']
+            next_states = batch['next_states']
+            dones = batch['dones']
+            weights = batch['weights']
+            batch_indices = batch['indices']
             
-            # Pour PPO, nous devons collecter des trajectoires complètes
-            # Pour simplifier, nous utilisons une approximation avec les expériences récentes
+            # Vérifier les dimensions des données
+            if len(states) != batch_size or len(actions) != batch_size:
+                logger.error(f"❌ Batch size mismatch: states={len(states)}, actions={len(actions)}")
+                return False, {}
             
             try:
-                # Prendre les expériences les plus récentes comme une "mini-trajectoire"
-                recent_experiences = self.experience_buffer.get_recent_experiences(n=min(32, len(experiences)))
+                # 1. Calculer les valeurs cibles avec le modèle cible (si disponible)
+                with torch.no_grad():
+                    # Pour PPO, nous utilisons le modèle actuel pour l'évaluation
+                    # Dans une implémentation complète, on utiliserait un modèle cible
+                    _, values, _ = self.agent.policy.evaluate_actions(
+                        torch.FloatTensor(states).to(self.agent.device),
+                        torch.LongTensor(actions).to(self.agent.device)
+                    )
+                    values = values.cpu().numpy()
                 
-                if len(recent_experiences) < 5:  # Minimum pour un apprentissage significatif
-                    return False
+                # 2. Calculer les avantages et les retours (simplifié pour PPO)
+                # Dans une implémentation complète, on utiliserait GAE (Generalized Advantage Estimation)
+                advantages = rewards - values.squeeze()
+                returns = rewards + self.agent.gamma * (1 - dones) * values.squeeze()
                 
-                # Extraire les données
-                states = np.array([exp['state'] for exp in recent_experiences])
-                actions = np.array([exp['action'] for exp in recent_experiences])
-                rewards = np.array([exp['reward'] for exp in recent_experiences])
+                # 3. Normaliser les avantages
+                if len(advantages) > 1:  # Éviter la division par zéro
+                    advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
                 
-                # Pour PPO, nous avons besoin de plus d'informations, mais pour un premier test,
-                # nous pouvons essayer une mise à jour simple
+                # 4. Convertir en tenseurs PyTorch
+                states_tensor = torch.FloatTensor(states).to(self.agent.device)
+                actions_tensor = torch.LongTensor(actions).to(self.agent.device)
+                old_log_probs_tensor = torch.FloatTensor(values).to(self.agent.device)
+                returns_tensor = torch.FloatTensor(returns).unsqueeze(1).to(self.agent.device)
+                advantages_tensor = torch.FloatTensor(advantages).unsqueeze(1).to(self.agent.device)
+                weights_tensor = torch.FloatTensor(weights).unsqueeze(1).to(self.agent.device)
                 
-                # Note: Cette implémentation est simplifiée
-                # Une implémentation complète nécessiterait la gestion des rollouts PPO
+                # 5. Effectuer la mise à jour du modèle avec PPO
+                policy_loss, value_loss, entropy_loss = self.agent._update_policy(
+                    states_tensor,
+                    actions_tensor,
+                    returns_tensor,
+                    advantages_tensor,
+                    old_log_probs_tensor,
+                    weights_tensor
+                )
                 
-                logger.info(f"🧠 Learning step with {len(recent_experiences)} experiences")
-                logger.info(f"📊 Reward range: [{rewards.min():.4f}, {rewards.max():.4f}]")
+                # 6. Calculer les nouvelles priorités basées sur l'erreur TD
+                with torch.no_grad():
+                    _, new_values, _ = self.agent.policy.evaluate_actions(
+                        states_tensor,
+                        actions_tensor
+                    )
+                    td_errors = (returns_tensor - new_values).abs().cpu().numpy().flatten()
                 
-                # Mettre à jour les métriques
-                self.learning_metrics['total_updates'] += 1
-                self.learning_metrics['average_reward'] = np.mean(rewards)
+                # 7. Mettre à jour les priorités dans le buffer
+                self.experience_buffer.update_priorities(batch_indices, td_errors)
+                
+                # 8. Mettre à jour les métriques
+                self.learning_metrics.update({
+                    'total_updates': self.learning_metrics.get('total_updates', 0) + 1,
+                    'average_reward': float(np.mean(rewards)),
+                    'policy_loss': float(policy_loss),
+                    'value_loss': float(value_loss),
+                    'entropy_loss': float(entropy_loss),
+                    'avg_td_error': float(np.mean(td_errors)),
+                    'exploration_rate': self.exploration_rate
+                })
+                
                 self.learning_steps += 1
                 
-                # Log de progression
-                if self.learning_steps % 5 == 0:
-                    logger.info(f"🎓 Learning progress: {self.learning_steps} steps, avg reward: {self.learning_metrics['average_reward']:.4f}")
+                # 9. Ajuster le taux d'exploration
+                self._adjust_exploration_rate()
                 
-                return True
+                # 10. Log des métriques
+                if self.learning_steps % 5 == 0:
+                    logger.info(f"🎓 Learning step {self.learning_steps}:")
+                    logger.info(f"   📊 Avg reward: {self.learning_metrics['average_reward']:.4f}")
+                    logger.info(f"   📉 Policy loss: {policy_loss:.4f}, Value loss: {value_loss:.4f}")
+                    logger.info(f"   🎲 Exploration rate: {self.exploration_rate:.4f}")
+                    logger.info(f"   🔄 Avg TD error: {np.mean(td_errors):.4f}")
+                
+                return True, self.learning_metrics
                 
             except Exception as e:
-                logger.error(f"❌ Learning step failed: {e}")
-                return False
+                logger.error(f"❌ Learning step failed: {str(e)}")
+                import traceback
+                logger.error(traceback.format_exc())
+                return False, {}
             
         except Exception as e:
-            logger.error(f"❌ Error in learn_from_experience: {e}")
-            return False
+            logger.error(f"❌ Error in learn_from_experience: {str(e)}")
+            import traceback
+            logger.error(traceback.format_exc())
+            return False, {}
+    
+    def _adjust_exploration_rate(self):
+        """
+        Ajuste dynamiquement le taux d'exploration.
+        
+        Le taux d'exploration diminue progressivement selon un planning linéaire
+        jusqu'à atteindre une valeur minimale.
+        """
+        min_exploration = self.learning_config.get('min_exploration', 0.01)
+        decay_steps = self.learning_config.get('exploration_decay_steps', 1000)
+        
+        if self.learning_steps >= decay_steps:
+            self.exploration_rate = min_exploration
+        else:
+            # Décroissance linéaire
+            decay_rate = 1.0 - (self.learning_steps / decay_steps)
+            self.exploration_rate = max(
+                min_exploration,
+                self.learning_config.get('initial_exploration', 0.1) * decay_rate
+            )
+        
+        # Mettre à jour le taux d'exploration dans l'agent
+        if hasattr(self.agent, 'exploration_rate'):
+            self.agent.exploration_rate = self.exploration_rate
+        
+        return self.exploration_rate
     
     def run_learning_loop(self, max_iterations=200, sleep_seconds=60):
         """Exécute la boucle principale d'apprentissage continu."""
@@ -530,7 +1235,30 @@ class OnlineLearningAgent:
                     # 6. Apprentissage périodique
                     if decisions_since_learning >= self.learning_frequency:
                         logger.info(f"🎓 Time for learning (after {decisions_since_learning} decisions)")
-                        learning_success = self.learn_from_experience()
+                        
+                        # Récupérer la modulation du DBE si disponible
+                        dbe_modulation = {}
+                        if hasattr(env, 'dbe') and hasattr(env.dbe, 'get_current_modulation'):
+                            dbe_modulation = env.dbe.get_current_modulation()
+                            
+                            # Ajuster les hyperparamètres en fonction de la modulation du DBE
+                            param_changes = self.hyperparam_modulator.adjust_params(dbe_modulation)
+                            if param_changes:
+                                logger.info(f"🔄 Hyperparameters adjusted: {param_changes}")
+                        
+                        # Effectuer l'apprentissage
+                        learning_result = self.learn_from_experience()
+                        
+                        # Vérifier si learn_from_experience retourne un tuple (success, metrics) ou juste un booléen
+                        if isinstance(learning_result, tuple):
+                            learning_success, metrics = learning_result
+                        else:
+                            learning_success = learning_result
+                            metrics = {}
+                        
+                        # Vérifier la performance et appliquer un apprentissage supervisé si nécessaire
+                        if learning_success and self._should_apply_supervised_learning(metrics):
+                            self._apply_supervised_learning(env, current_prices)
                         
                         if learning_success:
                             logger.info("✅ Learning step completed")

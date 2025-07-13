@@ -144,6 +144,18 @@ def load_from_pickle(file_path):
     """
     return joblib.load(file_path)
 
+def create_directories(*dir_paths):
+    """
+    Create multiple directories if they don't exist.
+    
+    Args:
+        *dir_paths: Variable number of directory paths to create.
+    """
+    for dir_path in dir_paths:
+        if not os.path.exists(dir_path):
+            os.makedirs(dir_path, exist_ok=True)
+
+
 def ensure_dir_exists(dir_path):
     """
     Ensure that a directory exists, creating it if necessary.
@@ -152,7 +164,7 @@ def ensure_dir_exists(dir_path):
         dir_path: Path to the directory.
     """
     if not os.path.exists(dir_path):
-        os.makedirs(dir_path)
+        os.makedirs(dir_path, exist_ok=True)
 
 def timestamp_to_datetime(timestamp):
     """

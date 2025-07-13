@@ -1,81 +1,200 @@
-# config/environment_config.yaml
+# ==============================================================================
+# CONFIGURATION DE L'ENVIRONNEMENT DE TRADING
+# ==============================================================================
+# Ce fichier définit le comportement de l'environnement de simulation, y compris
+# le capital initial, les règles de trading, la gestion des risques et les récompenses.
 
-# 1. Pénalités pour guider l'agent
+# ------------------------------------------------------------------------------
+# Paramètres Généraux
+# ------------------------------------------------------------------------------
+mode: "backtest"  # Modes possibles: "backtest", "paper", "live"
+initial_capital: 20.0  # Capital de départ en USDT
+base_currency: "USDT"
+
+data_pipeline:
+  type: "csv"
+  path: "data/raw/BTCUSDT_1m.csv"
+  features: ["close", "volume"]
+  target: "close"
+  ccxt_download:
+    symbol: "BTC/USDT"
+  feature_engineering:
+    timeframes: ["1m"]
+    indicators:
+      - type: "ema"
+        period: 9
+      - type: "ema"
+        period: 21
+      - type: "rsi"
+        period: 14
+    fillna: true
+
+feature_engineering:
+  timeframes: ["1m"]
+  indicators:
+    ema_9:
+      type: "ema"
+      period: 9
+    ema_21:
+      type: "ema"
+      period: 21
+    rsi_14:
+      type: "rsi"
+      period: 14
+  fillna: true
+  columns_to_normalize: ["close", "volume"]
+
+# ------------------------------------------------------------------------------
+# Section imbriquée pour compatibilité legacy
+# ------------------------------------------------------------------------------
+environment:
+  initial_capital: 100.0
+  base_currency: "USDT"
+  trading_rules:
+    min_order_value_usdt: 10.0
+    min_remaining_capital_usdt: 1.0
+    max_leverage: 10
+    commission_pct: 0.0004
+    slippage_pct: 0.0005
+  feature_engineering:
+    timeframes: ["1m"]
+    indicators:
+      - type: "ema"
+        period: 9
+      - type: "ema"
+        period: 21
+      - type: "rsi"
+        period: 14
+    fillna: true
+# ------------------------------------------------------------------------------
+# Configuration de l'Échange (pour paper/live trading)
+# ------------------------------------------------------------------------------
+exchange:
+  id: "binance"
+  use_testnet: true
+  api_key: "${BINANCE_API_KEY}"  # Utilise des variables d'environnement
+  api_secret: "${BINANCE_API_SECRET}"
+  options:
+    defaultType: "future"
+    adjustForTimeDifference: true
+    recvWindow: 60000
+
+# ------------------------------------------------------------------------------
+# Règles de Trading Fondamentales
+# ------------------------------------------------------------------------------
+trading_rules:
+  # Valeur minimale d'un ordre requise par l'échange (ex: 10 USDT pour Binance)
+  min_order_value_usdt: 10.0
+  
+  # Capital minimum à conserver en permanence. L'agent ne peut pas passer
+  # un ordre qui ferait passer le solde disponible sous ce seuil.
+  min_remaining_capital_usdt: 1.0
+  
+  # Effet de levier maximum autorisé
+  max_leverage: 10
+  
+  # Frais de transaction en pourcentage (0.04% pour Taker sur Binance Futures)
+  commission_pct: 0.0004
+  
+  # Slippage simulé en pourcentage pour les backtests
+  slippage_pct: 0.0005
+
+# ------------------------------------------------------------------------------
+# Paliers de Capital et Allocation de Risque (Gestion des Petits Capitaux)
+# ------------------------------------------------------------------------------
+# Le système ajuste dynamiquement sa stratégie de trading en fonction du capital
+# total. C'est une règle de survie essentielle pour les petits portefeuilles.
+capital_tiers:
+  # Palier 0: Mode Survie (< 30 USDT)
+  - threshold: 0
+    max_concurrent_positions: 1
+    order_size_type: "fixed_value"  # Taille d'ordre fixe pour garantir l'exécution
+    order_value_usdt: 11.0          # Légèrement au-dessus du minimum de l'échange
+
+  # Palier 1: Mode Croissance (30 à 70 USDT)
+  - threshold: 30
+    max_concurrent_positions: 1
+    order_size_type: "fraction"     # Passage à une allocation en % du capital
+    allocation_per_trade_pct: 0.80  # 80% du capital par trade
+
+  # Palier 2: Début de Diversification (70 à 300 USDT)
+  - threshold: 70
+    max_concurrent_positions: 2
+    order_size_type: "fraction"
+    allocation_per_trade_pct: 0.45  # 45% par trade (total max 90%)
+
+  # Palier 3: Diversification Standard (300 à 1000 USDT)
+  - threshold: 300
+    max_concurrent_positions: 3
+    order_size_type: "fraction"
+    allocation_per_trade_pct: 0.30  # 30% par trade (total max 90%)
+
+  # Palier 4: Gestion de Portefeuille (> 1000 USDT)
+  - threshold: 1000
+    max_concurrent_positions: 5
+    order_size_type: "fraction"
+    allocation_per_trade_pct: 0.18  # 18% par trade (total max 90%)
+
+# ------------------------------------------------------------------------------
+# Modulation du risque DBE (Sprint 5)
+# ------------------------------------------------------------------------------
+risk_modulation:
+  drawdown_threshold_defensif: 15.0  # Seuil augmenté pour passage en mode défensif (était 12.0)
+  drawdown_threshold_agressif: 5.0   # Seuil ajusté pour mode agressif (était 7.0)
+  drawdown_sl_factor: 0.75           # Facteur de stop-loss plus agressif (nouveau paramètre)
+# ------------------------------------------------------------------------------
+# Pénalités et Récompenses (Shaping de la Récompense)
+# ------------------------------------------------------------------------------
+# Ces paramètres façonnent le signal de récompense pour guider l'agent vers
+# un comportement souhaitable.
+
 penalties:
-  # Réduire les pénalités pour éviter les valeurs extrêmes
-  invalid_order_base: -0.3         # Pénalité pour action illégale de base (ex: ordre trop petit < absolu, max_positions atteint, etc.)
-  time_step: -0.0005           # Légère pénalité à chaque pas (réduite pour plus de stabilité)
-  order_expiry: -0.1          # Pénalité si un ordre (LIMIT, STOP) expire sans exécution
-  out_of_funds: -0.5          # Pénalité si tentative de dépenser plus que capital (réduite pour éviter les valeurs extrêmes)
-  # Pénalité pour ordre entre min_value_absolute et min_value_tolerable si non ajustable
-  order_below_tolerable_if_not_adjusted: -0.3
-  # Pénalité proportionnelle à la différence avec le seuil minimal
-  order_below_tolerable_scaled: "delta * 0.05"  # Réduit de 0.1 à 0.05 pour plus de stabilité
-  # Pénalité si le nombre maximum de positions est atteint
-  max_positions_reached: -0.1
-  # Pénalité si le prix n'est pas disponible pour un actif
-  price_not_available: -0.05
-  # Pénalité si on essaie de vendre un actif qu'on ne possède pas
-  no_position_to_sell: -0.3
+  # Pénalité pour une action invalide (ex: essayer d'ouvrir trop de positions).
+  # Cela apprend à l'agent à respecter les règles de l'environnement.
+  invalid_action: -0.1
+  
+  # Pénalité si un ordre est rejeté par l'échange (ex: fonds insuffisants).
+  # Plus sévère car cela indique une mauvaise gestion du capital.
+  order_rejection: -0.5
+  
+  # Paramètres d'inaction révisés
+  inaction_freq_threshold: 0.15     # Seuil de fréquence d'inaction (15%)
+  inaction_pnl_threshold: 0.05      # Seuil de PnL pour l'inaction
+  base_inaction_penalty: -0.001     # Pénalité de base réduite (était -0.00005)
 
-# 2. Règles d'ordre
-order_rules:
-  min_value_tolerable: 10.0   # Si ordre < tolerable mais >= absolute, tenter d'ajuster à 10.0 ou appliquer pénalité spécifique
-  min_value_absolute: 10.0    # Tout ordre < 10.0 est rejeté avec pénalité 'invalid_order_base'
-  default_expiry_steps: 24    # Nb de pas avant expiration ordre avancé
-
-# 3. Reward shaping et clipping
 reward_shaping:
-  log_return_multiplier: 10.0 # Réduit de 100.0 à 10.0 pour plus de stabilité
-  clip_min: -2.0  # Limites plus strictes pour éviter les valeurs extrêmes
-  clip_max: 2.0
+  # Multiplicateurs de récompense
+  realized_pnl_multiplier: 1.0      # Multiplicateur pour le PnL réalisé
+  unrealized_pnl_multiplier: 0.1    # Multiplicateur pour le PnL latent
+  
+  # Paramètres d'inaction
+  inaction_penalty: -0.001         # Pénalité d'inaction légèrement augmentée
+  
+  # Contrôle des valeurs de récompense
+  reward_clipping_range: [-3.0, 3.0]  # Plage réduite pour des mises à jour plus stables
+  
+  # Configuration des chunks
+  optimal_trade_bonus: 2.0          # Bonus maximal légèrement réduit
+  performance_threshold: 0.6        # Seuil de performance augmenté (moins de faux positifs)
+  chunk_size: 2000                  # Taille de chunk inchangée
+  
+  # Configuration de l'apprentissage
+  use_ewc: true                     # Conserver l'EWC activé
+  ewc_lambda: 0.2                   # Poids EWC augmenté pour une meilleure rétention
+  
+  # Configuration de la mémoire de rejeu
+  use_prioritized_replay: true
+  prioritized_replay_alpha: 0.6
+  prioritized_replay_beta: 0.4
+  prioritized_replay_eps: 1e-6
 
-# 4. Paramètres de transaction
-transaction:
-  fee_percent: 0.001             # 0.1 % (0.1 / 100)
-  fixed_fee: 0.0               # Supposons 0 pour l'instant, à ajouter si besoin
+# ------------------------------------------------------------------------------
+# Paramètres de l'environnement
+# ------------------------------------------------------------------------------
+environment_parameters:
+  volatility_threshold_high: 0.03
+  volatility_threshold_low: 0.01
+  adx_threshold: 25.0
+  ema_ratio_threshold: 1.005
+  atr_pct_threshold: 0.02
 
-# 5. Gestion du capital et des positions (les paliers géreront l'allocation)
-# Ces valeurs peuvent servir de fallback ou pour des stratégies sans paliers
-# Pour l'instant, on se concentre sur les paliers pour l'allocation.
-# La logique de Stop Loss / Take Profit automatique sera gérée via les ordres avancés.
-# Si l'agent doit les créer lui-même, cela nécessitera des actions supplémentaires.
-# Pour l'instant, on suppose que l'agent émet des ordres MARKET, ou crée des LIMIT/STOP/TP
-# via des actions dédiées (si on étend l'espace d'action) ou via des paramètres d'ordre.
-# Les valeurs SL/TP ici pourraient informer la création de ces ordres par l'agent.
-
-# Paliers de capital (structure de base, à compléter/adapter)
-# Sera utilisé par reward_calculator et order_manager/multi_asset_env pour max_positions, allocation.
-tiers:
-  - threshold: 0     # 0-10$
-    max_positions: 1
-    allocation_frac_per_pos: 0.95 # 95% du capital (1 position max)
-    reward_pos_mult: 1.5  # Multiplicateur pour les récompenses positives
-    reward_neg_mult: 0.8  # Multiplicateur pour les récompenses négatives (atténue les pertes)
-  - threshold: 10    # 10-30$
-    max_positions: 1
-    allocation_frac_per_pos: 0.95 # 95% du capital (1 position max)
-    reward_pos_mult: 1.0
-    reward_neg_mult: 1.0
-  - threshold: 30    # 30-100$
-    max_positions: 2
-    allocation_frac_per_pos: 0.45 # 45% par position (max 90% total)
-    reward_pos_mult: 1.1
-    reward_neg_mult: 1.1
-  - threshold: 100   # 100-500$
-    max_positions: 3
-    allocation_frac_per_pos: 0.30 # 30% par position (max 90% total)
-    reward_pos_mult: 1.2
-    reward_neg_mult: 1.2
-  - threshold: 500   # 500$+
-    max_positions: 4
-    allocation_frac_per_pos: 0.10 # 10% par position (max 40% total)
-    reward_pos_mult: 1.3
-    reward_neg_mult: 1.3
-
-# Capital initial et autres paramètres d'environnement général
-initial_capital: 15.0
-
-# Paramètres d'affichage et d'export
-export_history: false  # Désactiver l'affichage des tables par défaut pour l'entraînement
-export_dir: null       # Répertoire d'export (null = pas d'export)

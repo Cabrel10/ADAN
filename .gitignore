@@ -1,12 +1,10 @@
-# Byte-compiled / optimized / DLL files
+# ===================================
+# Python
+# ===================================
 __pycache__/
 *.py[cod]
 *$py.class
-
-# C extensions
 *.so
-
-# Distribution / packaging
 .Python
 build/
 develop-eggs/
@@ -20,25 +18,13 @@ parts/
 sdist/
 var/
 wheels/
-<<<<<<< HEAD
 *.egg-info/
 .installed.cfg
 *.egg
-
-# PyInstaller
-=======
-share/python-wheels/
-*.egg-info/
-.installed.cfg
-*.egg
-MANIFEST
-
-# PyInstaller
-#  Usually these files are written by a python script from a template
-#  before PyInstaller builds the exe, so as to inject date/other infos into it.
->>>>>>> 296a1e7e7811e4726ac5e90c67f96c4d621521a6
 *.manifest
 *.spec
+.pytest_cache/
+.mypy_cache/
 
 # Installer logs
 pip-log.txt
@@ -48,6 +34,16 @@ pip-delete-this-directory.txt
 htmlcov/
 .tox/
 .nox/
+.coverage
+.coverage.*
+.cache
+nosetests.xml
+coverage.xml
+*.cover
+*.py,cover
+.hypothesis/
+.pytest_cache/
+cover/
 .coverage
 .coverage.*
 .cache
@@ -197,11 +193,203 @@ data/raw/
 # Si ces fichiers sont de petite taille et essentiels pour le fonctionnement du code (par ex., pour le prétraitement),
 # il est préférable de les inclure. Je vais ajuster la règle en conséquence.
 # D'abord, on ignorait tous les .joblib, maintenant on crée une exception.
-!data/scalers_encoders/ # Exception: n'ignore pas le dossier scalers_encoders
-!data/scalers_encoders/**/*.joblib # Exception: n'ignore pas les fichiers .joblib dans ce dossier
+# ===================================
+# Données et modèles
+# ===================================
+# Données brutes et traitées
+data/raw/
+data/processed/
 
-# 5. Exports (rapports de performance, historiques de trading) (Doivent être ignorés)
-# Ces fichiers sont des sorties générées par les exécutions du bot.
+# Modèles entraînés et poids
+models/*.pth
+models/*.h5
+models/*.pt
+models/*.onnx
+models/*.zip
+
+# Scaler et encodeurs
+data/scalers_encoders/
+!data/scalers_encoders/example.joblib  # Exemple de fichier à conserver
+
+# Fichiers temporaires
+*.tmp
+*.bak
+*.swp
+*~
+
+# Fichiers de verrouillage
+*.lock
+
+# ===================================
+# Environnements virtuels
+# ===================================
+# Environnements virtuels Python
+venv/
+env/
+ENV/
+.env
+.venv
+env.bak/
+venv.bak/
+
+# Environnement Conda
+.conda/
+.conda-env/
+
+# ===================================
+# Éditeurs et IDEs
+# ===================================
+# VS Code
+.vscode/*
+!.vscode/settings.json
+!.vscode/tasks.json
+!.vscode/launch.json
+!.vscode/extensions.json
+!.vscode/*.code-snippets
+
+# PyCharm
+.idea/
+.idea_modules/
+*.iml
+*.ipr
+*.iws
+.idea/**/workspace.xml
+.idea/**/tasks.xml
+.idea/dictionaries
+.idea/**/dataSources/
+.idea/**/dataSources.ids
+.idea/**/dataSources.local.xml
+.idea/**/sqlDataSources.xml
+.idea/**/dynamic.xml
+.idea/**/uiDesigner.xml
+.idea/**/gradle.xml
+.idea/**/libraries
+
+# Jupyter Notebook
+.ipynb_checkpoints
+*/.ipynb_checkpoints/*
+
+# ===================================
+# Système d'exploitation
+# ===================================
+# Fichiers système
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# ===================================
+# Configuration spécifique au projet
+# ===================================
+# Fichiers de configuration locaux
+.env
+.env.local
+.env.*.local
+!.env.example
+
+# Fichiers de logs
+logs/
+*.log
+
+# Fichiers de cache
+.cache/
+.mypy_cache/
+.pytest_cache/
+
+# Fichiers de déploiement
+.vercel
+.netlify
+.surge.sh
+
+# Fichiers de documentation générés
+site/
+
+# Fichiers temporaires
+.temp/
+tmp/
+
+# Fichiers de sauvegarde
+*~
+*.swp
+*.swo
+
+# Fichiers de base de données
+*.db
+*.sqlite
+*.sqlite3
+
+# Fichiers de compression
+dist/
+build/
+*.egg-info/
+
+# Fichiers de couverture de test
+coverage/
+htmlcov/
+.coverage
+.coverage.*
+,cover
+*.cover
+
+# Fichiers de profilage
+.profile
+
+# Fichiers de configuration locaux
+local_settings.py
+db.sqlite3
+db.sqlite3-journal
+
+# Fichiers de débogage
+*.log
+local_settings.py
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
+
+# Fichiers de configuration de pré-commit
+# .pre-commit-config.yaml  # Ne pas ignorer ce fichier de configuration
+
+# Fichiers de configuration mypy
+mypy.ini
+
+# Fichiers de configuration pytest
+# pytest.ini  # Ne pas ignorer le fichier de configuration pytest
+
+
+# Fichiers de configuration VSCode
+.vscode/
+!.vscode/settings.json
+!.vscode/tasks.json
+!.vscode/launch.json
+!.vscode/extensions.json
+
+# Fichiers de configuration PyCharm
+.idea/
+
+# Fichiers de configuration Jupyter
+.jupyter/
+
+# Fichiers de configuration IPython
+.ipython/
+
+# Fichiers de configuration Jupyter
+.jupyter/
+
+# Fichiers de configuration VS Code
+.vscode/
+
+# Fichiers de configuration PyCharm
+.idea/
+
+# Fichiers de configuration Jupyter
+.jupyter/
+
+# Fichiers de configuration IPython
+.ipython/
 exports/
 
 # 6. Rapports et logs générés (Doivent être ignorés)

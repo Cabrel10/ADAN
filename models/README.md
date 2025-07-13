@@ -1,28 +1,24 @@
-# Modèles Entraînés
+# Models Directory
 
-Ce répertoire contient les modèles entraînés et les artefacts associés pour le projet ADAN.
+This directory stores all trained machine learning models, including reinforcement learning agents and feature encoders. It is organized to keep different types of models separate and easily accessible.
 
-## Structure
+## Important Subdirectories:
 
-* `rl_agents/`: Modèles d'agents d'apprentissage par renforcement (PPO, etc.)
-* `encoders/`: Auto-encodeurs ou autres modèles de réduction de dimensionnalité
-* `baselines/`: Modèles de référence pour la comparaison des performances
+- `baselines/`: Contains baseline models or pre-trained models for comparison.
+- `encoders/`: Stores trained feature encoders, which might be used for dimensionality reduction or feature transformation.
+- `rl_agents/`: Contains the trained reinforcement learning agents (e.g., PPO models) saved during or after the training process.
 
-## Conventions de Nommage
+## Important Files:
 
-Les modèles suivent généralement la convention de nommage:
-`{MODEL_TYPE}_{DESCRIPTION}_{VERSION}_{DATE}.{FORMAT}`
+- `final_model.zip`: The final trained model after the completion of a training run.
+- `best_model/`: Directory containing the best performing model saved during training, typically based on evaluation metrics.
+- `checkpoints/`: Contains periodic checkpoints of the trained models, allowing for training resumption or analysis of training progress.
 
-Exemples:
-* `ppo_adan_v1_20231026.zip`
-* `autoencoder_market_features_v2_20231015.h5`
-* `baseline_buy_and_hold_v1_20231020.pkl`
+## Usage:
 
-## Gestion des Versions
+Models from this directory are loaded for evaluation, backtesting, paper trading, or live trading. The `scripts/train_rl_agent.py` script saves models here, and other scripts (e.g., `scripts/evaluate_final.py`) load them.
 
-Il est recommandé de conserver les différentes versions des modèles pour pouvoir suivre l'évolution des performances et revenir à des versions antérieures si nécessaire. Chaque modèle doit être accompagné d'un fichier de métadonnées ou d'un enregistrement dans les rapports décrivant:
+## Related Documentation:
 
-* Les hyperparamètres utilisés
-* Les données d'entraînement (version, période)
-* Les performances obtenues
-* Les particularités ou améliorations par rapport aux versions précédentes
+- [Main README.md](../../README.md)
+- [Training Module (src/adan_trading_bot/training/)](../src/adan_trading_bot/training/README.md)

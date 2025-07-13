@@ -1,365 +1,681 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
-
 """
-Script pour fusionner les données traitées par actif en un seul DataFrame par timeframe et split.
-Ce script lit les fichiers de données traitées individuellement depuis data/processed/{ASSET}/{ASSET}_{TIMEFRAME}_{SPLIT}.parquet,
-les fusionne en un seul DataFrame par timeframe et split, et sauvegarde les résultats dans data/processed/merged/.
+Script to merge processed data from multiple timeframes into a single
+multi-timeframe dataset for each asset and perform train/val/test split.
+
+Optimized version with better performance and file handling.
 """
 
-import os
-import argparse
+import sys
 import pandas as pd
 import numpy as np
-import logging
 from pathlib import Path
+import logging
+import argparse
+from typing import Dict, List, Optional, Any, Tuple, Set
 import yaml
-import sys
+from datetime import datetime, timedelta
 import gc
-import traceback
+from tqdm import tqdm
+import pyarrow.parquet as pq
+import pyarrow as pa
+from concurrent.futures import ProcessPoolExecutor, as_completed
+import multiprocessing
 
-# Ajouter le répertoire parent au path pour pouvoir importer les modules du projet
-sys.path.append(os.path.join(os.path.dirname(__file__), '..'))
-from src.adan_trading_bot.common.utils import get_logger, load_config, ensure_dir_exists
+# Configure logger
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.StreamHandler(),
+        logging.FileHandler('merge_processed_data.log')
+    ]
+)
+logger = logging.getLogger(__name__)
 
-logger = get_logger(__name__)
+# Default configuration path
+DEFAULT_CONFIG_PATH = Path(__file__).parent.parent / 'config' / 'data_config.yaml'
 
-def load_configs(exec_profile='cpu'):
+# Optimize pandas
+pd.set_option('mode.chained_assignment', None)  # Disable SettingWithCopyWarning
+
+class DataValidationError(Exception):
+    """Exception raised for errors in the data validation."""
+    pass
+
+def load_config(config_path: Path) -> Dict[str, Any]:
     """
-    Charge les configurations nécessaires pour la fusion des données.
+    Load and validate the configuration file with optimized defaults.
     
     Args:
-        exec_profile (str): Profil d'exécution ('cpu' ou 'gpu')
-    
-    Returns:
-        tuple: (main_config, data_config)
-    """
-    logger.info(f"Chargement des configurations avec le profil d'exécution: {exec_profile}")
-    main_config_path = 'config/main_config.yaml'
-    data_config_path = f'config/data_config_{exec_profile}.yaml'
-    
-    logger.info(f"Chargement de la configuration principale: {main_config_path}")
-    logger.info(f"Chargement de la configuration des données: {data_config_path}")
-    
-    main_config = load_config(main_config_path)
-    data_config = load_config(data_config_path)
-    return main_config, data_config
-
-def get_processed_data_paths(main_config, data_config):
-    """
-    Obtient les chemins des données traitées et les informations sur les actifs et timeframes.
-    
-    Args:
-        main_config (dict): Configuration principale
-        data_config (dict): Configuration des données
+        config_path: Path to the YAML configuration file
         
     Returns:
-        tuple: (processed_dir, merged_dir, assets, timeframes)
-    """
-    # Obtenir le chemin du projet depuis la configuration
-    project_dir = main_config.get('paths', {}).get('base_project_dir_local', os.getcwd())
-    
-    # Construire le chemin vers les données traitées
-    data_dir = os.path.join(project_dir, main_config.get('paths', {}).get('data_dir_name', 'data'))
-    base_processed_dir = os.path.join(data_dir, data_config.get('processed_data_dir', 'processed'))
-    
-    # Support des lots de données
-    lot_id = data_config.get('lot_id', None)
-    unified_segment = 'unified'
-
-    # Source directory for individual asset files
-    # This will now be data/processed/ or data/processed/{lot_id}/
-    # The "unified/{timeframe}/{asset}" will be added in merge_data_for_timeframe_split
-    if lot_id:
-        processed_dir = os.path.join(base_processed_dir, lot_id)
-        logger.info(f"Utilisation du lot de données pour la source des données par actif: {lot_id}")
-        logger.info(f"Répertoire de base pour les données par actif (avant unified/tf/asset): {processed_dir}")
-    else:
-        processed_dir = base_processed_dir
-    logger.info(f"Répertoire de base pour les données par actif (avant unified/tf/asset): {processed_dir}")
-
-    # Target directory for merged files (remains .../merged/{lot_id}/unified or .../merged/unified)
-    if lot_id:
-        merged_dir = os.path.join(base_processed_dir, 'merged', lot_id, unified_segment)
-        logger.info(f"Utilisation du lot de données pour la sortie fusionnée: {lot_id}")
-    else:
-        merged_dir = os.path.join(base_processed_dir, 'merged', unified_segment)
-
-    logger.info(f"Répertoire cible pour les données fusionnées: {merged_dir}")
-
-    # Créer le répertoire pour les données fusionnées s'il n'existe pas
-    ensure_dir_exists(merged_dir)
-    # logger.info(f"Répertoire des données fusionnées: {merged_dir}") # Duplicate log line
-    
-    # Obtenir la liste des actifs et timeframes
-    assets = data_config.get('assets', [])
-    
-    # Utiliser timeframes_to_process comme source principale des timeframes
-    # avec fallback sur timeframes pour la compatibilité avec l'ancien format
-    timeframes = data_config.get('timeframes_to_process', data_config.get('timeframes', []))
-    
-    # Gérer les timeframes qui peuvent être une liste ou un dictionnaire
-    if isinstance(timeframes, dict):
-        timeframes = list(timeframes.keys())
-    
-    logger.info(f"Actifs disponibles: {assets}")
-    logger.info(f"Timeframes disponibles: {timeframes}")
-    
-    return processed_dir, merged_dir, assets, timeframes
-
-def merge_data_for_timeframe_split(processed_dir, merged_dir, assets, timeframe, split):
-    """
-    Fusionne les données pour un timeframe et un split spécifiques.
-    
-    Args:
-        processed_dir (str): Répertoire des données traitées
-        merged_dir (str): Répertoire où sauvegarder les données fusionnées
-        assets (list): Liste des actifs à fusionner
-        timeframe (str): Timeframe à traiter
-        split (str): Split à traiter (train, val, test)
+        Dictionary containing the configuration with optimized defaults
         
-    Returns:
-        bool: True si la fusion a réussi, False sinon
+    Raises:
+        ValueError: If configuration is invalid
+        FileNotFoundError: If config file doesn't exist
+        yaml.YAMLError: If YAML parsing fails
     """
-    logger.info(f"Fusion des données pour le timeframe {timeframe}, split {split}...")
-    
-    # Dictionnaire pour stocker les DataFrames chargés par actif
-    dfs_by_asset = {}
-    
-    # Charger les données pour chaque actif
-    for asset in assets:
-        # Construct the full path to the asset-specific file, including timeframe
-        # processed_dir is now data/processed/ or data/processed/{lot_id}/
-        file_path = os.path.join(processed_dir, "unified", timeframe, asset, f"{asset}_{timeframe}_{split}.parquet")
-        
-        if not os.path.exists(file_path):
-            logger.warning(f"Fichier {file_path} non trouvé. L'actif {asset} sera ignoré pour {timeframe}_{split}.")
-            continue
-        
-        try:
-            logger.info(f"Chargement des données pour {asset} ({timeframe}_{split})...")
-            df = pd.read_parquet(file_path)
-            logger.info(f"Données chargées pour {asset}: {len(df)} lignes, {len(df.columns)} colonnes")
-            
-            # S'assurer que l'index est bien un DatetimeIndex
-            if not isinstance(df.index, pd.DatetimeIndex):
-                logger.info(f"Conversion de l'index en DatetimeIndex pour {asset}")
-                df.index = pd.to_datetime(df.index)
-            
-            # Renommer les colonnes pour inclure le nom de l'actif
-            logger.info(f"Renommage des colonnes pour {asset}...")
-            df = df.rename(columns={col: f"{col}_{asset}" for col in df.columns})
-            
-            # Ajouter au dictionnaire des DataFrames
-            dfs_by_asset[asset] = df
-            logger.info(f"Données préparées pour {asset}: {len(df)} lignes, {len(df.columns)} colonnes")
-        except Exception as e:
-            logger.error(f"Erreur lors du chargement des données pour {asset} ({timeframe}_{split}): {e}")
-            logger.error(traceback.format_exc())
-            continue
-    
-    if not dfs_by_asset:
-        logger.error(f"Aucune donnée n'a pu être chargée pour {timeframe}_{split}.")
-        return False
-    
-    # Fusionner les DataFrames de manière itérative
     try:
-        logger.info(f"Début de la fusion itérative pour {timeframe}_{split}...")
-        merged_df = None
+        if not config_path.exists():
+            raise FileNotFoundError(f"Config file not found: {config_path}")
+            
+        with open(config_path, 'r', encoding='utf-8') as f:
+            config = yaml.safe_load(f) or {}
         
-        # Trier les actifs pour une fusion déterministe
-        sorted_assets = sorted(dfs_by_asset.keys())
+        # Set default values with performance optimizations
+        config.setdefault('data_pipeline', {})
+        config['data_pipeline'].setdefault('processed_data_dir', 'data/processed')
+        config['data_pipeline'].setdefault('final_data_dir', 'data/final')
         
-        for i, asset in enumerate(sorted_assets):
-            logger.info(f"Fusion de l'actif {asset} ({i+1}/{len(sorted_assets)}) pour {timeframe}_{split}...")
-            df_asset = dfs_by_asset[asset]
-            
-            if merged_df is None:
-                merged_df = df_asset.copy()
-                logger.info(f"Premier DataFrame assigné: {asset}, forme: {merged_df.shape}")
-            else:
-                # Fusionner avec le DataFrame accumulé
-                logger.info(f"Fusion de {asset} avec le DataFrame accumulé (forme actuelle: {merged_df.shape})...")
-                merged_df = pd.merge(merged_df, df_asset, left_index=True, right_index=True, how='outer')
-                logger.info(f"Fusion réalisée, nouvelle forme: {merged_df.shape}")
-            
-            # Libérer la mémoire
-            del dfs_by_asset[asset]
-            gc.collect()
+        # Set default timeframes if not specified
+        config.setdefault('timeframes_for_observation', ['5m', '1h', '4h'])
         
-        # Gérer les valeurs manquantes
-        if merged_df is not None and not merged_df.empty:
-            logger.info(f"Gestion des valeurs manquantes pour {timeframe}_{split}...")
-            
-            # Compter les NaN avant remplissage
-            nan_count_before = merged_df.isna().sum().sum()
-            logger.info(f"Nombre de NaN avant remplissage: {nan_count_before}")
-            
-            # Forward fill puis backward fill (méthode non dépréciée)
-            logger.info("Application de ffill()...")
-            merged_df = merged_df.ffill()
-            
-            logger.info("Application de bfill()...")
-            merged_df = merged_df.bfill()
-            
-            # Vérifier s'il reste des NaN
-            nan_count_after = merged_df.isna().sum().sum()
-            logger.info(f"Nombre de NaN après remplissage: {nan_count_after}")
-            
-            if nan_count_after > 0:
-                logger.warning(f"Il reste {nan_count_after} valeurs NaN dans les données fusionnées pour {timeframe}_{split}.")
-                
-                # Compter les NaN par ligne et par colonne pour le débogage
-                nan_rows = merged_df.isna().sum(axis=1)
-                rows_with_nan = nan_rows[nan_rows > 0]
-                if len(rows_with_nan) > 0:
-                    logger.warning(f"{len(rows_with_nan)} lignes contiennent des NaN.")
-                    
-                nan_cols = merged_df.isna().sum()
-                cols_with_nan = nan_cols[nan_cols > 0]
-                if len(cols_with_nan) > 0:
-                    logger.warning(f"{len(cols_with_nan)} colonnes contiennent des NaN.")
-                    logger.warning(f"Premières colonnes avec NaN: {cols_with_nan.index[:5].tolist() if len(cols_with_nan) > 5 else cols_with_nan.index.tolist()}")
-                
-                # Supprimer les lignes avec des NaN restants
-                logger.info("Suppression des lignes avec NaN restants...")
-                merged_df = merged_df.dropna()
-                logger.info(f"Après suppression des NaN: {len(merged_df)} lignes")
+        # Set default split configuration with date-based splitting
+        split_config = config.get('splits', {})
+        split_config.setdefault('train_end_date', '2023-01-01')
+        split_config.setdefault('val_end_date', '2023-04-01')
+        config['splits'] = split_config
         
-            # Supprimer la colonne 'asset' si elle existe (elle n'est pas nécessaire dans les données fusionnées)
-            if 'asset' in merged_df.columns:
-                logger.info("Suppression de la colonne 'asset' générique des données fusionnées...")
-                merged_df = merged_df.drop(columns=['asset'])
-                logger.info("Colonne 'asset' supprimée.")
-            else:
-                logger.info("Aucune colonne 'asset' générique trouvée dans les données fusionnées (c'est normal).")
-            
-            # Vérifier si des colonnes contiennent le mot 'asset' (pour détecter d'autres colonnes potentiellement inutiles)
-            asset_columns = [col for col in merged_df.columns if 'asset' in col.lower()]
-            if asset_columns:
-                logger.warning(f"Colonnes contenant 'asset' détectées: {asset_columns}")
-                logger.warning("Ces colonnes pourraient être inutiles. Vérifiez si elles doivent être supprimées.")
-            
-            # Vérification finale : s'assurer qu'aucune colonne 'asset' n'existe
-            final_asset_check = [col for col in merged_df.columns if col == 'asset' or col.lower() == 'asset']
-            if final_asset_check:
-                logger.error(f"ERREUR : Des colonnes 'asset' persistent après suppression : {final_asset_check}")
-                # Forcer la suppression
-                merged_df = merged_df.drop(columns=final_asset_check, errors='ignore')
-                logger.info("Suppression forcée des colonnes 'asset' restantes.")
-            
-            # Vérifier les types de données avant sauvegarde
-            logger.info("Vérification des types de données avant sauvegarde...")
-            for col, dtype in merged_df.dtypes.items():
-                if dtype == 'object':
-                    logger.warning(f"Colonne {col} a un type 'object', ce qui peut causer des problèmes avec Parquet.")
-                    # Tenter de convertir en float si possible
-                    try:
-                        merged_df[col] = merged_df[col].astype('float64')
-                        logger.info(f"Colonne {col} convertie en float64.")
-                    except Exception as e:
-                        logger.error(f"Impossible de convertir la colonne {col} en float64: {e}")
-            
-            # Sauvegarder le DataFrame fusionné
-            try:
-                output_file = os.path.join(merged_dir, f"{timeframe}_{split}_merged.parquet")
-                logger.info(f"Sauvegarde des données fusionnées dans {output_file}...")
-                merged_df.to_parquet(output_file)
-                logger.info(f"Données fusionnées sauvegardées: {len(merged_df)} lignes, {len(merged_df.columns)} colonnes")
-                return True
-            except Exception as e:
-                logger.error(f"Erreur lors de la sauvegarde des données fusionnées: {e}")
-                logger.error(traceback.format_exc())
-                return False
-        else:
-            logger.error(f"Aucune donnée fusionnée valide pour {timeframe}_{split}.")
-            return False
+        # Performance optimization settings
+        perf_config = config.setdefault('performance', {})
+        perf_config.setdefault('use_multiprocessing', True)
+        perf_config.setdefault('max_workers', max(1, multiprocessing.cpu_count() - 1))
+        perf_config.setdefault('chunksize', 10000)  # For processing in chunks
+        perf_config.setdefault('memory_efficient', True)  # Trade CPU for memory
+        
+        # Data validation settings
+        val_config = config.setdefault('validation', {})
+        val_config.setdefault('min_rows', 100)  # Minimum rows required to process an asset
+        val_config.setdefault('max_missing_pct', 0.3)  # Max % of missing values allowed
+        
+        # Logging configuration
+        log_config = config.setdefault('logging', {})
+        log_config.setdefault('level', 'INFO')
+        log_config.setdefault('file', 'merge_processed_data.log')
+        
+        # Set logging level
+        logger.setLevel(getattr(logging, log_config['level'].upper(), logging.INFO))
+        
+        # Add file handler if not already added
+        if not any(isinstance(h, logging.FileHandler) for h in logger.handlers):
+            file_handler = logging.FileHandler(log_config['file'])
+            file_handler.setFormatter(logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s'))
+            logger.addHandler(file_handler)
+        
+        return config
+        
+    except yaml.YAMLError as e:
+        logger.error(f"Error parsing YAML config: {e}", exc_info=True)
+        raise
     except Exception as e:
-        logger.error(f"Erreur lors de la fusion des données pour {timeframe}_{split}: {e}")
-        logger.error(traceback.format_exc())
+        logger.error(f"Error loading config: {e}", exc_info=True)
+        raise
+
+def load_single_dataframe(file_path: Path, tf: str) -> Optional[pd.DataFrame]:
+    """
+    Load and preprocess a single parquet file with performance optimizations.
+    
+    Args:
+        file_path: Path to the parquet file
+        tf: Timeframe (e.g., '5m', '1h', '4h')
+        
+    Returns:
+        Preprocessed DataFrame or None if loading fails
+    """
+    try:
+        if not file_path.exists():
+            logger.debug(f"File not found: {file_path}")
+            return None
+            
+        # Read only necessary columns if possible
+        columns_to_read = None
+        try:
+            # Try to read schema first to check available columns
+            schema = pq.read_schema(file_path)
+            available_columns = set(schema.names)
+            
+            # Define required columns
+            required_cols = {'timestamp', 'open', 'high', 'low', 'close', 'volume'}
+            
+            # Only read columns that exist in the file
+            columns_to_read = [col for col in required_cols if col in available_columns]
+            if not columns_to_read:
+                logger.warning(f"No required columns found in {file_path}")
+                return None
+                
+        except Exception as e:
+            logger.warning(f"Could not read schema for {file_path}, falling back to full load: {e}")
+        
+        # Read the data with optimizations
+        try:
+            # Use pyarrow backend for faster reading
+            table = pq.read_table(
+                file_path,
+                columns=columns_to_read,
+                use_threads=True,
+                memory_map=True
+            )
+            df = table.to_pandas()
+        except Exception as e:
+            logger.error(f"Error reading {file_path} with pyarrow: {e}")
+            # Fallback to pandas read_parquet if pyarrow fails
+            try:
+                df = pd.read_parquet(file_path, columns=columns_to_read)
+            except Exception as e2:
+                logger.error(f"Error reading {file_path} with pandas: {e2}")
+                return None
+        
+        if df.empty:
+            logger.warning(f"Empty DataFrame loaded from {file_path}")
+            return None
+            
+        # Set timestamp as index if it exists
+        if 'timestamp' in df.columns:
+            df['timestamp'] = pd.to_datetime(df['timestamp'], utc=True)
+            df = df.set_index('timestamp')
+        elif not isinstance(df.index, pd.DatetimeIndex):
+            logger.warning(f"No timestamp column in {file_path}")
+            return None
+            
+        # Add timeframe prefix to columns
+        df = df.add_prefix(f"{tf}_")
+        
+        return df
+            
+    except Exception as e:
+        logger.error(f"Error loading {file_path}: {e}", exc_info=True)
+        return None
+
+def merge_timeframes(asset_data: Dict[str, pd.DataFrame]) -> Optional[pd.DataFrame]:
+    """
+    Merge multiple timeframes for a single asset using optimized methods.
+    
+    Args:
+        asset_data: Dictionary of {timeframe: DataFrame} pairs
+        
+    Returns:
+        Merged DataFrame with all timeframes or None if merge fails
+    """
+    if not asset_data:
+        return None
+        
+    try:
+        # Sort timeframes from highest to lowest resolution (e.g., ['4h', '1h', '5m'])
+        timeframes = sorted(
+            asset_data.keys(),
+            key=lambda x: pd.Timedelta(x).total_seconds() if x != '1m' else 60,
+            reverse=True
+        )
+        
+        # Start with the lowest resolution (most aggregated) data
+        merged = asset_data[timeframes[0]].copy()
+        
+        # Merge with higher resolution data
+        for tf in timeframes[1:]:
+            df = asset_data[tf]
+            
+            # Forward fill higher resolution data to match timestamps
+            merged = merged.join(df, how='left')
+            
+            # Forward fill missing values within each timeframe group
+            for col in df.columns:
+                if col in merged.columns:
+                    merged[col] = merged[col].ffill()
+        
+        # Drop any remaining NA values that couldn't be filled
+        merged = merged.dropna(how='all')
+        
+        # Ensure data is sorted by timestamp
+        merged = merged.sort_index()
+        
+        return merged
+        
+    except Exception as e:
+        logger.error(f"Error merging timeframes: {e}", exc_info=True)
+        return None
+
+def load_asset_data(asset: str, timeframes: List[str], data_dir: Path) -> Optional[pd.DataFrame]:
+    """
+    Load and merge data for a single asset across multiple timeframes.
+    
+    Args:
+        asset: Asset symbol (e.g., 'BTC/USDT')
+        timeframes: List of timeframes to load (e.g., ['5m', '1h', '4h'])
+        data_dir: Base directory containing the processed data
+        
+    Returns:
+        Merged DataFrame with all timeframes for the asset, or None if no data found
+    """
+    asset_name = asset.replace('/', '')
+    asset_data = {}
+    
+    # Load data for each timeframe
+    for tf in timeframes:
+        file_path = data_dir / tf / f"{asset_name}.parquet"
+        df = load_single_dataframe(file_path, tf)
+        if df is not None and not df.empty:
+            asset_data[tf] = df
+    
+    # If no data was loaded, return None
+    if not asset_data:
+        logger.warning(f"No valid data found for {asset}")
+        return None
+    
+    # Merge the timeframes
+    merged = merge_timeframes(asset_data)
+    
+    if merged is not None and not merged.empty:
+        logger.info(f"Successfully merged {len(merged)} rows for {asset} across {len(asset_data)} timeframes")
+    else:
+        logger.warning(f"Failed to merge data for {asset}")
+    
+    return merged
+
+def split_data(df: pd.DataFrame, config: Dict[str, Any]) -> Dict[str, pd.DataFrame]:
+    """
+    Split data into train, validation, and test sets based on dates.
+    
+    Args:
+        df: Input DataFrame with datetime index
+        config: Configuration dictionary with split dates
+        
+    Returns:
+        Dictionary with 'train', 'val', 'test' DataFrames
+    """
+    if df is None or df.empty:
+        logger.warning("Cannot split empty or None DataFrame")
+        return {}
+    
+    # Ensure the index is datetime
+    if not isinstance(df.index, pd.DatetimeIndex):
+        logger.error("DataFrame index must be a DatetimeIndex for date-based splitting")
+        return {}
+    
+    # Get split dates from config
+    train_end = pd.to_datetime(config['splits']['train_end_date'])
+    val_end = pd.to_datetime(config['splits']['val_end_date'])
+    
+    # Ensure dates are timezone-aware
+    if df.index.tz is not None:
+        train_end = train_end.tz_localize(df.index.tz)
+        val_end = val_end.tz_localize(df.index.tz)
+    
+    # Split the data based on dates
+    train_df = df[df.index < train_end]
+    val_df = df[(df.index >= train_end) & (df.index < val_end)]
+    test_df = df[df.index >= val_end]
+    
+    # Log split information
+    logger.info(f"Date-based split for {len(df)} rows:")
+    logger.info(f"- Train: {len(train_df)} rows ({train_df.index.min()} to {train_df.index.max()})")
+    logger.info(f"- Val:   {len(val_df)} rows ({val_df.index.min() if not val_df.empty else 'N/A'} to {val_df.index.max() if not val_df.empty else 'N/A'})")
+    logger.info(f"- Test:  {len(test_df)} rows ({test_df.index.min() if not test_df.empty else 'N/A'} to {test_df.index.max() if not test_df.empty else 'N/A'})")
+    
+    return {
+        'train': train_df,
+        'val': val_df,
+        'test': test_df
+    }
+
+def save_datasets(asset: str, datasets: Dict[str, pd.DataFrame], output_dir: Path) -> bool:
+    """
+    Save train/val/test datasets to disk with optimizations.
+    
+    Args:
+        asset: Asset symbol (e.g., 'BTC_USDT')
+        datasets: Dictionary with 'train', 'val', 'test' DataFrames
+        output_dir: Base output directory
+        
+    Returns:
+        bool: True if all datasets were saved successfully, False otherwise
+    """
+    if not datasets:
+        logger.warning(f"No datasets provided for {asset}")
         return False
+        
+    try:
+        # Create asset directory
+        asset_dir = output_dir / asset.replace('/', '_')
+        asset_dir.mkdir(parents=True, exist_ok=True)
+        
+        # Track success/failure
+        success = True
+        
+        # Save each split with optimizations
+        for split_name, df in datasets.items():
+            if df is None or df.empty:
+                logger.warning(f"No data to save for {asset} {split_name} split")
+                success = False
+                continue
+                
+            try:
+                file_path = asset_dir / f"{split_name}.parquet"
+                
+                # Use optimal compression and other parquet options
+                df.to_parquet(
+                    file_path,
+                    engine='pyarrow',
+                    compression='snappy',  # Good balance of speed and compression
+                    index=True,
+                    coerce_timestamps='ms',
+                    allow_truncated_timestamps=True
+                )
+                
+                # Verify the file was written correctly
+                if not file_path.exists() or file_path.stat().st_size == 0:
+                    logger.error(f"Failed to write {file_path}")
+                    success = False
+                else:
+                    logger.info(f"Saved {split_name} data to {file_path} ({len(df):,} rows, {file_path.stat().st_size / (1024*1024):.2f} MB)")
+                    
+            except Exception as e:
+                logger.error(f"Error saving {split_name} data for {asset}: {e}", exc_info=True)
+                success = False
+        
+        return success
+        
+    except Exception as e:
+        logger.error(f"Error in save_datasets for {asset}: {e}", exc_info=True)
+        return False
+
+def clean_data(df: pd.DataFrame, config: Dict[str, Any]) -> pd.DataFrame:
+    """
+    Clean and preprocess the merged DataFrame.
+    
+    Args:
+        df: Input DataFrame
+        config: Configuration dictionary
+        
+    Returns:
+        Cleaned DataFrame
+    """
+    if df is None or df.empty:
+        return df
+    
+    # Make a copy to avoid SettingWithCopyWarning
+    df = df.copy()
+    
+    # Remove duplicate indices
+    df = df[~df.index.duplicated(keep='first')]
+    
+    # Sort by index
+    df = df.sort_index()
+    
+    # Handle missing values based on configuration
+    max_missing_pct = config.get('validation', {}).get('max_missing_pct', 0.3)
+    
+    # Calculate missing percentage for each column
+    missing_pct = df.isnull().mean()
+    
+    # Drop columns with too many missing values
+    cols_to_drop = missing_pct[missing_pct > max_missing_pct].index.tolist()
+    if cols_to_drop:
+        logger.warning(f"Dropping columns with >{max_missing_pct:.0%} missing values: {', '.join(cols_to_drop)}")
+        df = df.drop(columns=cols_to_drop)
+    
+    # Forward fill missing values for each column within its timeframe group
+    for col in df.columns:
+        if df[col].isnull().any():
+            # Only fill if the column has a timeframe prefix
+            if '_' in col:
+                df[col] = df[col].ffill()
+    
+    # Drop any remaining rows with missing values
+    initial_rows = len(df)
+    df = df.dropna()
+    
+    if len(df) < initial_rows:
+        logger.warning(f"Dropped {initial_rows - len(df)} rows with missing values")
+    
+    return df
+
+def process_asset(asset: str, config: Dict[str, Any]) -> bool:
+    """
+    Process a single asset by merging timeframes and creating train/val/test splits.
+    
+    Args:
+        asset: Asset symbol (e.g., 'BTC/USDT')
+        config: Configuration dictionary
+        
+    Returns:
+        bool: True if successful, False otherwise
+    """
+    start_time = pd.Timestamp.now()
+    asset_name = asset.replace('/', '_')
+    logger.info(f"\n{'='*80}\nProcessing asset: {asset_name}\n{'-'*80}")
+    
+    try:
+        # Get directories from config
+        processed_dir = Path(config['data_pipeline']['processed_data_dir'])
+        final_dir = Path(config['data_pipeline']['final_data_dir'])
+        
+        # Check if processing is needed (skip if all output files exist and are not empty)
+        final_files_exist = all(
+            (final_dir / asset_name / f"{split}.parquet").exists() and 
+            (final_dir / asset_name / f"{split}.parquet").stat().st_size > 0
+            for split in ['train', 'val', 'test']
+        )
+        
+        if final_files_exist and not config.get('force_reprocess', False):
+            logger.info(f"Skipping {asset_name} - final files already exist")
+            return True
+        
+        # Load and merge data
+        timeframes = config.get('timeframes_for_observation', ['5m', '1h', '4h'])
+        merged_df = load_asset_data(asset, timeframes, processed_dir)
+        
+        if merged_df is None or merged_df.empty:
+            logger.warning(f"No data to process for {asset_name}")
+            return False
+        
+        # Add metadata
+        merged_df['asset'] = asset_name
+        
+        # Clean up data
+        merged_df = clean_data(merged_df, config)
+        
+        # Split the data
+        datasets = split_data(merged_df, config)
+        
+        if not datasets or any(df is None or df.empty for df in datasets.values()):
+            logger.warning(f"Incomplete datasets for {asset_name}")
+            return False
+            
+        # Save the datasets
+        success = save_datasets(asset_name, datasets, final_dir)
+        
+        # Log processing time
+        duration = (pd.Timestamp.now() - start_time).total_seconds()
+        status = "SUCCESS" if success else "FAILED"
+        logger.info(f"{'-'*40}\n{asset_name} processing {status} in {duration:.2f} seconds\n{'='*80}")
+        
+        return success
+        
+    except Exception as e:
+        duration = (pd.Timestamp.now() - start_time).total_seconds()
+        logger.error(f"Error processing {asset_name} after {duration:.2f}s: {e}", exc_info=True)
+        return False
+        
+        # For each higher timeframe, merge with forward-fill
+        for tf in timeframes[1:]:
+            tf_file = data_dir / tf / f"{asset}.parquet"
+            if not tf_file.exists():
+                logger.warning(f"Timeframe file not found: {tf_file}")
+                continue
+                
+            logger.info(f"Merging with {tf} data from {tf_file}")
+            
+            # Load timeframe data
+            tf_df = pd.read_parquet(tf_file)
+            if 'timestamp' not in tf_df.columns:
+                logger.error(f"Timestamp column not found in {tf_file}")
+                continue
+                
+            # Prepare timeframe data
+            tf_df['timestamp'] = pd.to_datetime(tf_df['timestamp'])
+            tf_df = tf_df.sort_values('timestamp')
+            
+            # Rename columns with timeframe prefix
+            for col in tf_df.columns:
+                if col != 'timestamp':
+                    tf_df = tf_df.rename(columns={col: f"{tf}_{col}"})
+            
+            # Merge with forward-fill
+            df = pd.merge_asof(
+                df.sort_values('timestamp'),
+                tf_df.sort_values('timestamp'),
+                on='timestamp',
+                direction='forward'
+            )
+            
+            # Calculate minutes_since_update for this timeframe
+            if f'{tf}_minutes_since_update' in df.columns:
+                period_minutes = int(tf.replace('h', '00').replace('m', ''))
+                df[f'{tf}_minutes_since_update'] = (df.groupby(
+                    (df['timestamp'] - df['timestamp'].iloc[0]) // 
+                    pd.Timedelta(f'{period_minutes}min')
+                ).cumcount() * 5) % period_minutes
+        
+        # Save merged data
+        merged_file = output_dir / f"{asset}_merged.parquet"
+        df.to_parquet(merged_file, index=False)
+        logger.info(f"Saved merged data to {merged_file} with {len(df)} rows")
+        
+        # Create and save splits
+        splits = config.get('splits', {
+            'train_ratio': 0.7,
+            'val_ratio': 0.15,
+            'test_ratio': 0.15
+        })
+        
+        datasets = split_data(df, splits)
+        
+        # Save datasets
+        for split_name, split_df in datasets.items():
+            if split_df is not None and not split_df.empty:
+                split_file = output_dir / f"{asset}_{split_name}.parquet"
+                split_df.to_parquet(split_file, index=False)
+                logger.info(f"Saved {split_name} data to {split_file} with {len(split_df)} rows")
+        
+        return True
+        
+    except Exception as e:
+        logger.error(f"Error processing {asset}: {e}", exc_info=True)
+        return False
+
+def process_asset_wrapper(args):
+    """Wrapper function for parallel processing of assets."""
+    asset, config = args
+    try:
+        return process_asset(asset, config), asset
+    except Exception as e:
+        logger.error(f"Error in process_asset_wrapper for {asset}: {e}", exc_info=True)
+        return False, asset
 
 def main():
     """
-    Fonction principale pour la fusion des données.
+    Main function to run the data merging pipeline with parallel processing.
+    
+    Returns:
+        int: Exit code (0 for success, 1 for errors)
     """
-    parser = argparse.ArgumentParser(description='Fusion des données traitées par actif en un seul DataFrame par timeframe et split.')
-    parser.add_argument(
-        '--exec_profile', 
-        type=str, 
-        default='cpu_lot1',
-        choices=['cpu', 'gpu', 'cpu_lot1', 'cpu_lot2', 'gpu_lot1', 'gpu_lot2', 'smoke_cpu'],
-        help="Profil d'exécution ('cpu', 'gpu', 'cpu_lot1', 'cpu_lot2', etc.) pour charger data_config_{profile}.yaml."
-    )
-    parser.add_argument('--timeframes', nargs='+', help='Liste des timeframes à traiter (par défaut: tous)')
-    parser.add_argument('--splits', nargs='+', default=['train', 'val', 'test'], help='Liste des splits à traiter (par défaut: train, val, test)')
-    parser.add_argument('--training-timeframe', type=str, help='Timeframe principal pour l\'entraînement (pour générer un fichier spécial)')
-    parser.add_argument('--data_config', type=str, default=None,
-                        help='Path to a specific data_config YAML file. Overrides --exec_profile for data config loading.')
-    args = parser.parse_args()
+    start_time = pd.Timestamp.now()
     
-    # Charger les configurations
-    main_config_path = 'config/main_config.yaml' # Or get from args if made configurable
-    logger.info(f"Loading main configuration from: {main_config_path}")
-    main_config = load_config(main_config_path)
-    if main_config is None:
-        logger.error(f"FATAL: Main configuration file not found or empty at {main_config_path}")
-        sys.exit(1)
-
-    data_config_to_load = None
-    if args.data_config:
-        data_config_to_load = args.data_config
-        logger.info(f"Using explicit data_config from: {data_config_to_load}")
-    else:
-        data_config_to_load = f'config/data_config_{args.exec_profile}.yaml'
-        logger.info(f"Using data_config derived from exec_profile '{args.exec_profile}': {data_config_to_load}")
-    
-    logger.info(f"Loading data configuration from: {data_config_to_load}")
     try:
-        data_config = load_config(data_config_to_load)
-        if data_config is None:
-            raise FileNotFoundError(f"Data configuration file {data_config_to_load} not found or empty.")
-        logger.info(f"Data configuration loaded successfully from {data_config_to_load}")
-    except FileNotFoundError:
-        logger.error(f"FATAL: Data configuration file not found at {data_config_to_load}")
-        sys.exit(1)
-    except Exception as e:
-        logger.error(f"FATAL: Error loading data configuration from {data_config_to_load}: {e}")
-        sys.exit(1)
-
-    # Obtenir les chemins et informations
-    processed_dir, merged_dir, assets, available_timeframes = get_processed_data_paths(main_config, data_config)
-    
-    # Filtrer les timeframes si spécifiés
-    timeframes = args.timeframes if args.timeframes else available_timeframes
-    
-    # Obtenir le timeframe d'entraînement depuis les arguments ou la configuration
-    training_timeframe = args.training_timeframe if args.training_timeframe else data_config.get('training_timeframe', '1h')
-    logger.info(f"Timeframe principal pour l'entraînement: {training_timeframe}")
-    
-    # Fusionner les données pour chaque timeframe et split
-    success_count = 0
-    total_count = 0
-    
-    for timeframe in timeframes:
-        for split in args.splits:
-            total_count += 1
-            if merge_data_for_timeframe_split(processed_dir, merged_dir, assets, timeframe, split):
-                success_count += 1
+        # Parse command line arguments
+        parser = argparse.ArgumentParser(description='Merge processed data from multiple timeframes')
+        parser.add_argument('--config', type=str, default=str(DEFAULT_CONFIG_PATH),
+                          help='Path to configuration file')
+        parser.add_argument('--assets', type=str, nargs='+',
+                          help='Specific assets to process (default: all in config)')
+        parser.add_argument('--force', action='store_true',
+                          help='Force reprocessing even if output files exist')
+        parser.add_argument('--max-workers', type=int, default=None,
+                          help='Maximum number of worker processes (default: CPU count - 1)')
+        parser.add_argument('--chunksize', type=int, default=1,
+                          help='Number of assets to process in each chunk (default: 1)')
+        args = parser.parse_args()
+        
+        # Load configuration
+        config = load_config(Path(args.config))
+        
+        # Override config with command line arguments
+        if args.assets:
+            config['assets'] = args.assets
+        if args.force:
+            config['force_reprocess'] = True
+        if args.max_workers is not None:
+            config['performance']['max_workers'] = args.max_workers
+        if args.chunksize is not None:
+            config['performance']['chunksize'] = args.chunksize
+        
+        # Get list of assets to process
+        assets = config.get('assets', [])
+        if not assets:
+            logger.error("No assets specified in configuration")
+            return 1
+            
+        logger.info(f"Starting data merging for {len(assets)} assets")
+        logger.info(f"Using {config['performance']['max_workers']} worker processes")
+        logger.info(f"Chunk size: {config['performance']['chunksize']}")
+        
+        # Prepare arguments for parallel processing
+        process_args = [(asset, config) for asset in assets]
+        
+        # Process assets in parallel
+        success_count = 0
+        if config['performance']['use_multiprocessing'] and len(assets) > 1:
+            with ProcessPoolExecutor(max_workers=config['performance']['max_workers']) as executor:
+                # Use tqdm for progress bar
+                results = list(tqdm(
+                    executor.map(process_asset_wrapper, process_args, 
+                               chunksize=config['performance']['chunksize']),
+                    total=len(assets),
+                    desc="Processing assets",
+                    unit="asset"
+                ))
                 
-                # Si c'est le timeframe d'entraînement, créer une copie avec un nom spécial
-                if timeframe == training_timeframe:
-                    source_file = os.path.join(merged_dir, f"{timeframe}_{split}_merged.parquet")
-                    target_file = os.path.join(merged_dir, f"training_{split}_merged.parquet")
-                    try:
-                        # Copier le fichier
-                        import shutil
-                        shutil.copy2(source_file, target_file)
-                        logger.info(f"Fichier {source_file} copié vers {target_file} (timeframe d'entraînement)")
-                    except Exception as e:
-                        logger.error(f"Erreur lors de la copie du fichier d'entraînement: {e}")
-    
-    logger.info(f"Fusion des données terminée. {success_count}/{total_count} fusions réussies.")
+                # Count successful results
+                for success, asset in results:
+                    if success:
+                        success_count += 1
+                    else:
+                        logger.warning(f"Failed to process asset: {asset}")
+        else:
+            # Sequential processing (for debugging or small datasets)
+            for asset in tqdm(assets, desc="Processing assets", unit="asset"):
+                success, _ = process_asset_wrapper((asset, config))
+                if success:
+                    success_count += 1
+                else:
+                    logger.warning(f"Failed to process asset: {asset}")
+        
+        # Calculate and log summary
+        duration = (pd.Timestamp.now() - start_time).total_seconds()
+        success_rate = (success_count / len(assets)) * 100 if assets else 0
+        
+        logger.info(f"\n{'='*80}")
+        logger.info(f"PROCESSING SUMMARY")
+        logger.info(f"{'='*80}")
+        logger.info(f"Total assets:           {len(assets)}")
+        logger.info(f"Successfully processed: {success_count}")
+        logger.info(f"Failed:                {len(assets) - success_count}")
+        logger.info(f"Success rate:          {success_rate:.1f}%")
+        logger.info(f"Total duration:        {duration:.2f} seconds")
+        logger.info(f"Output directory:      {config['data_pipeline']['final_data_dir']}")
+        logger.info(f"{'='*80}")
+        
+        # Return non-zero exit code if any assets failed to process
+        return 0 if success_count == len(assets) else 1
+        
+    except Exception as e:
+        duration = (pd.Timestamp.now() - start_time).total_seconds()
+        logger.error(f"Fatal error after {duration:.2f} seconds: {e}", exc_info=True)
+        return 1
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

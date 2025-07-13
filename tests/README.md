@@ -1,39 +1,32 @@
-# Tests du Projet ADAN
+# Tests Directory
 
-Ce répertoire contient les tests unitaires et d'intégration pour assurer la robustesse et la fiabilité du code du projet ADAN.
+This directory contains all unit and integration tests for the ADAN trading bot. Tests are crucial for ensuring the correctness and reliability of the codebase.
 
-## Structure
+## Important Subdirectories:
 
-* `unit/`: Tests unitaires pour les composants individuels
-* `integration/`: Tests d'intégration pour vérifier l'interaction entre les différents modules
-* `conftest.py`: Fixtures Pytest partagées entre les différents tests
+- `unit/`: Contains unit tests for individual modules and functions. These tests focus on isolated components to verify their behavior.
+- `integration/`: Contains integration tests that verify the interaction between multiple components or the end-to-end flow of certain functionalities.
 
-## Exécution des Tests
+## Usage:
 
-Pour exécuter tous les tests:
-
-```bash
-# Depuis la racine du projet
-pytest tests/
-
-# Avec couverture de code
-pytest tests/ --cov=src/adan_trading_bot
-```
-
-Pour exécuter un groupe spécifique de tests:
+To run all unit tests, navigate to the project root and execute:
 
 ```bash
-# Tests unitaires uniquement
-pytest tests/unit/
-
-# Tests d'un module spécifique
-pytest tests/unit/test_environment.py
+python -m unittest discover tests/unit
 ```
 
-## Bonnes Pratiques
+To run all integration tests:
 
-1. Chaque module du code source doit avoir des tests unitaires correspondants
-2. Les tests doivent être indépendants et ne pas dépendre de l'ordre d'exécution
-3. Utilisez des fixtures pour réutiliser la configuration et les données de test
-4. Moquez les dépendances externes (API, bases de données) pour des tests plus rapides et plus fiables
-5. Visez une couverture de code élevée, en particulier pour les composants critiques
+```bash
+python -m unittest discover tests/integration
+```
+
+To run all tests (unit and integration):
+
+```bash
+python -m unittest discover tests
+```
+
+## Related Documentation:
+
+- [Main README.md](../../README.md)
