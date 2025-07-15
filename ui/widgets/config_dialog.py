@@ -18,6 +18,9 @@ class ConfigDialog(QDialog):
         self.environment_config_path = Path(__file__).parent.parent.parent.parent / 'config' / 'environment_config.yaml'
         self.environment_config = self._load_environment_config()
 
+        self.data_config_path = Path(__file__).parent.parent.parent.parent / 'config' / 'data_config.yaml'
+        self.data_config = self._load_data_config()
+
         self.layout = QVBoxLayout(self)
 
         self.tab_widget = QTabWidget()
@@ -54,6 +57,18 @@ class ConfigDialog(QDialog):
         self.max_sl_spin.setValue(self.dbe_config.get('risk_parameters', {}).get('max_sl_pct', 0.10))
         self.risk_tab_layout.addRow(QLabel("SL Maximum (%):"), self.max_sl_spin)
 
+        self.drawdown_sl_factor_spin = QDoubleSpinBox()
+        self.drawdown_sl_factor_spin.setDecimals(2)
+        self.drawdown_sl_factor_spin.setSingleStep(0.01)
+        self.drawdown_sl_factor_spin.setValue(self.environment_config.get('risk_modulation', {}).get('drawdown_sl_factor', 0.75))
+        self.risk_tab_layout.addRow(QLabel("Facteur SL Drawdown:"), self.drawdown_sl_factor_spin)
+
+        self.aggressive_mode_winrate_trigger_spin = QDoubleSpinBox()
+        self.aggressive_mode_winrate_trigger_spin.setDecimals(2)
+        self.aggressive_mode_winrate_trigger_spin.setSingleStep(0.01)
+        self.aggressive_mode_winrate_trigger_spin.setValue(self.environment_config.get('risk_modulation', {}).get('aggressive_mode_winrate_trigger', 0.60))
+        self.risk_tab_layout.addRow(QLabel("Seuil Winrate Mode Agressif:"), self.aggressive_mode_winrate_trigger_spin)
+
         self.tab_widget.addTab(self.risk_tab, "Risque")
 
         # Onglet Récompense
@@ -77,6 +92,18 @@ class ConfigDialog(QDialog):
         self.min_action_frequency_spin.setSingleStep(0.01)
         self.min_action_frequency_spin.setValue(self.dbe_config.get('reward', {}).get('min_action_frequency', 0.05))
         self.reward_tab_layout.addRow(QLabel("Fréquence Action Min (%):"), self.min_action_frequency_spin)
+
+        self.efficiency_threshold_spin = QDoubleSpinBox()
+        self.efficiency_threshold_spin.setDecimals(2)
+        self.efficiency_threshold_spin.setSingleStep(0.01)
+        self.efficiency_threshold_spin.setValue(self.dbe_config.get('reward', {}).get('efficiency_threshold', 0.70))
+        self.reward_tab_layout.addRow(QLabel("Seuil Efficacité:"), self.efficiency_threshold_spin)
+
+        self.efficiency_boost_factor_spin = QDoubleSpinBox()
+        self.efficiency_boost_factor_spin.setDecimals(2)
+        self.efficiency_boost_factor_spin.setSingleStep(0.01)
+        self.efficiency_boost_factor_spin.setValue(self.dbe_config.get('reward', {}).get('efficiency_boost_factor', 1.2))
+        self.reward_tab_layout.addRow(QLabel("Facteur Boost Efficacité:"), self.efficiency_boost_factor_spin)
 
         self.tab_widget.addTab(self.reward_tab, "Récompense")
 
@@ -122,6 +149,24 @@ class ConfigDialog(QDialog):
         self.gamma_max_spin.setSingleStep(0.00001)
         self.gamma_max_spin.setValue(self.dbe_config.get('learning', {}).get('gamma_range', [0.9, 0.999])[1])
         self.hyperparams_tab_layout.addRow(QLabel("Gamma Max:"), self.gamma_max_spin)
+
+        self.batch_size_spin = QDoubleSpinBox()
+        self.batch_size_spin.setDecimals(0)
+        self.batch_size_spin.setSingleStep(1)
+        self.batch_size_spin.setValue(self.dbe_config.get('learning', {}).get('batch_size', 256))
+        self.hyperparams_tab_layout.addRow(QLabel("Batch Size:"), self.batch_size_spin)
+
+        self.prioritized_replay_alpha_spin = QDoubleSpinBox()
+        self.prioritized_replay_alpha_spin.setDecimals(2)
+        self.prioritized_replay_alpha_spin.setSingleStep(0.01)
+        self.prioritized_replay_alpha_spin.setValue(self.dbe_config.get('learning', {}).get('prioritized_replay_alpha', 0.6))
+        self.hyperparams_tab_layout.addRow(QLabel("Prioritized Replay Alpha:"), self.prioritized_replay_alpha_spin)
+
+        self.prioritized_replay_beta_spin = QDoubleSpinBox()
+        self.prioritized_replay_beta_spin.setDecimals(2)
+        self.prioritized_replay_beta_spin.setSingleStep(0.01)
+        self.prioritized_replay_beta_spin.setValue(self.dbe_config.get('learning', {}).get('prioritized_replay_beta', 0.4))
+        self.hyperparams_tab_layout.addRow(QLabel("Prioritized Replay Beta:"), self.prioritized_replay_beta_spin)
 
         self.tab_widget.addTab(self.hyperparams_tab, "Hyperparamètres")
 
@@ -199,6 +244,43 @@ class ConfigDialog(QDialog):
 
         self.tab_widget.addTab(self.regime_detection_tab, "Détection Régime")
 
+        # Onglet Pipeline de Données
+        self.data_pipeline_tab = QWidget()
+        self.data_pipeline_layout = QFormLayout(self.data_pipeline_tab)
+
+        # Section Sélection des Paires
+        self.pair_selection_group = QGroupBox("Sélection des Paires")
+        self.pair_selection_layout = QVBoxLayout(self.pair_selection_group)
+        self.data_pipeline_layout.addRow(self.pair_selection_group)
+
+        self.pair_checkboxes = {}
+        # Assuming assets are defined in data_config.yaml under data_sources[0].assets
+        available_assets = self.data_config.get('data_sources', [{}])[0].get('assets', [])
+        for asset in available_assets:
+            checkbox = QCheckBox(asset)
+            checkbox.setChecked(True) # Default to all selected for now
+            self.pair_selection_layout.addWidget(checkbox)
+            self.pair_checkboxes[asset] = checkbox
+
+        # Section Paramètres de Chunking
+        self.chunking_group = QGroupBox("Paramètres de Chunking")
+        self.chunking_layout = QFormLayout(self.chunking_group)
+        self.data_pipeline_layout.addRow(self.chunking_group)
+
+        self.chunk_size_spin = QDoubleSpinBox()
+        self.chunk_size_spin.setDecimals(0)
+        self.chunk_size_spin.setSingleStep(1)
+        self.chunk_size_spin.setValue(self.data_config.get('data_pipeline', {}).get('processing', {}).get('chunk_size', 1000))
+        self.chunking_layout.addRow(QLabel("Taille de Chunk:"), self.chunk_size_spin)
+
+        self.num_chunks_in_memory_spin = QDoubleSpinBox()
+        self.num_chunks_in_memory_spin.setDecimals(0)
+        self.num_chunks_in_memory_spin.setSingleStep(1)
+        self.num_chunks_in_memory_spin.setValue(self.data_config.get('data_pipeline', {}).get('processing', {}).get('num_chunks_in_memory', 3))
+        self.chunking_layout.addRow(QLabel("Chunks en Mémoire:"), self.num_chunks_in_memory_spin)
+
+        self.tab_widget.addTab(self.data_pipeline_tab, "Pipeline de Données")
+
         # Boutons Appliquer et Annuler
         button_layout = QHBoxLayout()
         self.apply_save_button = QPushButton("Appliquer & Enregistrer")
@@ -232,20 +314,35 @@ class ConfigDialog(QDialog):
                 return yaml.safe_load(f) or {}
         return {}
 
+    def _load_data_config(self):
+        if self.data_config_path.exists():
+            with open(self.data_config_path, 'r') as f:
+                return yaml.safe_load(f) or {}
+        return {}
+
     def _apply_and_save(self):
         # Update DBE config
         self._run_cli_command(["update-config", "--type", "dbe", "--section", "risk_parameters", "--key", "min_sl_pct", "--value", str(self.min_sl_spin.value())])
         self._run_cli_command(["update-config", "--type", "dbe", "--section", "risk_parameters", "--key", "max_sl_pct", "--value", str(self.max_sl_spin.value())])
 
+        # Update Risk Modulation config
+        self._run_cli_command(["update-config", "--type", "environment", "--section", "risk_modulation", "--key", "drawdown_sl_factor", "--value", str(self.drawdown_sl_factor_spin.value())])
+        self._run_cli_command(["update-config", "--type", "environment", "--section", "risk_modulation", "--key", "aggressive_mode_winrate_trigger", "--value", str(self.aggressive_mode_winrate_trigger_spin.value())])
+
         # Update Reward config
         self._run_cli_command(["update-config", "--type", "dbe", "--section", "reward", "--key", "winrate_threshold", "--value", str(self.winrate_threshold_spin.value())])
         self._run_cli_command(["update-config", "--type", "dbe", "--section", "reward", "--key", "inaction_factor", "--value", str(self.inaction_factor_spin.value())])
         self._run_cli_command(["update-config", "--type", "dbe", "--section", "reward", "--key", "min_action_frequency", "--value", str(self.min_action_frequency_spin.value())])
+        self._run_cli_command(["update-config", "--type", "dbe", "--section", "reward", "--key", "efficiency_threshold", "--value", str(self.efficiency_threshold_spin.value())])
+        self._run_cli_command(["update-config", "--type", "dbe", "--section", "reward", "--key", "efficiency_boost_factor", "--value", str(self.efficiency_boost_factor_spin.value())])
 
         # Update Learning config
         self._run_cli_command(["update-config", "--type", "dbe", "--section", "learning", "--key", "learning_rate_range", "--value", f"[{self.lr_min_spin.value()}, {self.lr_max_spin.value()}]"])
         self._run_cli_command(["update-config", "--type", "dbe", "--section", "learning", "--key", "ent_coef_range", "--value", f"[{self.ent_coef_min_spin.value()}, {self.ent_coef_max_spin.value()}]"])
         self._run_cli_command(["update-config", "--type", "dbe", "--section", "learning", "--key", "gamma_range", "--value", f"[{self.gamma_min_spin.value()}, {self.gamma_max_spin.value()}]"])
+        self._run_cli_command(["update-config", "--type", "dbe", "--section", "learning", "--key", "batch_size", "--value", str(int(self.batch_size_spin.value()))])
+        self._run_cli_command(["update-config", "--type", "dbe", "--section", "learning", "--key", "prioritized_replay_alpha", "--value", str(self.prioritized_replay_alpha_spin.value())])
+        self._run_cli_command(["update-config", "--type", "dbe", "--section", "learning", "--key", "prioritized_replay_beta", "--value", str(self.prioritized_replay_beta_spin.value())])
 
         # Update Modes config
         for regime, fields in self.regime_fields.items():
@@ -264,12 +361,20 @@ class ConfigDialog(QDialog):
         self._run_cli_command(["update-config", "--type", "environment", "--section", "environment_parameters", "--key", "ema_ratio_threshold", "--value", str(self.ema_ratio_thresh_spin.value())])
         self._run_cli_command(["update-config", "--type", "environment", "--section", "environment_parameters", "--key", "atr_pct_threshold", "--value", str(self.atr_pct_thresh_spin.value())])
 
+        # Update Data Pipeline config
+        # For pair selection, we need to update the assets list in data_config.yaml
+        selected_assets = [asset for asset, checkbox in self.pair_checkboxes.items() if checkbox.isChecked()]
+        self._run_cli_command(["update-config", "--type", "data", "--section", "data_sources.0", "--key", "assets", "--value", str(selected_assets)])
+
+        self._run_cli_command(["update-config", "--type", "data", "--section", "data_pipeline.processing", "--key", "chunk_size", "--value", str(int(self.chunk_size_spin.value()))])
+        self._run_cli_command(["update-config", "--type", "data", "--section", "data_pipeline.processing", "--key", "num_chunks_in_memory", "--value", str(int(self.num_chunks_in_memory_spin.value()))])
+
         print("Configuration mise à jour et enregistrée via CLI.")
         self.accept()
 
     def _run_cli_command(self, args):
         python_executable = str(Path("/home/morningstar/miniconda3/envs/trading_env/bin/python"))
-        cli_script = str(Path(__file__).parent.parent.parent.parent / 'cli' / 'adan_cli.py')
+        cli_script = str(Path(__file__).parent.parent.parent.parent / 'ADAN' / 'cli' / 'adan_cli.py')
         
         process = QProcess(self) # Use a local process for each command
         process.start(python_executable, [cli_script] + args)

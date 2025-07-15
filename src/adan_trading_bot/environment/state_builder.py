@@ -79,8 +79,12 @@ class StateBuilder:
                 indices.append(-1)
         
         # Check if the indices are in descending order (higher frequency first)
-        if not all(i > j for i, j in zip(indices, indices[1:])):
+        if not all(i < j for i, j in zip(indices, indices[1:])):
             logger.warning(f"Timeframes should be ordered from highest to lowest frequency. Got: {self.timeframes}")
+            # Reorder timeframes to ensure correct order
+            sorted_tfs = sorted(zip(indices, self.timeframes), key=lambda x: x[0])
+            self.timeframes = [tf for _, tf in sorted_tfs]
+            logger.info(f"Reordered timeframes to: {self.timeframes}")
     
     def _set_default_features(self) -> None:
         """Set default features for each timeframe if not specified."""
@@ -133,8 +137,10 @@ class StateBuilder:
         """
         Apply normalization to the observation tensor.
         
-        This is a placeholder that can be overridden by subclasses to implement
-        specific normalization strategies (e.g., z-score, min-max, etc.).
+        This implementation applies the following normalization:
+        1. For price features (open, high, low, close), we calculate returns relative to the previous close
+        2. For volume, we calculate the log of the volume divided by its mean
+        3. For other features, we apply z-score normalization
         
         Args:
             observation: The 3D observation tensor to normalize
@@ -142,16 +148,79 @@ class StateBuilder:
         Returns:
             Normalized observation tensor
         """
-        # Default implementation: simple min-max scaling to [0, 1] per feature
-        # Skip this if the values are already normalized
-        if np.max(np.abs(observation)) > 1.0:
-            # Avoid division by zero
-            max_vals = np.max(np.abs(observation), axis=1, keepdims=True)
-            max_vals[max_vals < 1e-8] = 1.0  # Avoid division by zero
+        if observation.size == 0:
+            return observation
             
-            observation = observation / max_vals
+        # Make a copy to avoid modifying the original
+        normalized = observation.copy()
+        num_timeframes, window_size, num_features = normalized.shape
+        
+        # Process each timeframe and feature
+        for tf_idx in range(num_timeframes):
+            tf = self.timeframes[tf_idx]
+            features = self.features_per_timeframe[tf]
             
-        return observation
+            # Process each feature
+            for feat_idx, feature in enumerate(features):
+                # Get the feature values
+                values = normalized[tf_idx, :, feat_idx].copy()
+                
+                # Skip if all values are the same
+                if np.max(values) - np.min(values) < 1e-8:
+                    normalized[tf_idx, :, feat_idx] = 0.0
+                    continue
+                
+                # Process based on feature type
+                if feature in ['open', 'high', 'low', 'close']:
+                    # For price features, calculate returns
+                    if feature == 'close':
+                        # For close, calculate returns from previous close
+                        returns = np.zeros_like(values)
+                        if len(values) > 1:
+                            returns[1:] = (values[1:] / values[:-1]) - 1.0
+                        # Clip extreme returns to avoid outliers
+                        returns = np.clip(returns, -0.1, 0.1)  # 10% max move
+                        normalized[tf_idx, :, feat_idx] = returns
+                    else:
+                        # For open/high/low, calculate relative to close
+                        close_idx = features.index('close')
+                        close_prices = normalized[tf_idx, :, close_idx]
+                        # Avoid division by zero
+                        close_prices = np.where(np.abs(close_prices) < 1e-8, 1.0, close_prices)
+                        normalized[tf_idx, :, feat_idx] = (values / close_prices) - 1.0
+                        
+                elif feature == 'volume':
+                    # For volume, calculate log(volume / mean_volume)
+                    mean_vol = np.mean(values[values > 0])
+                    if mean_vol > 1e-8:
+                        log_vol = np.log(values / mean_vol + 1e-8)
+                        # Clip extreme values
+                        log_vol = np.clip(log_vol, -5, 5)
+                        # Scale to [-1, 1]
+                        normalized[tf_idx, :, feat_idx] = log_vol / 5.0
+                    else:
+                        normalized[tf_idx, :, feat_idx] = 0.0
+                        
+                elif feature == 'minutes_since_update':
+                    # For minutes since update, scale to [0, 1]
+                    max_minutes = np.max(values)
+                    if max_minutes > 0:
+                        normalized[tf_idx, :, feat_idx] = values / max_minutes
+                    else:
+                        normalized[tf_idx, :, feat_idx] = 0.0
+                        
+                else:
+                    # For other features, apply z-score normalization
+                    mean_val = np.mean(values)
+                    std_val = np.std(values)
+                    if std_val > 1e-8:
+                        z_scores = (values - mean_val) / std_val
+                        # Clip extreme values
+                        normalized[tf_idx, :, feat_idx] = np.clip(z_scores, -3, 3) / 3.0
+                    else:
+                        normalized[tf_idx, :, feat_idx] = 0.0
+        
+        return normalized
     
     def _setup_feature_indices(self) -> None:
         """Precompute feature indices for faster access during observation building."""
@@ -167,9 +236,9 @@ class StateBuilder:
             num_features = len(self.features_per_timeframe[tf])
             self.max_features = max(self.max_features, num_features)
     
-    def build_observation(self, data_slice: pd.DataFrame) -> np.ndarray:
+    def build_observation(self, data: pd.DataFrame) -> np.ndarray:
         """
-        Build a 3D observation tensor from the given data slice.
+        Build a 3D observation tensor from the given data.
         
         The observation tensor has shape (num_timeframes, window_size, num_features)
         where:
@@ -178,8 +247,9 @@ class StateBuilder:
         - num_features: Number of features per timeframe
         
         Args:
-            data_slice: DataFrame containing the window of data to build the observation from.
-                       Must have columns prefixed with timeframe (e.g., '5m_open', '1h_close').
+            data: DataFrame containing the data to build the observation from.
+                  Must have columns prefixed with timeframe (e.g., '5m_open', '1h_close').
+                  The most recent data should be at the end of the DataFrame.
         
         Returns:
             A 3D numpy array of shape (num_timeframes, window_size, num_features)
@@ -187,12 +257,16 @@ class StateBuilder:
         Raises:
             ValueError: If the input data doesn't match expected format or is empty
         """
-        if data_slice is None or data_slice.empty:
-            raise ValueError("Input data slice is empty")
+        if data is None or data.empty:
+            raise ValueError("Input data is empty")
             
-        if len(data_slice) != self.window_size:
-            logger.warning(f"Expected window_size={self.window_size}, got {len(data_slice)}. "
-                         f"This may cause issues with the observation shape.")
+        # Ensure we have enough data points
+        if len(data) < self.window_size:
+            logger.warning(f"Not enough data points. Got {len(data)}, need at least {self.window_size}. "
+                         f"Will pad with zeros.")
+            
+        # Take the most recent window_size data points
+        data_slice = data.iloc[-self.window_size:].copy()
             
         # Initialize the 3D observation array
         num_timeframes = len(self.timeframes)
@@ -214,14 +288,13 @@ class StateBuilder:
                     
                     # Ensure we have the right number of values
                     if len(values) < self.window_size:
-                        # Pad with zeros if we don't have enough values
-                        padded = np.zeros(self.window_size, dtype=np.float32)
+                        # Pad with the first value if we don't have enough values
+                        padded = np.full(self.window_size, values[0] if len(values) > 0 else 0, 
+                                       dtype=np.float32)
                         padded[-len(values):] = values
                         values = padded
-                    elif len(values) > self.window_size:
-                        # Truncate if we have too many values
-                        values = values[-self.window_size:]
                     
+                    # Store in the observation array
                     observation[tf_idx, :, feat_idx] = values
                 else:
                     # Feature not found, leave as zeros

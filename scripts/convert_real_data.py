@@ -389,16 +389,28 @@ def main() -> None:
         config = load_config(Path(args.config))
         
         # Get assets from config
-        data_pipeline = config['data_pipeline']
-        if data_pipeline['source'] == 'ccxt':
-            assets = data_pipeline['ccxt_download']['symbols']
-        else:
-            # For local data, we'd need to scan the directory
-            raise NotImplementedError("Local data source not yet implemented")
+        data_sources = config['data_sources']
+        assets = []
+        
+        # Extract assets from all data sources
+        for source in data_sources:
+            if 'assets' in source:
+                assets.extend(source['assets'])
+        
+        # Remove duplicates and sort for consistency
+        assets = sorted(list(set(assets)))
+        
+        if not assets:
+            raise ValueError("No assets found in configuration")
         
         # Process each asset
         for asset in assets:
-            process_asset(asset, config)
+            # Add USDT suffix if not present
+            asset_name = asset
+            if not asset.endswith('USDT'):
+                asset_name = f"{asset}USDT"
+            logger.info(f"Processing {asset_name}...")
+            process_asset(asset_name, config)
             
         logger.info("Data conversion completed successfully.")
         

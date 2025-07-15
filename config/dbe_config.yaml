@@ -9,3 +9,10 @@ reward:
   max_boost: 2.0
   inaction_factor: 0.15  # Augmenté pour une meilleure incitation
   min_action_frequency: 0.05  # Fréquence minimale attendue
+  efficiency_threshold: 0.70 # Nouveau paramètre: Seuil d'efficacité
+  efficiency_boost_factor: 1.2 # Nouveau paramètre: Facteur de boost d'efficacité
+
+learning:
+  batch_size: 256
+  prioritized_replay_alpha: 0.6
+  prioritized_replay_beta: 0.4

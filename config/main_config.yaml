@@ -7,18 +7,18 @@
 # Configuration des données
 data:
   # Répertoire des données
-  data_dir: "data/processed"
+  data_dir: "data/final"
   
   # Paires de trading disponibles (5 paires majeures)
-  symbols: 
-    - "BTC/USDT"    # Bitcoin - La cryptomonnaie la plus importante par capitalisation
-    - "ETH/USDT"    # Ethereum - La deuxième plus grande cryptomonnaie
-    - "SOL/USDT"    # Solana - Une blockchain performante et populaire
-    - "XRP/USDT"    # Ripple - Une cryptomonnaie de paiement majeure
-    - "ADA/USDT"    # Cardano - Une plateforme de contrats intelligents concurrente d'Ethereum
+  assets: 
+    - "BTC"    # Bitcoin - La cryptomonnaie la plus importante par capitalisation
+    - "ETH"    # Ethereum - La deuxième plus grande cryptomonnaie
+    - "SOL"    # Solana - Une blockchain performante et populaire
+    - "XRP"    # Ripple - Une cryptomonnaie de paiement majeure
+    - "ADA"    # Cardano - Une plateforme de contrats intelligents concurrente d'Ethereum
   
-  # Timeframes disponibles
-  timeframes: ["5m", "1h", "4h"]
+  # Timeframes disponibles (du plus long au plus court)
+  timeframes: ["4h", "1h", "5m"]
   
   # Colonnes de caractéristiques
   features: ["open", "high", "low", "close", "volume"]
@@ -29,7 +29,7 @@ agent:
   algorithm: "PPO"
   
   # Type de politique
-  policy: "MultiInputCnnPolicy"
+  policy: "MultiInputPolicy"
   
   # Nombre total de pas d'entraînement
   total_timesteps: 500000

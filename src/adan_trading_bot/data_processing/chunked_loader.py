@@ -67,7 +67,14 @@ class ChunkedDataLoader:
         self._initialize_loader()
     
     def _initialize_loader(self) -> None:
-        """Initialize the loader by scanning the data directory and setting up file handles."""
+        """
+        Initialize the loader by scanning the data directory and setting up file handles.
+        
+        This method looks for data files in the following locations:
+        1. data_dir/ASSET/train.parquet (e.g., data/final/BTC/train.parquet)
+        2. data_dir/ASSET/val.parquet
+        3. data_dir/ASSET/test.parquet
+        """
         if not self.data_dir.exists():
             raise FileNotFoundError(f"Data directory not found: {self.data_dir}")
         
@@ -77,46 +84,45 @@ class ChunkedDataLoader:
         
         # Initialize parquet file handles and row counts for each asset
         for asset in self.assets_list:
-            asset_filename = self._get_asset_filename(asset)
+            asset_name = self._get_asset_filename(asset)
             asset_files = {}
             
-            # Find the asset's data files across all timeframes
-            for tf in self.timeframes:
-                tf_dir = self.data_dir / tf
-                asset_file = tf_dir / f"{asset_filename}.parquet"
-                
-                if not asset_file.exists():
-                    logger.warning(f"Data file not found for {asset} {tf}: {asset_file}")
-                    continue
-                    
-                try:
-                    # Open the parquet file
-                    parquet_file = pq.ParquetFile(asset_file)
-                    asset_files[tf] = {
-                        'file': parquet_file,
-                        'rows': parquet_file.metadata.num_rows
-                    }
-                    
-                    # Log the available columns for the first asset and timeframe (for debugging)
-                    if asset == self.assets_list[0] and tf == self.timeframes[0]:
-                        schema = parquet_file.schema_arrow
-                        logger.info(f"Available columns for {asset} {tf}: {schema.names[:10]}...")
-                        
-                except Exception as e:
-                    logger.error(f"Error loading {asset_file}: {e}")
-                    continue
+            # Look for the split file in the asset directory
+            asset_dir = self.data_dir / asset_name
+            asset_file = asset_dir / f"{self.split}.parquet"
             
-            if not asset_files:
-                logger.warning(f"No valid data files found for {asset} in any timeframe")
+            if not asset_file.exists():
+                logger.warning(f"Data file not found for {asset} in {asset_file}")
                 continue
                 
-            self.asset_files[asset] = asset_files
-            # Use the minimum row count across all timeframes for this asset
-            self.asset_row_counts[asset] = min(f['rows'] for f in asset_files.values())
-            
-            # For backward compatibility, store the first timeframe's file as the main one
-            first_tf = next(iter(asset_files))
-            self.asset_parquet_files[asset] = asset_files[first_tf]['file']
+            try:
+                # Open the parquet file
+                parquet_file = pq.ParquetFile(asset_file)
+                
+                # For each timeframe, we'll use the same file but filter columns by prefix
+                for tf in self.timeframes:
+                    asset_files[tf] = {
+                        'file': parquet_file,
+                        'rows': parquet_file.metadata.num_rows,
+                        'path': str(asset_file)  # Store the path for debugging
+                    }
+                
+                # Log the available columns for the first asset (for debugging)
+                if asset == self.assets_list[0]:
+                    schema = parquet_file.schema_arrow
+                    logger.info(f"Loaded {asset} from {asset_file}")
+                    logger.info(f"Available columns: {schema.names[:10]}...")
+                
+                self.asset_files[asset] = asset_files
+                self.asset_row_counts[asset] = parquet_file.metadata.num_rows
+                
+                # Store the first timeframe's file for backward compatibility
+                first_tf = next(iter(asset_files))
+                self.asset_parquet_files[asset] = asset_files[first_tf]['file']
+                
+            except Exception as e:
+                logger.error(f"Error loading {asset_file}: {e}")
+                continue
         
         if not self.asset_parquet_files:
             raise ValueError(f"No valid asset files found in {self.data_dir} for split '{self.split}'")
@@ -130,22 +136,49 @@ class ChunkedDataLoader:
     
     def _discover_assets(self) -> None:
         """Discover all available assets in the data directory."""
-        # Look for parquet files in the timeframe subdirectories
-        for tf in self.timeframes:
-            tf_dir = self.data_dir / tf
-            if not tf_dir.exists():
-                logger.warning(f"Timeframe directory not found: {tf_dir}")
+        # Si des actifs sont spécifiés, on les utilise
+        if self.assets_list:
+            logger.info(f"Using specified assets: {', '.join(self.assets_list)}")
+            return
+            
+        # Sinon, on essaie de découvrir les actifs disponibles
+        for asset_dir in self.data_dir.iterdir():
+            if not asset_dir.is_dir():
                 continue
                 
-            # Find all parquet files in this timeframe directory
-            for parquet_file in tf_dir.glob("*.parquet"):
-                # Extract asset name from filename (e.g., ARBUSDT.parquet -> ARBUSDT)
-                asset = parquet_file.stem
-                # Normalize symbol format (e.g., ARBUSDT -> ARB/USDT)
-                if asset.endswith("USDT"):
-                    symbol = f"{asset[:-4]}/USDT"
-                    if symbol not in self.assets_list:
-                        self.assets_list.append(symbol)
+            # Vérifier si c'est un dossier d'actif (par exemple, BTC, ETH, etc.)
+            asset_name = asset_dir.name
+            if len(asset_name) <= 5:  # Noms courts comme BTC, ETH, etc.
+                # Vérifier s'il y a des fichiers de données pour cet actif
+                for tf in self.timeframes:
+                    # Chercher des fichiers comme BTC_1h_train.parquet, etc.
+                    for split in ['train', 'val', 'test']:
+                        file_pattern = f"{asset_name}_*_{split}.parquet"
+                        if any(asset_dir.glob(file_pattern)):
+                            symbol = f"{asset_name}/USDT"
+                            if symbol not in self.assets_list:
+                                self.assets_list.append(symbol)
+                                logger.info(f"Found asset data for {symbol} in {asset_dir}")
+                            break
+            
+        # Si on n'a toujours pas trouvé d'actifs, essayer l'ancienne méthode
+        if not self.assets_list:
+            # Look for parquet files in the timeframe subdirectories (ancienne méthode)
+            for tf in self.timeframes:
+                tf_dir = self.data_dir / tf
+                if not tf_dir.exists():
+                    logger.warning(f"Timeframe directory not found: {tf_dir}")
+                    continue
+                    
+                # Find all parquet files in this timeframe directory
+                for parquet_file in tf_dir.glob("*.parquet"):
+                    # Extract asset name from filename (e.g., ARBUSDT.parquet -> ARBUSDT)
+                    asset = parquet_file.stem
+                    # Normalize symbol format (e.g., ARBUSDT -> ARB/USDT)
+                    if asset.endswith("USDT"):
+                        symbol = f"{asset[:-4]}/USDT"
+                        if symbol not in self.assets_list:
+                            self.assets_list.append(symbol)
         
         # Sort assets for consistent ordering
         self.assets_list = sorted(self.assets_list)
@@ -156,8 +189,20 @@ class ChunkedDataLoader:
         logger.info(f"Discovered {len(self.assets_list)} assets: {', '.join(self.assets_list)}")
         
     def _get_asset_filename(self, symbol: str) -> str:
-        """Convert symbol to filename format (e.g., ARB/USDT -> ARBUSDT)."""
-        return symbol.replace("/", "")
+        """
+        Convert symbol to filename format.
+        Examples:
+            - ARB/USDT -> ARB
+            - BTC/USDT -> BTC
+            - BTC -> BTC
+        """
+        # Si le symbole contient un slash, on prend la partie avant
+        if '/' in symbol:
+            return symbol.split('/')[0]
+        # Si le symbole se termine par USDT, on le retire
+        if symbol.endswith('USDT'):
+            return symbol[:-4]
+        return symbol
     
     def load_chunk(self, chunk_index: int) -> Dict[str, Dict[str, pd.DataFrame]]:
         """
@@ -170,6 +215,9 @@ class ChunkedDataLoader:
             Nested dictionary mapping asset symbols to timeframes to DataFrames
             Example: {'ARB/USDT': {'5m': df_5m, '1h': df_1h}, ...}
         """
+        if not self.asset_files:
+            raise RuntimeError("No asset files loaded. Call _initialize_loader() first.")
+            
         if chunk_index >= self.total_chunks:
             raise IndexError(f"Chunk index {chunk_index} out of range (0-{self.total_chunks-1})")
             
@@ -178,42 +226,69 @@ class ChunkedDataLoader:
         end_row = min(start_row + self.chunk_size, min(self.asset_row_counts.values()))
         
         for asset, tf_files in self.asset_files.items():
-            for tf, file_info in tf_files.items():
-                parquet_file = file_info['file']
-                try:
-                    # Read the chunk
-                    table = parquet_file.read_row_group(chunk_index)
-                    df = table.to_pandas()
+            # We only need to read the file once per asset since all timeframes are in the same file
+            if not tf_files:
+                logger.warning(f"No timeframes found for asset {asset}")
+                continue
+                
+            # Get the first timeframe's file (they all point to the same file)
+            tf = next(iter(tf_files))
+            file_info = tf_files[tf]
+            parquet_file = file_info['file']
+            
+            try:
+                # Read the chunk
+                table = parquet_file.read_row_group(chunk_index)
+                df = table.to_pandas()
+                
+                # Set timestamp as index if it exists
+                if 'timestamp' in df.columns:
+                    df = df.set_index('timestamp')
+                
+                # Ensure the index is a DatetimeIndex
+                if not isinstance(df.index, pd.DatetimeIndex):
+                    try:
+                        df.index = pd.to_datetime(df.index)
+                    except Exception as e:
+                        logger.error(f"Could not convert index to datetime for {asset}: {e}")
+                        continue
+                
+                # For each timeframe, extract the relevant columns
+                for tf in self.timeframes:
+                    # Get columns for this timeframe
+                    tf_prefix = f"{tf}_"
+                    tf_columns = [col for col in df.columns if col.startswith(tf_prefix)]
                     
-                    # Set timestamp as index if it exists
-                    if 'timestamp' in df.columns:
-                        df = df.set_index('timestamp')
+                    if not tf_columns:
+                        logger.warning(f"No columns found for timeframe {tf} in asset {asset}")
+                        chunk_data[asset][tf] = pd.DataFrame()
+                        continue
                     
-                    # Ensure the index is a DatetimeIndex
-                    if not isinstance(df.index, pd.DatetimeIndex):
-                        try:
-                            df.index = pd.to_datetime(df.index)
-                        except Exception as e:
-                            logger.error(f"Could not convert index to datetime for {asset} {tf}: {e}")
-                            continue
+                    # Extract columns for this timeframe
+                    tf_df = df[tf_columns].copy()
                     
-                    # Filter features for this timeframe
+                    # Remove the timeframe prefix from column names
+                    tf_df.columns = [col[len(tf_prefix):] for col in tf_columns]
+                    
+                    # Filter features if specified
                     if tf in self.features_by_timeframe:
-                        # Keep only the features specified for this timeframe
-                        features = [f for f in self.features_by_timeframe[tf] if f in df.columns]
+                        features = [f for f in self.features_by_timeframe[tf] if f in tf_df.columns]
                         if features:
-                            df = df[features]
+                            tf_df = tf_df[features]
                     
                     # Add to chunk data
-                    chunk_data[asset][tf] = df
-                    
-                except Exception as e:
-                    logger.error(f"Error loading chunk {chunk_index} for {asset} {tf}: {e}", exc_info=True)
+                    chunk_data[asset][tf] = tf_df
+                
+            except Exception as e:
+                logger.error(f"Error loading chunk {chunk_index} for {asset}: {e}", exc_info=True)
+                # Initialize empty dataframes for all timeframes
+                for tf in self.timeframes:
                     chunk_data[asset][tf] = pd.DataFrame()
-                    continue
+                continue
         
         self.current_chunk_index = chunk_index
-        logger.debug(f"Loaded chunk {chunk_index} with {sum(len(tfs) for tfs in chunk_data.values())} asset-timeframe combinations")
+        loaded_count = sum(1 for asset_data in chunk_data.values() for df in asset_data.values() if not df.empty)
+        logger.debug(f"Loaded chunk {chunk_index} with {loaded_count} non-empty asset-timeframe combinations")
         
         return chunk_data
     

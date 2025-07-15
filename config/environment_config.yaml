@@ -19,7 +19,7 @@ data_pipeline:
   ccxt_download:
     symbol: "BTC/USDT"
   feature_engineering:
-    timeframes: ["1m"]
+    timeframes: ["1h"]
     indicators:
       - type: "ema"
         period: 9
@@ -30,19 +30,49 @@ data_pipeline:
     fillna: true
 
 feature_engineering:
-  timeframes: ["1m"]
+  timeframes: ["5m", "1h", "4h"]
   indicators:
-    ema_9:
-      type: "ema"
+    # Indicateurs de tendance
+    - type: "sma"
+      period: 20
+    - type: "ema"
       period: 9
-    ema_21:
-      type: "ema"
+    - type: "ema"
       period: 21
-    rsi_14:
-      type: "rsi"
+    - type: "ema"
+      period: 50
+    - type: "ema"
+      period: 200
+    - type: "macd"
+      fast: 12
+      slow: 26
+      signal: 9
+    # Indicateurs de momentum
+    - type: "rsi"
+      period: 14
+    - type: "stoch"
+      k: 14
+      d: 3
+      smooth_k: 3
+    - type: "cci"
+      period: 20
+    - type: "adx"
+      period: 14
+    - type: "williams"
+      period: 14
+    # Indicateurs de volatilité
+    - type: "bbands"
+      period: 20
+      std: 2.0
+    - type: "atr"
+      period: 14
+    # Indicateurs de volume
+    - type: "obv"
+    - type: "vwap"
+    - type: "mfi"
       period: 14
   fillna: true
-  columns_to_normalize: ["close", "volume"]
+  columns_to_normalize: ["open", "high", "low", "close", "volume"]
 
 # ------------------------------------------------------------------------------
 # Section imbriquée pour compatibilité legacy
@@ -142,6 +172,8 @@ risk_modulation:
   drawdown_threshold_defensif: 15.0  # Seuil augmenté pour passage en mode défensif (était 12.0)
   drawdown_threshold_agressif: 5.0   # Seuil ajusté pour mode agressif (était 7.0)
   drawdown_sl_factor: 0.75           # Facteur de stop-loss plus agressif (nouveau paramètre)
+  aggressive_mode_winrate_trigger: 0.60 # Nouveau paramètre: Seuil de winrate pour le mode agressif
+
 # ------------------------------------------------------------------------------
 # Pénalités et Récompenses (Shaping de la Récompense)
 # ------------------------------------------------------------------------------

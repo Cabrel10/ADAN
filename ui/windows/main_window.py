@@ -8,6 +8,7 @@ import json # Added json
 from ..widgets.chart_widget import ChartWidget
 from ..panels.side_panel import SidePanel
 from ..widgets.config_dialog import ConfigDialog # Import ConfigDialog
+from .data_manager_dialog import DataManagerDialog # Import DataManagerDialog
 
 class MainWindow(QMainWindow):
     def __init__(self, parent=None):
@@ -69,6 +70,7 @@ class MainWindow(QMainWindow):
         # Tools Menu
         tools_menu = menu_bar.addMenu("Outils")
         tools_menu.addAction("Configuration", self._open_config_dialog) # Add action to open ConfigDialog
+        tools_menu.addAction("Gestionnaire de Données", self._open_data_manager_dialog)
 
         # Help Menu
         help_menu = menu_bar.addMenu("Aide")
@@ -107,6 +109,10 @@ class MainWindow(QMainWindow):
     def _open_config_dialog(self):
         config_dialog = ConfigDialog(self)
         config_dialog.exec()
+
+    def _open_data_manager_dialog(self):
+        data_manager_dialog = DataManagerDialog(self)
+        data_manager_dialog.exec()
 
     def _download_data(self):
         # For now, hardcode some values for testing

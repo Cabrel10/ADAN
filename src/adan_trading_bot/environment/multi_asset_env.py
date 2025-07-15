@@ -71,23 +71,26 @@ class AdanTradingEnv(gym.Env):
             timeframes=self.config['data'].get('timeframes', ['5m', '1h', '4h'])
         )
         
-        # 3. Initialize portfolio manager
-        self.portfolio = PortfolioManager(
-            initial_balance=self.config['portfolio'].get('initial_balance', 10000.0),
-            max_leverage=self.config['portfolio'].get('max_leverage', 3.0),
-            risk_per_trade=self.config['portfolio'].get('risk_per_trade', 0.01)
-        )
+        # 3. Initialize portfolio manager with minimal required config
+        # Le PortfolioManager n'utilise que 'initial_capital' et 'trading_rules' de la configuration
+        portfolio_config = {
+            'initial_capital': float(self.config.get('initial_balance', 10000.0)),
+            'trading_rules': {
+                'commission_pct': float(self.config.get('trading_fees', 0.001))  # 0.1% par défaut
+            }
+        }
+        try:
+            self.portfolio = PortfolioManager(env_config=portfolio_config)
+            logger.info(f"PortfolioManager initialisé avec succès. Capital initial: {portfolio_config['initial_capital']} USDT")
+        except Exception as e:
+            logger.error(f"Erreur lors de l'initialisation du PortfolioManager: {str(e)}")
+            raise
         
-        # 4. Initialize order manager
-        self.order_manager = OrderManager(
-            slippage=self.config['trading'].get('slippage', 0.0005),
-            commission=self.config['trading'].get('commission', 0.0005)
-        )
+        # 4. Initialize order manager with portfolio manager
+        self.order_manager = OrderManager(portfolio_manager=self.portfolio)
         
-        # 5. Initialize reward calculator
-        self.reward_calculator = RewardCalculator(
-            config=self.config.get('rewards', {})
-        )
+        # 5. Initialize reward calculator with environment config
+        self.reward_calculator = RewardCalculator(env_config=self.config)
         
         # Set up action and observation spaces
         self._setup_spaces()
@@ -214,11 +217,24 @@ class AdanTradingEnv(gym.Env):
                 raise ValueError("No data available in the data loader")
             
             # Log chunk information
-            chunk_start = next(iter(self.current_chunk.values()))['timestamp'].iloc[0]
-            chunk_end = next(iter(self.current_chunk.values()))['timestamp'].iloc[-1]
+            first_asset = next(iter(self.current_chunk.keys()))
+            first_timeframe = next(iter(self.current_chunk[first_asset].keys()))
+            first_df = self.current_chunk[first_asset][first_timeframe]
+            
+            # Vérifier si l'index est un DatetimeIndex
+            if isinstance(first_df.index, pd.DatetimeIndex):
+                chunk_start = first_df.index[0]
+                chunk_end = first_df.index[-1]
+                num_steps = len(first_df)
+            else:
+                # Si l'index n'est pas un DatetimeIndex, on utilise les premières et dernières lignes
+                chunk_start = first_df.iloc[0].name if first_df.index.name else "unknown"
+                chunk_end = first_df.iloc[-1].name if first_df.index.name else "unknown"
+                num_steps = len(first_df)
+                
             logger.info(
                 f"Reset environment. Loaded chunk 0 with data from {chunk_start} to {chunk_end} "
-                f"({len(next(iter(self.current_chunk.values())))} steps)"
+                f"({num_steps} steps)"
             )
             
             # Initialize chunk metrics
@@ -311,39 +327,7 @@ class AdanTradingEnv(gym.Env):
         
         return observation, reward, terminated, truncated, info
     
-    def _init_components(self) -> None:
-        """Initialize all environment components."""
-        # 1. Initialize data loader for the current split
-        self._init_data_loader()
-        
-        # 2. Initialize state builder with window size
-        self.state_builder = StateBuilder(
-            window_size=self.config['state'].get('window_size', 30),
-            timeframes=self.config['data'].get('timeframes', ['5m', '1h', '4h'])
-        )
-        
-        # 3. Initialize portfolio manager
-        self.portfolio = PortfolioManager(
-            initial_balance=self.config['portfolio'].get('initial_balance', 10000.0),
-            max_leverage=self.config['portfolio'].get('max_leverage', 3.0),
-            risk_per_trade=self.config['portfolio'].get('risk_per_trade', 0.01)
-        )
-        
-        # 4. Initialize order manager
-        self.order_manager = OrderManager(
-            slippage=self.config['trading'].get('slippage', 0.0005),
-            commission=self.config['trading'].get('commission', 0.0005)
-        )
-        
-        # 5. Initialize reward calculator
-        self.reward_calculator = RewardCalculator(
-            config=self.config.get('rewards', {})
-        )
-        
-        # 5. Initialize state builder
-        self.state_builder = StateBuilder(
-            config=self.config.get('state', {})
-        )
+
     
     def _init_data_loader(self) -> None:
         """Initialize the chunked data loader."""
@@ -427,7 +411,16 @@ class AdanTradingEnv(gym.Env):
         
         # Get state shape from the state builder
         sample_asset = next(iter(self.current_data.keys()))
-        sample_data = self.current_data[sample_asset].iloc[0:1]
+        sample_timeframe = next(iter(self.current_data[sample_asset].keys()))
+        sample_df = self.current_data[sample_asset][sample_timeframe]
+        
+        # Get the first row as a Series
+        sample_data = sample_df.iloc[0:1] if not sample_df.empty else None
+        
+        if sample_data is None or sample_data.empty:
+            raise ValueError("Sample data is empty, cannot initialize observation space")
+            
+        # Get the state shape from the state builder
         state_shape = self.state_builder.get_observation_shape()
         
         # Create observation space as a dictionary with an entry per asset
@@ -522,13 +515,13 @@ class AdanTradingEnv(gym.Env):
                 logger.info(
                     f"Step {self.current_step} (Chunk {self.current_chunk_idx}, "
                     f"Step {self.step_in_chunk}): Reward={reward:.4f}, "
-                    f"Portfolio Value={self.portfolio.portfolio_value:.2f}"
+                    f"Portfolio Value={self.portfolio.total_capital:.2f}"
                 )
-            
+
             return observation, reward, terminated, truncated, info
-            
+
         except Exception as e:
-            logger.error(f"Error in step {self.current_step}: {str(e)}")
+            logger.error(f"Error in step {self.current_step}: {str(e)}", exc_info=True)
             # Return a zero observation and negative reward on error
             obs_shape = self.state_builder.get_observation_shape()
             zero_obs = {asset: np.zeros(obs_shape, dtype=np.float32) for asset in self.assets}
@@ -537,247 +530,125 @@ class AdanTradingEnv(gym.Env):
     def _initialize_chunk_metrics(self) -> None:
         """
         Initialize metrics for the current chunk.
-        
+
         This method is called at the start of each new chunk to set up tracking
         of chunk-specific metrics like optimal PnL and bonus calculations.
-        It performs the following operations:
-        1. Calculates the optimal PnL for the chunk based on price movements
-        2. Initializes tracking metrics for the chunk
-        3. Sets up reward calculation parameters
-        4. Logs the initialization details
-        
-        The optimal PnL is calculated based on the highest frequency timeframe
-        available in the data (typically 5m). This provides a realistic benchmark
-        for the agent's performance.
         """
         if not hasattr(self, 'portfolio') or not hasattr(self, 'current_data') or not self.current_data:
             logger.warning("Cannot initialize chunk metrics: Portfolio or data not available")
             return
-            
+
         try:
             # Get the highest frequency timeframe (first in the list)
             highest_tf = self.state_builder.timeframes[0] if hasattr(self.state_builder, 'timeframes') else '5m'
-            close_col = f"{highest_tf}_close"
-            
+
             # Get the first available asset's data for optimal PnL calculation
-            asset_name, chunk_data = next(iter(self.current_data.items()))
-            
-            if chunk_data.empty:
-                logger.warning(f"Empty data for {asset_name} in chunk {self.current_chunk_idx}")
-                return
-                
-            # Ensure we have the required columns
-            if close_col not in chunk_data.columns:
-                # Fall back to any close column if the exact one isn't found
-                close_cols = [col for col in chunk_data.columns if col.endswith('_close')]
-                if not close_cols:
-                    logger.warning(f"No close price column found in chunk {self.current_chunk_idx}")
+            asset_name, asset_data_by_tf = next(iter(self.current_data.items()))
+
+            # Find a valid dataframe to work with
+            if highest_tf not in asset_data_by_tf or asset_data_by_tf[highest_tf].empty:
+                # Fallback to any available timeframe if the primary is missing/empty
+                valid_tf = next((tf for tf, df in asset_data_by_tf.items() if not df.empty), None)
+                if not valid_tf:
+                    logger.warning(f"No valid data found for any timeframe for asset {asset_name} in chunk {self.current_chunk_idx}")
                     return
-                close_col = close_cols[0]
+                highest_tf = valid_tf
             
-            # Calculate price changes and optimal PnL
-            prices = chunk_data[close_col]
-            if len(prices) < 2:
-                logger.warning(f"Not enough data points for PnL calculation in chunk {self.current_chunk_idx}")
+            chunk_df = asset_data_by_tf[highest_tf]
+
+            if 'close' not in chunk_df.columns:
+                logger.warning(f"No 'close' price column found for {highest_tf} in chunk {self.current_chunk_idx}")
                 return
-                
+
+            prices = chunk_df['close']
+            if len(prices) < 2:
+                logger.warning(f"Not enough data points ({len(prices)}) for PnL calculation in chunk {self.current_chunk_idx}")
+                return
+
             price_changes = prices.pct_change().dropna()
-            
-            if len(price_changes) == 0:
+
+            if price_changes.empty:
                 logger.warning(f"No valid price changes in chunk {self.current_chunk_idx}")
                 return
-            
+
             # Calculate optimal PnL: sum of all positive returns (perfect trades)
             optimal_returns = (1 + price_changes[price_changes > 0]).prod()
-            optimal_pnl = (optimal_returns - 1) * self.portfolio.initial_value
-            optimal_pnl = max(0, optimal_pnl)  # Ensure non-negative
-            
+            optimal_pnl = (optimal_returns - 1) * self.portfolio.initial_capital
+            optimal_pnl = max(0, optimal_pnl)
+
             # Get reward configuration with defaults
             reward_config = self.config.get('reward', {})
             max_chunk_bonus = reward_config.get('max_chunk_bonus', 10.0)
-            min_chunk_size = reward_config.get('min_chunk_size', 100)  # Minimum steps for meaningful PnL
-            
+            min_chunk_size = reward_config.get('min_chunk_size', 100)
+
             # Adjust bonus based on chunk size
-            chunk_size = len(chunk_data)
+            chunk_size = len(chunk_df)
             size_factor = min(1.0, chunk_size / min_chunk_size) if min_chunk_size > 0 else 1.0
             adjusted_bonus = max_chunk_bonus * size_factor
-            
+
             # Set chunk metrics
             self.chunk_metrics = {
-                'start_value': float(self.portfolio.get_portfolio_value()),
+                'start_value': float(self.portfolio.total_capital),
                 'start_cash': float(self.portfolio.cash),
                 'optimal_pnl': float(optimal_pnl),
                 'max_bonus': float(adjusted_bonus),
-                'start_step': int(self.current_step),
-                'start_timestamp': self._get_current_timestamp().isoformat(),
-                'chunk_size': int(chunk_size),
-                'asset': str(asset_name),
-                'price_range': f"{prices.min():.8f}-{prices.max():.8f}",
-                'volatility': float(price_changes.std() * np.sqrt(365 * 24 * 60 / 5))  # Annualized
+                'chunk_size': chunk_size,
+                'size_factor': size_factor
             }
-            
-            # Log detailed initialization info
+
             logger.info(
-                f"Initialized chunk {self.current_chunk_idx} metrics:\n"
-                f"  Asset: {asset_name} ({chunk_size} steps, {highest_tf} timeframe)\n"
-                f"  Price range: {prices.min():.8f} - {prices.max():.8f} "
-                f"({((prices.max() - prices.min()) / prices.min() * 100):.2f}%)\n"
-                f"  Volatility: {self.chunk_metrics['volatility']:.2%} (annualized)\n"
-                f"  Start value: {self.chunk_metrics['start_value']:.2f} "
-                f"(Cash: {self.chunk_metrics['start_cash']:.2f})\n"
-                f"  Target PnL: {optimal_pnl:.2f} (max bonus: {adjusted_bonus:.2f})"
+                f"Initialized metrics for chunk {self.current_chunk_idx}: "
+                f"Optimal PnL={self.chunk_metrics['optimal_pnl']:.2f}, "
+                f"Max Bonus={self.chunk_metrics['max_bonus']:.2f}"
             )
-            
-            # Log sample price changes for debugging
-            if logger.isEnabledFor(logging.DEBUG):
-                sample_changes = price_changes.head(5).to_list()
-                logger.debug(
-                    f"Sample price changes for {asset_name} (first 5): "
-                    f"{[f'{x:.2%}' for x in sample_changes]}"
-                )
-                
+
         except Exception as e:
-            logger.error(
-                f"Error initializing metrics for chunk {self.current_chunk_idx}: {str(e)}",
-                exc_info=True
-            )
-            # Initialize with safe defaults
+            logger.error(f"Error initializing metrics for chunk {self.current_chunk_idx}: {e}", exc_info=True)
+            # Initialize with default safe values to allow continuation
             self.chunk_metrics = {
-                'start_value': float(self.portfolio.get_portfolio_value()),
+                'start_value': float(self.portfolio.total_capital),
                 'start_cash': float(self.portfolio.cash),
                 'optimal_pnl': 0.0,
                 'max_bonus': 0.0,
-                'start_step': int(self.current_step),
-                'start_timestamp': self._get_current_timestamp().isoformat(),
-                'error': str(e)
+                'chunk_size': 0,
+                'size_factor': 0.0
             }
-    
+
     def _handle_chunk_transition(self) -> None:
         """
         Handle the transition to the next chunk of data.
-        
-        This method is called when we've reached the end of the current chunk
-        and need to load the next one or terminate the episode. It performs the
-        following steps:
-        1. Saves metrics for the completed chunk
-        2. Loads the next chunk of data
-        3. Validates the loaded data
-        4. Initializes metrics for the new chunk
-        5. Updates portfolio and other components
-        
-        If any error occurs during the transition, the episode is marked as done.
         """
-        # Save chunk metrics before transitioning
-        prev_chunk_idx = self.current_chunk_idx
-        
-        try:
-            if hasattr(self, 'chunk_metrics'):
-                chunk_pnl = self.portfolio.get_portfolio_value() - self.chunk_metrics['start_value']
-                chunk_duration = self.current_step - self.chunk_metrics.get('start_step', 0)
-                optimal_pnl = self.chunk_metrics.get('optimal_pnl', 0)
-                pnl_ratio = (chunk_pnl / optimal_pnl) * 100 if optimal_pnl > 0 else 0.0
-                
-                logger.info(
-                    f"Completed chunk {prev_chunk_idx} (Steps: {chunk_duration}):\n"
-                    f"  PnL: {chunk_pnl:+.2f} ({pnl_ratio:.1f}% of optimal {optimal_pnl:.2f})\n"
-                    f"  Portfolio: {self.portfolio.get_portfolio_value():.2f} "
-                    f"(Start: {self.chunk_metrics['start_value']:.2f}, "
-                    f"Change: {chunk_pnl/self.chunk_metrics['start_value']*100 if self.chunk_metrics['start_value'] > 0 else 0:.1f}%)\n"
-                    f"  Positions: {len(self.portfolio.positions)} active"
-                )
-                
-                # Log detailed position information
-                if self.portfolio.positions:
-                    pos_info = []
-                    for asset, pos in self.portfolio.positions.items():
-                        if pos.amount > 0:  # Only show open positions
-                            pnl_pct = (pos.current_value / pos.cost_basis - 1) * 100 if pos.cost_basis > 0 else 0
-                            pos_info.append(
-                                f"{asset}: {pos.amount:.4f} @ {pos.avg_price:.8f} "
-                                f"(Cur: {pos.current_price:.8f}, PnL: {pnl_pct:+.1f}%)"
-                            )
-                    if pos_info:
-                        logger.info("  Positions detail:\n  - " + "\n  - ".join(pos_info))
-            
-            # Move to next chunk
-            self.current_chunk_idx += 1
-            
-            # Check if we've reached the end of available chunks
-            if self.current_chunk_idx >= len(self.data_loader):
-                self.done = True
-                logger.info(
-                    f"Episode complete: Reached the end of available data "
-                    f"(chunk {prev_chunk_idx} of {len(self.data_loader)-1})"
-                )
-                return
-                
-            # Load the next chunk
-            logger.debug(f"Loading chunk {self.current_chunk_idx}...")
-            self.current_data = self.data_loader.load_chunk(self.current_chunk_idx)
-            self.step_in_chunk = 0
-            
-            # Validate the loaded chunk
-            if not self.current_data:
-                raise ValueError(f"Chunk {self.current_chunk_idx} is empty")
-                
-            # Log chunk transition details
-            first_asset = next(iter(self.current_data.keys()))
-            chunk_df = self.current_data[first_asset]
-            chunk_start = chunk_df['timestamp'].iloc[0] if 'timestamp' in chunk_df.columns else 'N/A'
-            chunk_end = chunk_df['timestamp'].iloc[-1] if 'timestamp' in chunk_df.columns else 'N/A'
-            num_steps = len(chunk_df)
-            
-            # Log available assets and their data points
-            asset_info = []
-            for asset, df in self.current_data.items():
-                asset_info.append(f"{asset}: {len(df)} steps")
-                
-                # Log sample data for the first few assets
-                if len(asset_info) <= 3 and not df.empty:
-                    logger.debug(
-                        f"Sample data for {asset} (chunk {self.current_chunk_idx}):\n"
-                        f"  Time range: {df['timestamp'].iloc[0]} to {df['timestamp'].iloc[-1]}\n"
-                        f"  Columns: {', '.join(df.columns)}\n"
-                        f"  First row: {df.iloc[0].to_dict()}\n"
-                        f"  Last row: {df.iloc[-1].to_dict()}"
-                    )
-            
+        # Log metrics for the completed chunk
+        if hasattr(self, 'chunk_metrics') and self.chunk_metrics.get('start_value') is not None:
+            chunk_pnl = self.portfolio.total_capital - self.chunk_metrics['start_value']
+            optimal_pnl = self.chunk_metrics.get('optimal_pnl', 0)
+            pnl_ratio = (chunk_pnl / optimal_pnl) * 100 if optimal_pnl > 0 else 0.0
             logger.info(
-                f"Loaded chunk {self.current_chunk_idx} with {len(self.current_data)} assets:\n"
-                f"  Time range: {chunk_start} to {chunk_end} ({num_steps} steps)\n"
-                f"  Assets: {', '.join(asset_info[:5])}"
-                + (f" (+{len(asset_info)-5} more)" if len(asset_info) > 5 else "")
+                f"Completed chunk {self.current_chunk_idx}: PnL={chunk_pnl:+.2f} "
+                f"({pnl_ratio:.1f}% of optimal {optimal_pnl:.2f}). "
+                f"End Value: {self.portfolio.total_capital:.2f}"
             )
-            
-            # Initialize metrics for the new chunk
-            self._initialize_chunk_metrics()
-            
-            # Update components with new chunk information
-            if hasattr(self.portfolio, 'on_new_chunk'):
-                self.portfolio.on_new_chunk(self.current_chunk_idx)
-                
-            # Log memory usage for debugging
-            try:
-                import psutil
-                process = psutil.Process()
-                mem_info = process.memory_info()
-                logger.debug(
-                    f"Memory usage after loading chunk {self.current_chunk_idx}: "
-                    f"RSS={mem_info.rss / 1024 / 1024:.1f}MB, "
-                    f"VMS={mem_info.vms / 1024 / 1024:.1f}MB"
-                )
-            except ImportError:
-                pass  # psutil not available, skip memory logging
-                
-        except Exception as e:
-            logger.error(
-                f"Error during transition to chunk {self.current_chunk_idx}: {str(e)}\n"
-                f"Current chunk: {prev_chunk_idx}, Step: {self.current_step}",
-                exc_info=True
-            )
+
+        # Move to next chunk
+        self.current_chunk_idx += 1
+        
+        if self.current_chunk_idx >= len(self.data_loader):
             self.done = True
-            raise  # Re-raise to be handled by the caller
-    
+            logger.info(f"Episode complete: Reached the end of data after chunk {self.current_chunk_idx - 1}.")
+            return
+
+        logger.debug(f"Loading chunk {self.current_chunk_idx}...")
+        self.current_data = self.data_loader.load_chunk(self.current_chunk_idx)
+        self.step_in_chunk = 0
+
+        if not self.current_data:
+            self.done = True
+            logger.error(f"Stopping episode: Failed to load chunk {self.current_chunk_idx}, or chunk is empty.")
+            return
+
+        # Initialize metrics for the new chunk
+        self._initialize_chunk_metrics()
+
     def _execute_trades(self, action: np.ndarray) -> None:
         """
         Execute trades based on the action vector.
@@ -1248,6 +1119,13 @@ class AdanTradingEnv(gym.Env):
                     f"{max(len(df) for df in tf_data.values() if df is not None)} in chunk {self.current_chunk_idx}"
                 )
                 
+                # Log the available timeframes and their data shapes
+                for tf, df in tf_data.items():
+                    if df is not None:
+                        logger.debug(f"  - {tf}: {df.shape} columns: {df.columns.tolist()}")
+                    else:
+                        logger.debug(f"  - {tf}: No data")
+                
                 # Get the current window of data for each timeframe
                 combined_data = []
                 
@@ -1328,24 +1206,51 @@ class AdanTradingEnv(gym.Env):
                 if hasattr(self, 'include_portfolio_state') and self.include_portfolio_state:
                     self._add_portfolio_state_to_observation(merged_data)
                 
+                # Log the merged data before building the observation
+                logger.debug(f"Merged data for {asset}:")
+                logger.debug(f"  Shape: {merged_data.shape}")
+                logger.debug(f"  Columns: {merged_data.columns.tolist()}")
+                logger.debug(f"  First few rows:\n{merged_data.head(2).to_string()}")
+                
+                # Log the state builder configuration
+                logger.debug("StateBuilder configuration:")
+                logger.debug(f"  Timeframes: {self.state_builder.timeframes}")
+                logger.debug(f"  Features per timeframe: {self.state_builder.features_per_timeframe}")
+                logger.debug(f"  Window size: {self.state_builder.window_size}")
+                
                 # Build the 3D observation using the StateBuilder
-                obs_tensor = self.state_builder.build_observation(merged_data)
-                
-                # Validate the observation shape
-                expected_shape = self.state_builder.get_observation_shape()
-                if obs_tensor.shape != expected_shape:
-                    logger.warning(
-                        f"Unexpected observation shape for {asset}: {obs_tensor.shape} "
-                        f"(expected {expected_shape})"
-                    )
-                
-                # Log observation details for debugging
-                if self.current_step % 100 == 0:
+                try:
+                    obs_tensor = self.state_builder.build_observation(merged_data)
+                    
+                    # Log observation details
                     logger.info(
                         f"Observation for {asset}: shape={obs_tensor.shape}, "
-                        f"min={obs_tensor.min():.4f}, max={obs_tensor.max():.4f}, "
-                        f"mean={obs_tensor.mean():.4f}, NaN={np.isnan(obs_tensor).any()}"
+                        f"min={obs_tensor.min():.6f}, max={obs_tensor.max():.6f}, "
+                        f"mean={obs_tensor.mean():.6f}, std={obs_tensor.std():.6f}, "
+                        f"NaN={np.isnan(obs_tensor).any()}"
                     )
+                    
+                    # Log statistics for each timeframe and feature
+                    for tf_idx, tf in enumerate(self.state_builder.timeframes):
+                        for feat_idx, feat in enumerate(self.state_builder.features_per_timeframe[tf]):
+                            values = obs_tensor[tf_idx, :, feat_idx]
+                            logger.debug(
+                                f"  {tf} {feat}: min={values.min():.6f}, max={values.max():.6f}, "
+                                f"mean={values.mean():.6f}, std={values.std():.6f}"
+                            )
+                    
+                    # Validate the observation shape
+                    expected_shape = self.state_builder.get_observation_shape()
+                    if obs_tensor.shape != expected_shape:
+                        logger.warning(
+                            f"Unexpected observation shape for {asset}: {obs_tensor.shape} "
+                            f"(expected {expected_shape})"
+                        )
+                except Exception as e:
+                    logger.error(f"Error in build_observation: {str(e)}")
+                    logger.error(f"Merged data columns: {merged_data.columns.tolist()}")
+                    logger.error(f"Merged data shape: {merged_data.shape}")
+                    raise
                 
                 observation[asset] = obs_tensor
                 
@@ -1422,7 +1327,7 @@ class AdanTradingEnv(gym.Env):
             'step': self.current_step,
             'chunk_idx': self.current_chunk_idx,
             'step_in_chunk': self.step_in_chunk,
-            'portfolio_value': float(self.portfolio.get_portfolio_value()),
+            'portfolio_value': float(self.portfolio.total_capital),
             'cash': float(self.portfolio.cash),
             'positions': {k: float(v) for k, v in self.portfolio.positions.items()},
             'current_prices': self._get_current_prices(),

@@ -5,7 +5,7 @@ agent:
   # Algorithme RL: 'ppo', 'a2c', 'sac', 'td3'
   algorithm: "ppo"
   # Type de politique: 'MlpPolicy', 'CnnPolicy', 'MultiInputPolicy', 'MultiInputCnnPolicy'
-  policy_type: "MultiInputCnnPolicy"
+  policy_type: "MultiInputPolicy"
   # Nombre total d'étapes d'entraînement (adapté pour CPU)
   total_timesteps: 500000
   # Graine aléatoire pour la reproductibilité

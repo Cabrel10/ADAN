@@ -17,6 +17,7 @@ import os
 import json
 import numpy as np
 import pandas as pd
+import torch
 from pathlib import Path
 import sys
 from typing import Dict, Any, Optional, List, Tuple
@@ -140,12 +141,55 @@ def load_config(path: str) -> Dict[str, Any]:
     
     return config
 
-def setup_environment(config: Dict[str, Any]) -> Tuple[DummyVecEnv, Dict[str, Any]]:
-    """Initialise et configure l'environnement de trading."""
-    logger.info("Initialisation de l'environnement de trading...")
+def setup_environment(config: Dict[str, Any], mode: str = 'train') -> Tuple[DummyVecEnv, Dict[str, Any]]:
+    """
+    Initialise et configure l'environnement de trading.
+    
+    Args:
+        config: Configuration du modèle
+        mode: Mode d'exécution ('train', 'val', ou 'test')
+    """
+    logger.info(f"Initialisation de l'environnement de trading en mode {mode}...")
+    
+    # Configuration de base pour le chargement des données
+    data_config = {
+        'data': {
+            'data_dir': 'data/final',  # Répertoire racine des données
+            'chunk_size': 10000,
+            'assets': ['BTC', 'ETH', 'SOL', 'XRP', 'ADA'],  # Actifs disponibles
+            'timeframes': ['5m', '1h', '4h']  # Timeframes disponibles
+        },
+        'state': {
+            'window_size': 100,
+            'timeframes': ['5m', '1h', '4h']  # Tous les timeframes
+        },
+        'portfolio': {
+            'initial_balance': 20000.0,
+            'max_leverage': 3.0,
+            'risk_per_trade': 0.01
+        },
+        'trading': {
+            'commission': 0.001,
+            'slippage': 0.0005
+        },
+        'rewards': {
+            'risk_free_rate': 0.0,
+            'sharpe_ratio_annual': 252.0,
+            'sortino_ratio_annual': 252.0
+        }
+    }
+    
+    # Chargement de la configuration de l'environnement
+    env_config = load_config('config/environment_config.yaml')
+    
+    # Fusion des configurations (la plus spécifique écrase la moins spécifique)
+    full_config = {**data_config, **env_config, **config}
+    
+    # Ajout du split à la configuration
+    full_config['split'] = mode
     
     # Création de l'environnement
-    env = AdanTradingEnv(config=config)
+    env = AdanTradingEnv(config=full_config)
     
     # Enveloppement avec Monitor pour le suivi des récompenses
     env = Monitor(env)
@@ -154,7 +198,7 @@ def setup_environment(config: Dict[str, Any]) -> Tuple[DummyVecEnv, Dict[str, An
     vec_env = DummyVecEnv([lambda: env])
     
     # Normalisation des observations
-    if config.get('environment', {}).get('normalize_observations', True):
+    if full_config.get('environment', {}).get('normalize_observations', True):
         vec_env = VecNormalize(
             vec_env,
             norm_obs=True,
@@ -162,7 +206,7 @@ def setup_environment(config: Dict[str, Any]) -> Tuple[DummyVecEnv, Dict[str, An
             clip_obs=10.0
         )
     
-    return vec_env, env.get_metadata()
+    return vec_env, {'env': env, 'config': full_config}
 
 def setup_model(env: DummyVecEnv, config: Dict[str, Any]) -> PPO:
     """Initialise le modèle d'apprentissage par renforcement."""
@@ -181,7 +225,7 @@ def setup_model(env: DummyVecEnv, config: Dict[str, Any]) -> PPO:
     
     # Création du modèle
     model = PPO(
-        policy="MlpPolicy",
+        policy="MultiInputPolicy",
         env=env,
         learning_rate=agent_config.get('learning_rate', 3e-4),
         n_steps=agent_config.get('n_steps', 2048),
@@ -272,7 +316,7 @@ def train_model():
         Path(path).mkdir(parents=True, exist_ok=True)
     
     # Initialisation de l'environnement
-    env, env_metadata = setup_environment(config)
+    env, env_metadata = setup_environment(config, mode='train')
     
     # Initialisation du modèle
     if args.resume:

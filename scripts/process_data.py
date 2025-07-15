@@ -440,7 +440,7 @@ def process_asset_data(asset, timeframe, config, data_dir, processed_data_dir, s
         val_df_normalized.to_parquet(os.path.join(asset_dir, f"{asset}_{timeframe}_val.parquet"))
         test_df_normalized.to_parquet(os.path.join(asset_dir, f"{asset}_{timeframe}_test.parquet"))
         
-        logger.info(f"Données traitées sauvegardées pour {asset} ({timeframe})")
+        logger.info(f"Données traitées sauvegardées pour {asset} ({timeframe}) dans {processed_data_dir}/{asset}/")
         return True
     
     except Exception as e:
@@ -506,7 +506,8 @@ def main():
     # Traiter les données pour chaque actif et timeframe
     assets = data_cfg.get('assets', [])
     # Utiliser timeframes_to_process au lieu de timeframes pour être cohérent avec la nouvelle structure
-    timeframes = data_cfg.get('timeframes_to_process', data_cfg.get('timeframes', ["1h"]))
+    data_pipeline_cfg = data_cfg.get('data_pipeline', {})
+    timeframes = data_pipeline_cfg.get('timeframes_to_process', data_cfg.get('feature_engineering', {}).get('timeframes', ["1h"]))
     
     logger.info(f"Actifs à traiter: {assets}")
     logger.info(f"Timeframes à traiter: {timeframes}")

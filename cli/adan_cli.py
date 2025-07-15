@@ -22,7 +22,7 @@ def run_backtest():
     except FileNotFoundError:
         print(f"Error: Backtest script not found at {script_path}")
 
-def plot_live():
+def plot_live(args):
     print("Starting live simulation stream and sending metrics to UI...")
     HOST = '127.0.0.1'  # Standard loopback interface address (localhost)
     PORT = 65432        # Port to listen on (non-privileged ports are > 1023)
@@ -48,22 +48,41 @@ def plot_live():
     except Exception as e:
         print(f"Error in plot_live: {e}")
 
-def process_data():
+
+
+def process_data(args):
     print("Processing raw data into datasets via scripts/process_data.py...")
+    python_executable = str(Path("/home/morningstar/miniconda3/envs/trading_env/bin/python"))
     script_path = Path(__file__).parent.parent / 'scripts' / 'process_data.py'
+    command = [python_executable, str(script_path)]
+    if args.timeframe:
+        command.extend(["--timeframe", args.timeframe])
     try:
-        subprocess.run([str(script_path)], check=True)
+        subprocess.run(command, check=True)
         print("Data processing completed successfully.")
     except subprocess.CalledProcessError as e:
         print(f"Error processing data: {e}")
     except FileNotFoundError:
         print(f"Error: Process data script not found at {script_path}")
 
+def merge_data(args):
+    print("Merging processed data via scripts/merge_processed_data.py...")
+    python_executable = str(Path("/home/morningstar/miniconda3/envs/trading_env/bin/python"))
+    script_path = Path(__file__).parent.parent / 'scripts' / 'merge_processed_data.py'
+    try:
+        subprocess.run([python_executable, str(script_path)], check=True)
+        print("Data merging completed successfully.")
+    except subprocess.CalledProcessError as e:
+        print(f"Error merging data: {e}")
+    except FileNotFoundError:
+        print(f"Error: Merge data script not found at {script_path}")
+
 def download_data(symbol, timeframe, exchange):
     print(f"Downloading historical data for {symbol} ({timeframe}) from {exchange}...")
+    python_executable = str(Path("/home/morningstar/miniconda3/envs/trading_env/bin/python"))
     script_path = Path(__file__).parent.parent / 'scripts' / 'download_historical_data.py'
     try:
-        subprocess.run([str(script_path), "--symbol", symbol, "--timeframe", timeframe, "--exchange", exchange], check=True)
+        subprocess.run([python_executable, str(script_path), "--symbol", symbol, "--timeframe", timeframe, "--exchange", exchange], check=True)
         print("Data download completed successfully.")
     except subprocess.CalledProcessError as e:
         print(f"Error downloading data: {e}")
@@ -140,7 +159,7 @@ def main():
 
     # update-config command
     update_config_parser = subparsers.add_parser("update-config", help="Modify configuration YAML files")
-    update_config_parser.add_argument("--type", required=True, choices=['dbe', 'environment', 'main'], help="Type of config file (dbe, environment, main)")
+    update_config_parser.add_argument("--type", required=True, choices=['dbe', 'environment', 'main', 'data'], help="Type of config file (dbe, environment, main, data)")
     update_config_parser.add_argument("--section", required=True, help="Configuration section (e.g., risk_parameters, reward, learning)")
     update_config_parser.add_argument("--key", required=True, help="New value for the configuration key")
     update_config_parser.add_argument("--value", required=True, help="New value for the configuration key")
@@ -159,14 +178,16 @@ def main():
 
     # process-data command
     process_data_parser = subparsers.add_parser("process-data", help="Process raw data into datasets")
+    process_data_parser.add_argument("--timeframe", help="Timeframe to process (e.g., 1h, 4h, 5m)")
     process_data_parser.set_defaults(func=process_data)
+
+    # merge-data command
+    merge_data_parser = subparsers.add_parser("merge-data", help="Merge processed data")
+    merge_data_parser.set_defaults(func=merge_data)
 
     args = parser.parse_args()
     if hasattr(args, "func"):
-        if args.command == 'update-config':
-            args.func(config_type=args.type, section=args.section, key=args.key, value=args.value)
-        else:
-            args.func(args) # Pass the args object to the lambda
+        args.func(args) # Pass the args object to the lambda for all commands
     else:
         parser.print_help()
 
