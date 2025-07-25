@@ -1,0 +1,622 @@
+"""
+Observation validation module for the ADAN Trading Bot.
+
+This module provides comprehensive validation for observations generated
+by the StateBuilder to ensure they meet design specifications and quality
+standards.
+"""
+
+import logging
+from dataclasses import dataclass, field
+from enum import Enum, auto
+from typing import Any, Dict, List, Tuple
+
+import numpy as np
+
+logger = logging.getLogger(__name__)
+
+
+class ValidationLevel(Enum):
+    """Validation severity levels."""
+    INFO = auto()
+    WARNING = auto()
+    ERROR = auto()
+    CRITICAL = auto()
+
+
+@dataclass
+class ValidationResult:
+    """Result of a validation operation.
+
+    Attributes:
+        is_valid: Whether the validation passed
+        message: Result description
+        level: Severity level
+        details: Additional validation details
+    """
+    is_valid: bool
+    message: str
+    level: ValidationLevel = ValidationLevel.INFO
+    details: Dict[str, Any] = field(default_factory=dict)
+    passed: bool = True
+
+
+class ObservationValidator:
+    """Comprehensive validator for multi-timeframe observations.
+
+    This class implements validation checks according to design specifications
+    to ensure observations are suitable for reinforcement learning.
+    """
+
+    def __init__(self,
+                 expected_shape: Tuple[int, int, int] = (3, 100, 6),
+                 timeframes: List[str] = None,
+                 value_range_threshold: float = 10.0,
+                 nan_tolerance: float = 0.0,
+                 inf_tolerance: float = 0.0):
+        """
+        Initialize the observation validator.
+
+        Args:
+            expected_shape: Expected observation shape
+                (n_timeframes, window_size, n_features)
+            timeframes: List of expected timeframes
+            value_range_threshold: Maximum absolute value threshold for
+                normalized data
+            nan_tolerance: Maximum percentage of NaN values allowed
+                (0.0 = no NaN)
+            inf_tolerance: Maximum percentage of infinite values allowed
+                (0.0 = no inf)
+        """
+        self.expected_shape = expected_shape
+        self.timeframes = timeframes or ['5m', '1h', '4h']
+        self.value_range_threshold = value_range_threshold
+        self.nan_tolerance = nan_tolerance
+        self.inf_tolerance = inf_tolerance
+
+        # Validation statistics
+        self.validation_stats = {
+            'total_validations': 0,
+            'passed_validations': 0,
+            'failed_validations': 0,
+            'warnings_count': 0,
+            'errors_count': 0,
+            'critical_count': 0
+        }
+
+    def validate_observation(
+        self, observation: np.ndarray, strict: bool = True
+    ) -> Tuple[bool, List[ValidationResult]]:
+        """
+        Perform comprehensive validation of an observation.
+
+        Args:
+            observation: Observation array to validate
+            strict: If True, warnings are treated as failures
+
+        Returns:
+            Tuple of (is_valid, list_of_validation_results)
+        """
+        self.validation_stats['total_validations'] += 1
+        results = []
+
+        try:
+            # 1. Shape validation
+            shape_results = self._validate_shape(observation)
+            results.extend(shape_results)
+
+            # 2. Data type validation
+            dtype_results = self._validate_dtype(observation)
+            results.extend(dtype_results)
+
+            # 3. Value range validation
+            range_results = self._validate_value_ranges(observation)
+            results.extend(range_results)
+
+            # 4. NaN and infinite value validation
+            nan_inf_results = self._validate_nan_inf(observation)
+            results.extend(nan_inf_results)
+
+            # 5. Statistical validation
+            stats_results = self._validate_statistics(observation)
+            results.extend(stats_results)
+
+            # 6. Temporal consistency validation
+            temporal_results = self._validate_temporal_consistency(observation)
+            results.extend(temporal_results)
+
+            # Determine overall validation result
+            has_errors = any(
+                r.level in [ValidationLevel.ERROR, ValidationLevel.CRITICAL]
+                for r in results
+            )
+            has_warnings = any(
+                r.level == ValidationLevel.WARNING for r in results
+            )
+
+            is_valid = not has_errors and (not strict or not has_warnings)
+
+            # Update statistics
+            if is_valid:
+                self.validation_stats['passed_validations'] += 1
+            else:
+                self.validation_stats['failed_validations'] += 1
+
+            self.validation_stats['warnings_count'] += sum(
+                1 for r in results if r.level == ValidationLevel.WARNING
+            )
+            self.validation_stats['errors_count'] += sum(
+                1 for r in results if r.level == ValidationLevel.ERROR
+            )
+            self.validation_stats['critical_count'] += sum(
+                1 for r in results if r.level == ValidationLevel.CRITICAL
+            )
+
+            return is_valid, results
+
+        except Exception as e:
+            error_result = ValidationResult(
+                level=ValidationLevel.CRITICAL,
+                message=f"Validation failed with exception: {str(e)}",
+                passed=False
+            )
+            self.validation_stats['failed_validations'] += 1
+            self.validation_stats['critical_count'] += 1
+            return False, [error_result]
+
+    def _validate_shape(self, observation: np.ndarray) -> List[ValidationResult]:
+        """Validate observation shape according to design specifications."""
+        results = []
+
+        if observation.shape != self.expected_shape:
+            results.append(
+                ValidationResult(
+                    level=ValidationLevel.ERROR,
+                    message=(
+                        "Invalid observation shape: expected "
+                        f"{self.expected_shape}, got {observation.shape}"
+                    ),
+                    details={
+                        'expected_shape': self.expected_shape,
+                        'actual_shape': observation.shape,
+                    },
+                    passed=False,
+                )
+            )
+        else:
+            results.append(
+                ValidationResult(
+                    level=ValidationLevel.INFO,
+                    message=f"Observation shape is correct: {observation.shape}",
+                    details={'shape': observation.shape},
+                )
+            )
+
+        # Validate individual dimensions
+        n_timeframes, window_size, n_features = observation.shape
+
+        if n_timeframes != len(self.timeframes):
+            results.append(
+                ValidationResult(
+                    level=ValidationLevel.ERROR,
+                    message=(
+                        "Incorrect number of timeframes: expected "
+                        f"{len(self.timeframes)}, got {n_timeframes}"
+                    ),
+                    details={
+                        'expected_timeframes': len(self.timeframes),
+                        'actual_timeframes': n_timeframes,
+                    },
+                    passed=False,
+                )
+            )
+
+        if window_size <= 0:
+            results.append(
+                ValidationResult(
+                    level=ValidationLevel.ERROR,
+                    message=f"Invalid window size: {window_size}",
+                    details={'window_size': window_size},
+                    passed=False,
+                )
+            )
+
+        if n_features <= 0:
+            results.append(
+                ValidationResult(
+                    level=ValidationLevel.ERROR,
+                    message=f"Invalid number of features: {n_features}",
+                    details={'n_features': n_features},
+                    passed=False,
+                )
+            )
+
+        return results
+
+    def _validate_dtype(self, observation: np.ndarray) -> List[ValidationResult]:
+        """Validate observation data type."""
+        results = []
+
+        if not np.issubdtype(observation.dtype, np.floating):
+            results.append(
+                ValidationResult(
+                    level=ValidationLevel.WARNING,
+                    message=(
+                        "Observation dtype is not floating point: "
+                        f"{observation.dtype}"
+                    ),
+                    details={'dtype': str(observation.dtype)},
+                    passed=False,
+                )
+            )
+        else:
+            results.append(
+                ValidationResult(
+                    level=ValidationLevel.INFO,
+                    message=(
+                        "Observation dtype is appropriate: "
+                        f"{observation.dtype}"
+                    ),
+                    details={'dtype': str(observation.dtype)},
+                )
+            )
+
+        return results
+
+    def _validate_value_ranges(
+        self, observation: np.ndarray
+    ) -> List[ValidationResult]:
+        """Validate observation value ranges."""
+        results = []
+
+        min_val = np.min(observation)
+        max_val = np.max(observation)
+        max_abs_val = max(abs(min_val), abs(max_val))
+
+        if max_abs_val > self.value_range_threshold:
+            results.append(
+                ValidationResult(
+                    level=ValidationLevel.WARNING,
+                    message=(
+                        "Values exceed expected range: max absolute value is "
+                        f"{max_abs_val:.4f} > {self.value_range_threshold}"
+                    ),
+                    details={
+                        'min_value': float(min_val),
+                        'max_value': float(max_val),
+                        'max_abs_value': float(max_abs_val),
+                        'threshold': self.value_range_threshold,
+                    },
+                    passed=False,
+                )
+            )
+        else:
+            results.append(
+                ValidationResult(
+                    level=ValidationLevel.INFO,
+                    message=(
+                        "Values are within expected range: max absolute value "
+                        f"is {max_abs_val:.4f}"
+                    ),
+                    details={
+                        'min_value': float(min_val),
+                        'max_value': float(max_val),
+                        'max_abs_value': float(max_abs_val),
+                    },
+                )
+            )
+
+        return results
+
+    def _validate_nan_inf(self, observation: np.ndarray) -> List[ValidationResult]:
+        """Validate for NaN and infinite values."""
+        results = []
+
+        # Check for NaN values
+        nan_count = np.isnan(observation).sum()
+        nan_percentage = (nan_count / observation.size) * 100
+
+        if nan_count > 0:
+            if nan_percentage > self.nan_tolerance:
+                results.append(
+                    ValidationResult(
+                        level=ValidationLevel.ERROR,
+                        message=(
+                            f"Too many NaN values: {nan_count} "
+                            f"({nan_percentage:.2f}%) > {self.nan_tolerance}%"
+                        ),
+                        details={
+                            'nan_count': int(nan_count),
+                            'nan_percentage': float(nan_percentage),
+                            'tolerance': self.nan_tolerance,
+                        },
+                        passed=False,
+                    )
+                )
+            else:
+                results.append(
+                    ValidationResult(
+                        level=ValidationLevel.WARNING,
+                        message=(
+                            "NaN values detected but within tolerance: "
+                            f"{nan_count} ({nan_percentage:.2f}%)"
+                        ),
+                        details={
+                            'nan_count': int(nan_count),
+                            'nan_percentage': float(nan_percentage),
+                        },
+                        passed=False,
+                    )
+                )
+
+        # Check for infinite values
+        inf_count = np.isinf(observation).sum()
+        inf_percentage = (inf_count / observation.size) * 100
+
+        if inf_count > 0:
+            if inf_percentage > self.inf_tolerance:
+                results.append(
+                    ValidationResult(
+                        level=ValidationLevel.ERROR,
+                        message=(
+                            f"Too many infinite values: {inf_count} "
+                            f"({inf_percentage:.2f}%) > {self.inf_tolerance}%"
+                        ),
+                        details={
+                            'inf_count': int(inf_count),
+                            'inf_percentage': float(inf_percentage),
+                            'tolerance': self.inf_tolerance,
+                        },
+                        passed=False,
+                    )
+                )
+            else:
+                results.append(
+                    ValidationResult(
+                        level=ValidationLevel.WARNING,
+                        message=(
+                            "Infinite values detected but within tolerance: "
+                            f"{inf_count} ({inf_percentage:.2f}%)"
+                        ),
+                        details={
+                            'inf_count': int(inf_count),
+                            'inf_percentage': float(inf_percentage),
+                        },
+                        passed=False,
+                    )
+                )
+
+        if nan_count == 0 and inf_count == 0:
+            results.append(ValidationResult(
+                level=ValidationLevel.INFO,
+                message="No NaN or infinite values detected"
+            ))
+
+        return results
+
+    def _validate_statistics(
+        self, observation: np.ndarray
+    ) -> List[ValidationResult]:
+        """Validate statistical properties of the observation."""
+        results = []
+
+        try:
+            # Calculate statistics for each timeframe
+            for i, tf in enumerate(self.timeframes):
+                if i < observation.shape[0]:
+                    tf_data = observation[i]
+
+                    mean = np.mean(tf_data)
+                    std = np.std(tf_data)
+
+                    # Check for constant values (zero variance)
+                    if std < 1e-6:  # More lenient threshold
+                        results.append(
+                            ValidationResult(
+                                level=ValidationLevel.WARNING,
+                                message=(
+                                    f"Timeframe {tf} has very low variance "
+                                    f"(std={std:.8f}), data might be constant"
+                                ),
+                                details={
+                                    'timeframe': tf,
+                                    'mean': float(mean),
+                                    'std': float(std),
+                                },
+                                passed=False,
+                            )
+                        )
+
+                    # Check for features with zero variance individually
+                    for feature_idx in range(tf_data.shape[1]):
+                        feature_data = tf_data[:, feature_idx]
+                        feature_std = np.std(feature_data)
+                        if feature_std < 1e-8:
+                            results.append(
+                                ValidationResult(
+                                    level=ValidationLevel.WARNING,
+                                    message=(
+                                        f"Timeframe {tf} feature {feature_idx} "
+                                        "has zero variance (constant values)"
+                                    ),
+                                    details={
+                                        'timeframe': tf,
+                                        'feature_index': feature_idx,
+                                        'std': float(feature_std),
+                                        'value': float(np.mean(feature_data)),
+                                    },
+                                    passed=False,
+                                )
+                            )
+
+                    # Check for extreme skewness (might indicate data issues)
+                    if np.abs(mean) > 5 * std and std > 0:
+                        results.append(
+                            ValidationResult(
+                                level=ValidationLevel.WARNING,
+                                message=(
+                                    f"Timeframe {tf} shows extreme skewness "
+                                    f"(mean={mean:.4f}, std={std:.4f})"
+                                ),
+                                details={
+                                    'timeframe': tf,
+                                    'mean': float(mean),
+                                    'std': float(std),
+                                },
+                                passed=False,
+                            )
+                        )
+
+        except Exception as e:
+            results.append(
+                ValidationResult(
+                    level=ValidationLevel.WARNING,
+                    message=f"Statistical validation failed: {str(e)}",
+                    passed=False,
+                )
+            )
+
+        return results
+
+    def _validate_temporal_consistency(self, observation: np.ndarray) -> List[ValidationResult]:
+        """Validate temporal consistency within the observation."""
+        results = []
+
+        try:
+            # Check for temporal patterns that might indicate data issues
+            for i, tf in enumerate(self.timeframes):
+                if i < observation.shape[0]:
+                    tf_data = observation[i]
+
+                    # Check for repeated patterns (might indicate data duplication)
+                    if tf_data.shape[0] > 1:
+                        # Calculate differences between consecutive time steps
+                        diffs = np.diff(tf_data, axis=0)
+
+                        # Check if too many consecutive time steps are identical
+                        identical_rows = np.all(diffs == 0, axis=1)
+                        consecutive_identical = 0
+                        max_consecutive = 0
+
+                        for is_identical in identical_rows:
+                            if is_identical:
+                                consecutive_identical += 1
+                                max_consecutive = max(
+                                    max_consecutive, consecutive_identical
+                                )
+                            else:
+                                consecutive_identical = 0
+
+                        if max_consecutive > max(
+                            5, tf_data.shape[0] * 0.05
+                        ):  # More than 5 or 5% consecutive identical
+                            results.append(
+                                ValidationResult(
+                                    level=ValidationLevel.WARNING,
+                                    message=(
+                                        f"Timeframe {tf} has {max_consecutive} "
+                                        "consecutive identical time steps"
+                                    ),
+                                    details={
+                                        'timeframe': tf,
+                                        'max_consecutive_identical': int(
+                                            max_consecutive
+                                        ),
+                                        'percentage': float(
+                                            max_consecutive
+                                            / tf_data.shape[0]
+                                            * 100
+                                        ),
+                                    },
+                                    passed=False,
+                                )
+                            )
+
+        except Exception as e:
+            results.append(
+                ValidationResult(
+                    level=ValidationLevel.WARNING,
+                    message=(
+                        "Temporal consistency validation failed: "
+                        f"{str(e)}"
+                    ),
+                    passed=False,
+                )
+            )
+
+        return results
+
+    def validate_batch(self, observations: np.ndarray, strict: bool = True) -> Tuple[bool, List[List[ValidationResult]]]:
+        """
+        Validate a batch of observations.
+
+        Args:
+            observations: Batch of observations (batch_size, n_timeframes,
+                window_size, n_features)
+            strict: If True, warnings are treated as failures
+
+        Returns:
+            Tuple of (all_valid,
+                list_of_validation_results_per_observation)
+        """
+        if observations.ndim != 4:
+            raise ValueError(
+                f"Expected 4D batch array, got {observations.ndim}D"
+            )
+
+        batch_results = []
+        all_valid = True
+
+        for i in range(observations.shape[0]):
+            obs_valid, obs_results = self.validate_observation(observations[i], strict=strict)
+            batch_results.append(obs_results)
+            all_valid = all_valid and obs_valid
+
+        return all_valid, batch_results
+
+    def get_validation_summary(self) -> Dict[str, Any]:
+        """Get a summary of validation statistics."""
+        total = self.validation_stats['total_validations']
+        if total == 0:
+            return {'message': 'No validations performed yet'}
+
+        return {
+            'total_validations': total,
+            'success_rate': (
+                self.validation_stats['passed_validations'] / total * 100
+            ),
+            'failure_rate': (
+                self.validation_stats['failed_validations'] / total * 100
+            ),
+            'warnings_per_validation': (
+                self.validation_stats['warnings_count'] / total
+            ),
+            'errors_per_validation': (
+                self.validation_stats['errors_count'] / total
+            ),
+            'critical_per_validation': (
+                self.validation_stats['critical_count'] / total
+            ),
+            'stats': self.validation_stats.copy(),
+        }
+
+    def reset_stats(self) -> None:
+        """Reset validation statistics."""
+        for key in self.validation_stats:
+            self.validation_stats[key] = 0
+
+    def log_validation_results(
+        self, results: List[ValidationResult], observation_id: str = "unknown"
+    ) -> None:
+        """Log validation results with appropriate log levels."""
+        for result in results:
+            log_message = f"[{observation_id}] {result.message}"
+
+            if result.level == ValidationLevel.INFO:
+                logger.info(log_message)
+            elif result.level == ValidationLevel.WARNING:
+                logger.warning(log_message)
+            elif result.level == ValidationLevel.ERROR:
+                logger.error(log_message)
+            elif result.level == ValidationLevel.CRITICAL:
+                logger.critical(log_message)

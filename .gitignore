@@ -1,10 +1,13 @@
-# ===================================
-# Python
-# ===================================
+# Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
 *$py.class
 *.so
+
+# C extensions
+*.so
+
+# Distribution / packaging
 .Python
 build/
 develop-eggs/
@@ -18,13 +21,16 @@ parts/
 sdist/
 var/
 wheels/
+share/python-wheels/
 *.egg-info/
 .installed.cfg
 *.egg
+MANIFEST
+
+# PyInstaller
+#  Usually these files are created by a CI server and aren't committed to VCS
 *.manifest
 *.spec
-.pytest_cache/
-.mypy_cache/
 
 # Installer logs
 pip-log.txt
@@ -37,31 +43,14 @@ htmlcov/
 .coverage
 .coverage.*
 .cache
+.pytest_cache/
+.hypothesis/
+.ruff_cache/
 nosetests.xml
 coverage.xml
 *.cover
-*.py,cover
-.hypothesis/
-.pytest_cache/
-cover/
-.coverage
-.coverage.*
-.cache
-nosetests.xml
-coverage.xml
-*.cover
-<<<<<<< HEAD
-.hypothesis/
-.pytest_cache/
-
-# Jupyter Notebook
-.ipynb_checkpoints/
-notebooks/ # Ignorer tout le dossier notebooks si les notebooks sont des explorations et non du code final
-=======
-*.py,cover
-.hypothesis/
-.pytest_cache/
-cover/
+junit/
+test_artifacts/
 
 # Translations
 *.mo
@@ -82,54 +71,23 @@ instance/
 
 # Sphinx documentation
 docs/_build/
+site/
 
 # PyBuilder
-.pybuilder/
 target/
 
 # Jupyter Notebook
 .ipynb_checkpoints
->>>>>>> 296a1e7e7811e4726ac5e90c67f96c4d621521a6
 
 # IPython
 profile_default/
 ipython_config.py
 
-<<<<<<< HEAD
-=======
 # pyenv
-#   For a library or package, you might want to ignore these files since the code is
-#   intended to run in multiple environments; otherwise, check them in:
-# .python-version
-
-# pipenv
-#   According to pypa/pipenv#598, it is recommended to include Pipfile.lock in version control.
-#   However, in case of collaboration, if having platform-specific dependencies or dependencies
-#   having no cross-platform support, pipenv may install dependencies that don't work, or not
-#   install all needed dependencies.
-#Pipfile.lock
-
-# UV
-#   Similar to Pipfile.lock, it is generally recommended to include uv.lock in version control.
-#   This is especially recommended for binary packages to ensure reproducibility, and is more
-#   commonly ignored for libraries.
-#uv.lock
-
-# poetry
-#   Similar to Pipfile.lock, it is generally recommended to include poetry.lock in version control.
-#   This is especially recommended for binary packages to ensure reproducibility, and is more
-#   commonly ignored for libraries.
-#   https://python-poetry.org/docs/basic-usage/#commit-your-poetrylock-file-to-version-control
-#poetry.lock
+.python-version
 
 # pdm
-#   Similar to Pipfile.lock, it is generally recommended to include pdm.lock in version control.
-#pdm.lock
-#   pdm stores project-wide configurations in .pdm.toml, but it is recommended to not include it
-#   in version control.
-#   https://pdm.fming.dev/latest/usage/project/#working-with-version-control
 .pdm.toml
-.pdm-python
 .pdm-build/
 
 # PEP 582; used by e.g. github.com/David-OConnor/pyflow and github.com/pdm-project/pdm
@@ -142,316 +100,21 @@ celerybeat.pid
 # SageMath parsed files
 *.sage.py
 
->>>>>>> 296a1e7e7811e4726ac5e90c67f96c4d621521a6
 # Environments
 .env
 .venv
 env/
 venv/
 ENV/
-env.bak/
-venv.bak/
+env.bak
+venv.bak
 
-<<<<<<< HEAD
-# IDE specific files
-.idea/
-.vscode/
-*.swp
-*.swo
-.DS_Store
-
-# --- Fichiers et dossiers spécifiques au projet ADAN ---
-
-# 1. Logs de training et d'exécution (doivent être ignorés)
-# Les logs sont des sorties générées, ils ne doivent pas être versionnés.
-training_final_*.log
-training_live_*.log
-logs/ # Si tu as un dossier 'logs' séparé, assure-toi qu'il soit ignoré aussi.
-
-# 2. Dossier 'dellet' (assumé temporaire ou non essentiel)
-dellet/
-
-# 3. Dossiers de données (Doivent être ignorés en totalité, sauf exceptions rares)
-# Tous les sous-dossiers de 'data/' contiennent des .parquet, .csv et sont très volumineux.
-# Nous allons les ignorer complètement.
-data/backup_old/
-data/new/
-data/processed/
-data/raw/
-
-# Fichiers de données volumineux, quel que soit leur emplacement (pour plus de sécurité)
-# Ces règles capturent tous les .parquet et .csv dans tout le dépôt,
-# y compris ceux qui pourraient exister en dehors des dossiers 'data/'.
-**/*.parquet
-**/*.csv
-**/*.joblib # Les scalers sont des .joblib, mais certains pourraient être des modèles.
-            # On va ignorer tous les .joblib par défaut, puis faire une exception pour les scalers.
-**/*.npz    # Fichiers numpy compressés, souvent utilisés pour les évaluations de modèles ou les données.
-
-# 4. Scalers et encodeurs (Doivent être inclus s'ils sont légers et nécessaires au code)
-# Les scalers dans `data/scalers_encoders/` sont des fichiers `.joblib`.
-# Si ces fichiers sont de petite taille et essentiels pour le fonctionnement du code (par ex., pour le prétraitement),
-# il est préférable de les inclure. Je vais ajuster la règle en conséquence.
-# D'abord, on ignorait tous les .joblib, maintenant on crée une exception.
-# ===================================
-# Données et modèles
-# ===================================
-# Données brutes et traitées
-data/raw/
-data/processed/
-
-# Modèles entraînés et poids
-models/*.pth
-models/*.h5
-models/*.pt
-models/*.onnx
-models/*.zip
-
-# Scaler et encodeurs
-data/scalers_encoders/
-!data/scalers_encoders/example.joblib  # Exemple de fichier à conserver
-
-# Fichiers temporaires
-*.tmp
-*.bak
-*.swp
-*~
-
-# Fichiers de verrouillage
-*.lock
-
-# ===================================
-# Environnements virtuels
-# ===================================
-# Environnements virtuels Python
-venv/
-env/
-ENV/
-.env
-.venv
-env.bak/
-venv.bak/
-
-# Environnement Conda
-.conda/
-.conda-env/
-
-# ===================================
-# Éditeurs et IDEs
-# ===================================
-# VS Code
-.vscode/*
-!.vscode/settings.json
-!.vscode/tasks.json
-!.vscode/launch.json
-!.vscode/extensions.json
-!.vscode/*.code-snippets
-
-# PyCharm
-.idea/
-.idea_modules/
-*.iml
-*.ipr
-*.iws
-.idea/**/workspace.xml
-.idea/**/tasks.xml
-.idea/dictionaries
-.idea/**/dataSources/
-.idea/**/dataSources.ids
-.idea/**/dataSources.local.xml
-.idea/**/sqlDataSources.xml
-.idea/**/dynamic.xml
-.idea/**/uiDesigner.xml
-.idea/**/gradle.xml
-.idea/**/libraries
-
-# Jupyter Notebook
-.ipynb_checkpoints
-*/.ipynb_checkpoints/*
-
-# ===================================
-# Système d'exploitation
-# ===================================
-# Fichiers système
-.DS_Store
-.DS_Store?
-._*
-.Spotlight-V100
-.Trashes
-ehthumbs.db
-Thumbs.db
-
-# ===================================
-# Configuration spécifique au projet
-# ===================================
-# Fichiers de configuration locaux
-.env
-.env.local
-.env.*.local
-!.env.example
-
-# Fichiers de logs
-logs/
-*.log
-
-# Fichiers de cache
-.cache/
-.mypy_cache/
-.pytest_cache/
-
-# Fichiers de déploiement
-.vercel
-.netlify
-.surge.sh
-
-# Fichiers de documentation générés
-site/
-
-# Fichiers temporaires
-.temp/
-tmp/
-
-# Fichiers de sauvegarde
-*~
-*.swp
-*.swo
-
-# Fichiers de base de données
-*.db
-*.sqlite
-*.sqlite3
-
-# Fichiers de compression
-dist/
-build/
-*.egg-info/
-
-# Fichiers de couverture de test
-coverage/
-htmlcov/
-.coverage
-.coverage.*
-,cover
-*.cover
-
-# Fichiers de profilage
-.profile
-
-# Fichiers de configuration locaux
-local_settings.py
-db.sqlite3
-db.sqlite3-journal
-
-# Fichiers de débogage
-*.log
-local_settings.py
-.env.local
-.env.development.local
-.env.test.local
-.env.production.local
-
-# Fichiers de configuration de pré-commit
-# .pre-commit-config.yaml  # Ne pas ignorer ce fichier de configuration
-
-# Fichiers de configuration mypy
-mypy.ini
-
-# Fichiers de configuration pytest
-# pytest.ini  # Ne pas ignorer le fichier de configuration pytest
-
-
-# Fichiers de configuration VSCode
-.vscode/
-!.vscode/settings.json
-!.vscode/tasks.json
-!.vscode/launch.json
-!.vscode/extensions.json
-
-# Fichiers de configuration PyCharm
-.idea/
-
-# Fichiers de configuration Jupyter
-.jupyter/
-
-# Fichiers de configuration IPython
-.ipython/
-
-# Fichiers de configuration Jupyter
-.jupyter/
-
-# Fichiers de configuration VS Code
-.vscode/
-
-# Fichiers de configuration PyCharm
-.idea/
-
-# Fichiers de configuration Jupyter
-.jupyter/
-
-# Fichiers de configuration IPython
-.ipython/
-exports/
-
-# 6. Rapports et logs générés (Doivent être ignorés)
-# Contient les logs d'évaluation, de monitoring et TensorBoard.
-reports/eval_logs/
-reports/monitor_logs/
-reports/monitor_logs_vec/
-reports/tensorboard_logs/
-# Les sous-dossiers 'figures' et 'metrics' contiennent des données générées.
-# Leurs README.md respectifs peuvent être gardés si tu les trouves utiles.
-reports/figures/*
-!reports/figures/README.md
-reports/metrics/*
-!reports/metrics/README.md
-
-
-# 7. Modèles entraînés et checkpoints (Doivent être ignorés car trop volumineux)
-# Les fichiers .zip, .pth, ou autres formats de modèles entraînés ne doivent pas être versionnés.
-# Seuls les README.md décrivant la structure sont utiles.
-models/best_model/
-models/checkpoints/
-models/final_model.zip
-models/interrupted_model.zip
-models/best_trading_model.zip
-# Ignore tous les fichiers de modèles, mais conserve les README.md dans les dossiers de structure.
-models/baselines/*
-!models/baselines/README.md
-models/encoders/*
-!models/encoders/README.md
-models/rl_agents/*
-!models/rl_agents/README.md
-*.zip # Pour attraper tout .zip de modèle qui n'est pas dans un sous-dossier de models/ déjà ignoré
-*.pth # Pour les modèles PyTorch
-*.pt
-*.h5 # Pour les modèles Keras/TensorFlow
-*.onnx # Pour les modèles ONNX
-
-# 8. API keys et secrets (TRÈS IMPORTANT : ne jamais les pousser !)
-.env.local
-.env.development.local
-.env.test.local
-.env.production.local
-.env # Si tu as un fichier .env générique
-*.pem
-*.key # Attention si certains .json sont des configs non sensibles, il faudra les ré-inclure spécifiquement.
-        # Mais pour des identifiants API, c'est crucial de les ignorer.
-
-# Fichiers temporaires ou de sauvegarde d'éditeurs
-*.tmp
-*.bak
-*.swp
-*~
-=======
 # Spyder project settings
 .spyderproject
 .spyproject
 
 # Rope project settings
 .ropeproject
-
-# mkdocs documentation
-/site
 
 # mypy
 .mypy_cache/
@@ -467,16 +130,48 @@ dmypy.json
 # Cython debug symbols
 cython_debug/
 
+# VSCode
+.vscode/*
+!.vscode/settings.json
+!.vscode/tasks.json
+!.vscode/launch.json
+!.vscode/extensions.json
+!.vscode/*.code-snippets
+
 # PyCharm
-#  JetBrains specific template is maintained in a separate JetBrains.gitignore that can
-#  be found at https://github.com/github/gitignore/blob/main/Global/JetBrains.gitignore
-#  and can be added to the global gitignore or merged into this file.  For a more nuclear
-#  option (not recommended) you can uncomment the following to ignore the entire idea folder.
-#.idea/
+.idea/
 
-# Ruff stuff:
-.ruff_cache/
+# OS-specific
+.DS_Store
+Thumbs.db
 
-# PyPI configuration file
-.pypirc
->>>>>>> 296a1e7e7811e4726ac5e90c67f96c4d621521a6
+# Project Specific
+# Logs
+logs/
+*.log
+nohup.out
+debug_output.txt
+convert_real_data.log
+data_validation.log
+test_state_builder.log
+
+# Data, Models, Reports
+data/
+models/
+reports/
+simulation_results.png
+
+# Cache
+cache/
+
+# Secrets
+*.pem
+*.key
+gemini_api_keys.txt
+config/api_keys.enc
+
+# Dependencies and large files
+ta-lib/
+ta-lib-0.4.0-src.tar.gz
+config/config.yaml.tar.gz
+*.zip

@@ -71,13 +71,13 @@ class StateBuilder:
     
     def __init__(self, 
                  features_config: Dict[str, List[str]] = None,
-                 window_size: int = 100,
+                 window_size: int = 20,  # Correspond à la configuration dans config.yaml
                  include_portfolio_state: bool = True,
                  normalize: bool = True,
                  scaler_path: Optional[str] = None,
                  adaptive_window: bool = True,
-                 min_window_size: int = 50,
-                 max_window_size: int = 200):
+                 min_window_size: int = 10,  # 50% de la taille de fenêtre par défaut
+                 max_window_size: int = 30):  # 150% de la taille de fenêtre par défaut
         """
         Initialize the StateBuilder according to design specifications.
         
@@ -116,8 +116,18 @@ class StateBuilder:
         
         # Initialisation des scalers et calcul de la forme d'observation
         self._init_scalers()
+        
+        # Calcul de la forme d'observation
+        # Structure 3D: (timeframes, window_size, features)
+        # Ajout d'un canal pour le portfolio si activé
+        observation_channels = len(self.timeframes)
+        if self.include_portfolio_state:
+            observation_channels += 1
+            
         max_features = max(self.nb_features_per_tf.values())
-        self.observation_shape = (len(self.timeframes), self.base_window_size, max_features)
+        self.observation_shape = (observation_channels, self.base_window_size, max_features)
+        
+        logger.info(f"Observation shape configured as: {self.observation_shape}")
         
         logger.info(f"StateBuilder initialized with base_window_size={window_size}, "
                    f"adaptive_window={adaptive_window}, "
@@ -125,13 +135,39 @@ class StateBuilder:
                    f"features_per_timeframe={self.nb_features_per_tf}")
 
     def _init_scalers(self):
-        """Initialize scalers for each timeframe."""
-        if self.normalize:
-            for tf in self.timeframes:
-                self.scalers[tf] = MinMaxScaler()
-                logger.info(f"Scaler initialized for timeframe {tf}")
-        else:
+        """
+        Initialize scalers for each timeframe with advanced normalization.
+        
+        Each timeframe gets its own scaler with specific parameters:
+        - 5m: MinMaxScaler with feature_range (-1, 1)
+        - 1h: StandardScaler with mean=0, std=1
+        - 4h: RobustScaler for outlier resistance
+        """
+        if not self.normalize:
             logger.info("Normalization disabled - no scalers initialized")
+            return
+            
+        scaler_configs = {
+            '5m': {'scaler_type': 'minmax', 'feature_range': (-1, 1)},
+            '1h': {'scaler_type': 'standard'},
+            '4h': {'scaler_type': 'robust'}
+        }
+        
+        for tf in self.timeframes:
+            config = scaler_configs.get(tf, {'scaler_type': 'standard'})
+            
+            if config['scaler_type'] == 'minmax':
+                scaler = MinMaxScaler(feature_range=config.get('feature_range', (-1, 1)))
+            elif config['scaler_type'] == 'standard':
+                scaler = StandardScaler()
+            elif config['scaler_type'] == 'robust':
+                scaler = RobustScaler()
+            else:
+                raise ValueError(f"Unknown scaler type: {config['scaler_type']}")
+                
+            self.scalers[tf] = scaler
+            logger.info(f"Scaler initialized for timeframe {tf}: {config['scaler_type']} "
+                        f"with params: {config}")
     
     def _get_extended_features_config(self) -> Dict[str, List[str]]:
         """
@@ -139,29 +175,34 @@ class StateBuilder:
         
         Returns:
             Configuration des features par timeframe
+        
+        Note:
+            Cette configuration doit correspondre exactement à celle définie dans config.yaml
         """
-        # Features de base OHLCV
-        base_features = ['open', 'high', 'low', 'close', 'volume', 'minutes_since_update']
-        
-        # Indicateurs de tendance (7 indicateurs)
-        trend_indicators = [
-            'SMA_10', 'SMA_20', 'SMA_50',
-            'EMA_12', 'EMA_26', 
-            'MACD', 'MACD_Signal'
-        ]
-        
-        # Indicateurs de momentum (6 indicateurs)
-        momentum_indicators = [
-            'RSI', 'STOCH_K', 'STOCH_D', 
-            'WILLR', 'CCI', 'ADX'
-        ]
-        
-        # Indicateurs de volatilité (4 indicateurs)
-        volatility_indicators = [
-            'ATR', 'BB_Upper', 'BB_Lower', 'BB_Middle'
-        ]
-        
-        # Indicateurs de volume (5 indicateurs)
+        # Configuration des features par timeframe, conforme à config.yaml
+        return {
+            '5m': [
+                'OPEN', 'HIGH', 'LOW', 'CLOSE', 'VOLUME',
+                'RSI_14', 'STOCHk_14_3_3', 'STOCHd_14_3_3',
+                'CCI_20_0.015', 'ROC_9', 'MFI_14',
+                'EMA_5', 'EMA_20', 'SUPERTREND_14_2.0',
+                'PSAR_0.02_0.2'
+            ],
+            '1h': [
+                'OPEN', 'HIGH', 'LOW', 'CLOSE', 'VOLUME',
+                'RSI_14', 'MACD_12_26_9', 'MACD_HIST_12_26_9',
+                'CCI_20_0.015', 'MFI_14',
+                'EMA_50', 'EMA_100', 'SMA_200',
+                'ICHIMOKU_9_26_52', 'PSAR_0.02_0.2'
+            ],
+            '4h': [
+                'OPEN', 'HIGH', 'LOW', 'CLOSE', 'VOLUME',
+                'RSI_14', 'MACD_12_26_9', 'CCI_20_0.015',
+                'MFI_14', 'EMA_50', 'SMA_200',
+                'ICHIMOKU_9_26_52', 'SUPERTREND_14_3.0',
+                'PSAR_0.02_0.2'
+            ]
+        }
         volume_indicators = [
             'OBV', 'VWAP', 'MFI', 'Volume_SMA', 'Volume_Ratio'
         ]
@@ -255,7 +296,7 @@ class StateBuilder:
         
         logger.info(f"Updated features config. New observation shape: {self.observation_shape}")
     
-    def build_observation(self, current_idx: int, data: Dict[str, pd.DataFrame]) -> np.ndarray:
+    def build_observation(self, current_idx: int, data: Dict[str, pd.DataFrame]) -> Dict[str, np.ndarray]:
         """
         Construit une observation 3D à partir des données.
         
@@ -264,38 +305,59 @@ class StateBuilder:
             data: Dictionnaire des DataFrames par timeframe
             
         Returns:
-            Observation 3D de forme (timeframes, window_size, features)
+            Observation 3D de forme (timeframes, window_size, n_features)
+        
+        Raises:
+            ValueError: Si les données sont manquantes ou insuffisantes
+            KeyError: Si les features configurées ne sont pas présentes dans les données
         """
-        observations = []
+        observations = {}
         
-        for tf in self.timeframes:
-            if tf not in data:
-                raise ValueError(f"Données manquantes pour le timeframe {tf}")
+        try:
+            # Vérifier la présence des timeframes requis
+            missing_timeframes = set(self.timeframes) - set(data.keys())
+            if missing_timeframes:
+                raise ValueError(f"Missing required timeframes: {missing_timeframes}")
+            
+            # Vérifier la présence des features pour chaque timeframe
+            for tf in self.timeframes:
+                missing_features = set(self.features_config[tf]) - set(data[tf].columns)
+                if missing_features:
+                    raise KeyError(f"Missing features for timeframe {tf}: {missing_features}")
+            
+            # Construire l'observation pour chaque timeframe
+            for tf in self.timeframes:
+                df = data[tf]
                 
-            df = data[tf]
-            features = self.features_config.get(tf, [])
-            
-            if not features:
-                raise ValueError(f"Aucune feature configurée pour le timeframe {tf}")
+                # Vérifier que l'index est valide
+                if current_idx < self.window_size:
+                    raise ValueError(f"Current index {current_idx} is less than window size {self.window_size}")
                 
-            # Extraire les valeurs pour la fenêtre actuelle
-            start_idx = max(0, current_idx - self.window_size + 1)
-            values = df[features].iloc[start_idx:current_idx + 1].values
+                # Extraire les valeurs pour la fenêtre
+                start_idx = current_idx - self.window_size
+                values = df.iloc[start_idx:current_idx][self.features_config[tf]].values
+                
+                # Vérifier la présence des données
+                if len(values) < self.window_size:
+                    padding = np.zeros((self.window_size - len(values), len(self.features_config[tf])))
+                    values = np.vstack([padding, values])
+                
+                # Normaliser si activé
+                if self.normalize and self.scalers.get(tf) is not None:
+                    try:
+                        values = self.scalers[tf].transform(values)
+                    except Exception as e:
+                        logger.error(f"Error normalizing data for {tf}: {str(e)}")
+                        raise
+                
+                observations[tf] = values
             
-            # Padding si nécessaire
-            if values.shape[0] < self.window_size:
-                padding = np.zeros((self.window_size - values.shape[0], values.shape[1]))
-                values = np.vstack([padding, values])
+            return observations
             
-            # Normalisation si activée
-            if self.normalize and tf in self.scalers:
-                values = self.scalers[tf].transform(values)
-            
-            observations.append(values)
-        
-        # Stack les observations pour obtenir la forme 3D
-        return np.stack(observations)
-        
+        except Exception as e:
+            logger.error(f"Error building observation: {str(e)}")
+            raise
+    
     def get_feature_importance_analysis(self, data: Dict[str, pd.DataFrame]) -> Dict[str, Dict[str, float]]:
         """
         Analyse l'importance des features basée sur leur variance et corrélation.
@@ -467,7 +529,7 @@ class StateBuilder:
                          current_idx: int, 
                          data: Dict[str, pd.DataFrame]) -> Dict[str, np.ndarray]:
         """
-        Build a multi-timeframe observation.
+        Build a multi-timeframe observation with robust validation.
         
         Args:
             current_idx: Current index in the data
@@ -475,45 +537,71 @@ class StateBuilder:
             
         Returns:
             Dictionary mapping timeframes to observation arrays
+            
+        Raises:
+            ValueError: If data is missing or insufficient
+            KeyError: If required features are missing
         """
-        observations = {}
-        
-        for tf, df in data.items():
-            if tf not in self.timeframes:
-                continue
+        try:
+            observations = {}
+            
+            for tf, df in data.items():
+                if tf not in self.timeframes:
+                    continue
                 
-            # Get the window of data
-            start_idx = max(0, current_idx - self.window_size + 1)
-            df_window = df.iloc[start_idx:current_idx+1].copy()
-            
-            # Select only the feature columns that exist in the DataFrame
-            expected_features = self.features_config.get(tf, [])
-            columns = [col for col in expected_features if col in df_window.columns]
-            if not columns:
-                logger.warning(f"No matching feature columns found for timeframe {tf}")
-                continue
+                # Validate data availability
+                if df is None or df.empty:
+                    raise ValueError(f"No data available for timeframe {tf}")
+                    
+                # Validate current index
+                if current_idx >= len(df):
+                    raise ValueError(f"Current index {current_idx} exceeds data length {len(df)} for {tf}")
+                    
+                # Get the window of data
+                start_idx = max(0, current_idx - self.window_size + 1)
+                df_window = df.iloc[start_idx:current_idx+1].copy()
                 
-            # Get the feature values
-            values = df_window[columns].values
+                # Validate feature availability
+                expected_features = self.features_config.get(tf, [])
+                missing_features = [f for f in expected_features if f not in df_window.columns]
+                if missing_features:
+                    raise KeyError(f"Missing features for {tf}: {missing_features}")
+                    
+                # Get the feature values
+                values = df_window[expected_features].values
+                
+                # Validate data shape
+                if len(values) < self.window_size:
+                    padding = np.zeros((self.window_size - len(values), len(expected_features)))
+                    values = np.vstack([padding, values])
+                    logger.warning(f"Insufficient history for {tf}, padding with zeros")
+                
+                # Apply normalization if enabled
+                if self.normalize and self.scalers.get(tf) is not None:
+                    try:
+                        values = self.scalers[tf].transform(values)
+                    except Exception as e:
+                        logger.error(f"Error normalizing data for {tf}: {e}")
+                        raise
+                
+                # Validate final shape
+                expected_shape = (self.window_size, len(expected_features))
+                if values.shape != expected_shape:
+                    raise ValueError(f"Shape mismatch for {tf}: expected {expected_shape}, got {values.shape}")
+                    
+                # Add to observations
+                observations[tf] = values
+                
+            # Validate that we have observations for all configured timeframes
+            missing_tfs = set(self.timeframes) - set(observations.keys())
+            if missing_tfs:
+                raise ValueError(f"Missing observations for timeframes: {missing_tfs}")
+                
+            return observations
             
-            # Pad with zeros if we don't have enough history
-            if len(values) < self.window_size:
-                padding = np.zeros((self.window_size - len(values), len(columns)))
-                values = np.vstack([padding, values])
-            
-            # Apply normalization if enabled
-            if self.normalize and self.scalers.get(tf) is not None:
-                try:
-                    # The scaler expects (n_samples, n_features) format
-                    # values is already in the correct shape (window_size, n_features)
-                    values = self.scalers[tf].transform(values)
-                except Exception as e:
-                    logger.error(f"Error normalizing data for {tf}: {e}")
-            
-            # Add to observations
-            observations[tf] = values
-        
-        return observations
+        except Exception as e:
+            logger.error(f"Error building observation: {str(e)}")
+            raise
     
     def build_multi_channel_observation(self, 
                                       current_idx: int, 
@@ -527,24 +615,38 @@ class StateBuilder:
             
         Returns:
             3D numpy array of shape (n_timeframes, window_size, n_features)
-        """
-        # Get observations for each timeframe
-        observations = self.build_observation(current_idx, data)
-        
-        if not observations:
-            return None
             
-        # Find the maximum number of features across all timeframes
-        max_features = max(obs.shape[1] for obs in observations.values())
-        
-        # Initialize the output array
-        n_timeframes = len(self.timeframes)
-        output = np.zeros((n_timeframes, self.window_size, max_features))
-        
-        # Fill the output array
-        for i, tf in enumerate(self.timeframes):
-            if tf in observations:
+        Raises:
+            ValueError: If data is missing or insufficient
+            KeyError: If required features are missing
+            RuntimeError: If observation shape mismatch occurs
+        """
+        try:
+            # Build observations for each timeframe
+            observations = self.build_observation(current_idx, data)
+            if not observations:
+                raise ValueError("No observations built")
+                
+            # Validate observation shapes
+            expected_shape = (self.window_size, len(self.features_config[tf]))
+            for tf, obs in observations.items():
+                if obs.shape != expected_shape:
+                    raise ValueError(f"Shape mismatch for {tf}: expected {expected_shape}, got {obs.shape}")
+                    
+            # Find the maximum number of features across all timeframes
+            max_features = max(obs.shape[1] for obs in observations.values())
+            
+            # Initialize the output array
+            n_timeframes = len(self.timeframes)
+            output = np.zeros((n_timeframes, self.window_size, max_features))
+            
+            # Fill the output array
+            for i, tf in enumerate(self.timeframes):
+                if tf not in observations:
+                    raise KeyError(f"Missing observation for timeframe {tf}")
+                    
                 obs = observations[tf]
+                
                 # Center the features if they have fewer columns than max_features
                 padding = max_features - obs.shape[1]
                 if padding > 0:
@@ -552,9 +654,24 @@ class StateBuilder:
                     right_pad = padding - left_pad
                     obs = np.pad(obs, ((0, 0), (left_pad, right_pad)), 
                                mode='constant', constant_values=0)
+                
+                # Validate final placement
+                if output[i, :, :].shape != obs.shape:
+                    raise RuntimeError(f"Shape mismatch after padding for {tf}: "
+                                     f"expected {output[i, :, :].shape}, got {obs.shape}")
+                    
                 output[i, :, :] = obs
-        
-        return output
+            
+            # Validate final output shape
+            if output.shape != self.observation_shape:
+                raise RuntimeError(f"Final observation shape mismatch: "
+                                 f"expected {self.observation_shape}, got {output.shape}")
+            
+            return output
+            
+        except Exception as e:
+            logger.error(f"Error building multi-channel observation: {str(e)}")
+            raise
     
     def get_observation_shape(self) -> Tuple[int, int, int]:
         """
@@ -854,28 +971,35 @@ class StateBuilder:
             
         Returns:
             Adapted window size
+        
+        Raises:
+            ValueError: If volatility is out of expected range
         """
         if not self.adaptive_window:
             return self.base_window_size
+            
+        if not (0.0 <= volatility <= 2.0):
+            raise ValueError(f"Volatility score {volatility} out of expected range [0.0, 2.0]")
         
         # High volatility -> smaller window (more reactive)
         # Low volatility -> larger window (more stable)
         
+        # Calculate window size based on volatility
         if volatility < 0.3:
             # Low volatility: use larger window for stability
             adapted_size = int(self.base_window_size * 1.5)
         elif volatility < 0.7:
             # Medium volatility: use base window size
             adapted_size = self.base_window_size
-        elif volatility < 1.2:
+        else:
             # High volatility: use smaller window for reactivity
             adapted_size = int(self.base_window_size * 0.7)
-        else:
-            # Extreme volatility: use minimum window for maximum reactivity
-            adapted_size = int(self.base_window_size * 0.5)
+            
+        # Ensure window size stays within bounds
+        adapted_size = max(self.min_window_size, min(adapted_size, self.max_window_size))
         
-        # Ensure within bounds
-        adapted_size = max(self.min_window_size, min(self.max_window_size, adapted_size))
+        # Log the adaptation
+        logger.info(f"Adapting window size: base={self.base_window_size}, volatility={volatility:.2f}, adapted={adapted_size}")
         
         return adapted_size
     
@@ -886,22 +1010,31 @@ class StateBuilder:
         Args:
             data: Dictionary mapping timeframes to DataFrames
             current_idx: Current index in the data
+            
+        Raises:
+            ValueError: If data is invalid or volatility calculation fails
         """
         if not self.adaptive_window:
             return
-        
-        # Calculate current market volatility
-        volatility = self.calculate_market_volatility(data, current_idx)
-        
-        # Adapt window size
-        new_window_size = self.adapt_window_size(volatility)
-        
-        # Update window size if it changed significantly
-        if abs(new_window_size - self.window_size) > 5:  # Only update if change is significant
-            old_size = self.window_size
-            self.window_size = new_window_size
-            logger.debug(f"Adapted window size from {old_size} to {new_window_size} "
-                        f"(volatility: {volatility:.3f})")
+            
+        try:
+            # Calculate current market volatility
+            volatility = self.calculate_market_volatility(data, current_idx)
+            
+            # Adapt window size
+            new_window_size = self.adapt_window_size(volatility)
+            
+            # Update window size if it changed significantly (threshold of 10%)
+            change_threshold = 0.10  # 10% change threshold
+            if abs(new_window_size - self.window_size) > (self.window_size * change_threshold):
+                old_size = self.window_size
+                self.window_size = new_window_size
+                logger.info(f"Adapted window size from {old_size} to {new_window_size} "
+                           f"(volatility: {volatility:.3f}, change: {abs(new_window_size - old_size)} steps)")
+                
+        except Exception as e:
+            logger.error(f"Error updating adaptive window: {e}")
+            raise ValueError(f"Failed to update adaptive window: {e}")
     
     def apply_timeframe_weighting(self, observations: Dict[str, np.ndarray]) -> Dict[str, np.ndarray]:
         """
