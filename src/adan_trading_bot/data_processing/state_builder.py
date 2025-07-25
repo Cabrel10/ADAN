@@ -5,6 +5,18 @@ This module provides the StateBuilder class which transforms raw market data
 into a structured observation space suitable for reinforcement learning.
 """
 
+from sklearn.preprocessing import MinMaxScaler, StandardScaler, RobustScaler
+import logging
+import numpy as np
+import pandas as pd
+from typing import Dict, List, Optional, Tuple
+import json
+import os
+from pathlib import Path
+import warnings
+
+logger = logging.getLogger(__name__)
+
 import numpy as np
 import pandas as pd
 from typing import Dict, List, Optional, Tuple, Union, Any
@@ -92,8 +104,18 @@ class StateBuilder:
             max_window_size: Maximum window size for adaptive mode
         """
         # Configuration initiale
-        self.features_config = features_config or self._get_extended_features_config()
-        self.timeframes = list(self.features_config.keys())
+        # Utiliser la configuration exacte de config.yaml
+        if features_config is None:
+            features_config = {
+                "5m": ["OPEN", "HIGH", "LOW", "CLOSE", "VOLUME", "RSI_14", "STOCHk_14_3_3", "STOCHd_14_3_3", 
+                        "CCI_20_0.015", "ROC_9", "MFI_14", "EMA_5", "EMA_20", "SUPERTREND_14_2.0", "PSAR_0.02_0.2"],
+                "1h": ["OPEN", "HIGH", "LOW", "CLOSE", "VOLUME", "RSI_14", "MACD_12_26_9", "MACD_HIST_12_26_9", 
+                        "CCI_20_0.015", "MFI_14", "EMA_50", "EMA_100", "SMA_200", "ICHIMOKU_9_26_52", "PSAR_0.02_0.2"],
+                "4h": ["OPEN", "HIGH", "LOW", "CLOSE", "VOLUME", "RSI_14", "MACD_12_26_9", "CCI_20_0.015", 
+                        "MFI_14", "EMA_50", "SMA_200", "ICHIMOKU_9_26_52", "SUPERTREND_14_3.0", "PSAR_0.02_0.2"]
+            }
+        self.features_config = features_config
+        self.timeframes = ["5m", "1h", "4h"]
         self.nb_features_per_tf = {tf: len(features) for tf, features in self.features_config.items()}
         
         # Configuration de la taille de fenêtre
@@ -111,7 +133,7 @@ class StateBuilder:
         
         # Configuration des scalers
         self.scaler_path = scaler_path
-        self.scalers = {}
+        self.scalers = {tf: None for tf in self.timeframes}
         self.feature_indices = {}
         
         # Initialisation des scalers et calcul de la forme d'observation
@@ -330,11 +352,11 @@ class StateBuilder:
                 df = data[tf]
                 
                 # Vérifier que l'index est valide
-                if current_idx < self.window_size:
-                    raise ValueError(f"Current index {current_idx} is less than window size {self.window_size}")
-                
+                if current_idx < self.base_window_size:
+                    raise ValueError(f"Current index {current_idx} is less than base window size {self.base_window_size}")
+            
                 # Extraire les valeurs pour la fenêtre
-                start_idx = current_idx - self.window_size
+                start_idx = current_idx - self.base_window_size
                 values = df.iloc[start_idx:current_idx][self.features_config[tf]].values
                 
                 # Vérifier la présence des données
@@ -343,12 +365,15 @@ class StateBuilder:
                     values = np.vstack([padding, values])
                 
                 # Normaliser si activé
-                if self.normalize and self.scalers.get(tf) is not None:
+                if self.normalize:
+                    scaler = self.scalers.get(tf)
+                    if scaler is None:
+                        raise ValueError(f"Scaler not initialized for timeframe {tf}")
                     try:
-                        values = self.scalers[tf].transform(values)
+                        values = scaler.transform(values)
                     except Exception as e:
                         logger.error(f"Error normalizing data for {tf}: {str(e)}")
-                        raise
+                        raise ValueError(f"Failed to normalize data for {tf}: {str(e)}")
                 
                 observations[tf] = values
             
@@ -442,10 +467,26 @@ class StateBuilder:
             
         logger.info("Fitting scalers on provided data...")
         
-        # Combine all data for fitting
-        all_data = []
+        # Verify all timeframes have initialized scalers
+        for tf in self.timeframes:
+            if tf not in self.scalers:
+                raise ValueError(f"Scaler not initialized for timeframe {tf}")
+            if self.scalers[tf] is None:
+                # Choose the appropriate scaler based on timeframe
+                if tf == "5m":
+                    self.scalers[tf] = MinMaxScaler(feature_range=(-1, 1))
+                elif tf == "1h":
+                    self.scalers[tf] = StandardScaler()
+                elif tf == "4h":
+                    self.scalers[tf] = RobustScaler()
+                else:
+                    self.scalers[tf] = StandardScaler()
+                logger.info(f"Initializing scaler for timeframe {tf}")
+        
+        # Fit scaler for each timeframe separately
         for tf, df in data.items():
             if tf not in self.timeframes:
+                logger.warning(f"Skipping unknown timeframe {tf}")
                 continue
                 
             # Select only the feature columns that exist in the DataFrame
@@ -455,29 +496,23 @@ class StateBuilder:
                 logger.warning(f"No matching feature columns found for timeframe {tf}")
                 continue
                 
-            # Store the feature columns for this timeframe
-            self.feature_indices[tf] = columns
+            # Get the data for this timeframe
+            timeframe_data = df[columns].values
             
-            # Add to the combined dataset for fitting
-            all_data.append(df[columns].values)
-        
-        if not all_data:
-            logger.warning("No data available for fitting scalers")
-            return
+            # Handle potential infinite or NaN values
+            if not np.isfinite(timeframe_data).all():
+                logger.warning(f"Non-finite values found in {tf} data. Replacing with zeros.")
+                timeframe_data = np.nan_to_num(timeframe_data, nan=0.0, posinf=0.0, neginf=0.0)
             
-        # Combine all data and fit the scaler
-        combined_data = np.vstack(all_data)
-        
-        # Handle potential infinite or NaN values
-        if not np.isfinite(combined_data).all():
-            logger.warning("Non-finite values found in data. Replacing with zeros.")
-            combined_data = np.nan_to_num(combined_data, nan=0.0, posinf=0.0, neginf=0.0)
-        
-        # Fit the scaler on the combined data
-        for tf in self.timeframes:
-            if self.scalers[tf] is not None:
-                self.scalers[tf].fit(combined_data)
-                logger.info(f"Fitted scaler for timeframe {tf} on {len(combined_data)} samples")
+            # Validate we have a scaler and enough data
+            if self.scalers[tf] is None:
+                raise ValueError(f"Scaler not properly initialized for timeframe {tf}")
+            if len(timeframe_data) < 2:
+                raise ValueError(f"Not enough data samples ({len(timeframe_data)}) to fit scaler for {tf}")
+            
+            # Fit the scaler on this timeframe's data
+            self.scalers[tf].fit(timeframe_data)
+            logger.info(f"Fitted scaler for timeframe {tf} on {len(timeframe_data)} samples")
         
         # Save the scaler if a path is provided
         if self.scaler_path:
@@ -571,8 +606,8 @@ class StateBuilder:
                 values = df_window[expected_features].values
                 
                 # Validate data shape
-                if len(values) < self.window_size:
-                    padding = np.zeros((self.window_size - len(values), len(expected_features)))
+                if len(values) < self.base_window_size:
+                    padding = np.zeros((self.base_window_size - len(values), len(expected_features)))
                     values = np.vstack([padding, values])
                     logger.warning(f"Insufficient history for {tf}, padding with zeros")
                 
@@ -585,7 +620,7 @@ class StateBuilder:
                         raise
                 
                 # Validate final shape
-                expected_shape = (self.window_size, len(expected_features))
+                expected_shape = (self.base_window_size, len(expected_features))
                 if values.shape != expected_shape:
                     raise ValueError(f"Shape mismatch for {tf}: expected {expected_shape}, got {values.shape}")
                     
@@ -628,17 +663,17 @@ class StateBuilder:
                 raise ValueError("No observations built")
                 
             # Validate observation shapes
-            expected_shape = (self.window_size, len(self.features_config[tf]))
             for tf, obs in observations.items():
+                expected_shape = (self.window_size, len(self.features_config[tf]))
                 if obs.shape != expected_shape:
                     raise ValueError(f"Shape mismatch for {tf}: expected {expected_shape}, got {obs.shape}")
                     
             # Find the maximum number of features across all timeframes
             max_features = max(obs.shape[1] for obs in observations.values())
             
-            # Initialize the output array
+            # Initialize the output array with the correct window size
             n_timeframes = len(self.timeframes)
-            output = np.zeros((n_timeframes, self.window_size, max_features))
+            output = np.zeros((n_timeframes, self.base_window_size, max_features))
             
             # Fill the output array
             for i, tf in enumerate(self.timeframes):

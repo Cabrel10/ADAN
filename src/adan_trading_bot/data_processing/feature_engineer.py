@@ -126,37 +126,63 @@ class FeatureEngineer:
             logger.error(f"Error during feature engineering: {str(e)}")
             raise
     
-    def _validate_input_data(self, data: pd.DataFrame) -> None:
+    def _validate_input_data(self, data: pd.DataFrame):
         """
-        Vérifie la cohérence des données d'entrée.
+        Vérifie la cohérence des données d'entrée selon les spécifications ADAN.
+        
+        Args:
+            data: DataFrame contenant les données de marché
+            
+        Raises:
+            ValueError: Si les données ne sont pas conformes au format attendu
+            TypeError: Si les types de données ne sont pas corrects
         """
         try:
-            # Vérifier que le DataFrame n'est pas vide
-            if data.empty:
-                raise ValueError("Input DataFrame is empty")
+            if not isinstance(data, pd.DataFrame):
+                raise TypeError(f"Les données d'entrée doivent être un DataFrame pandas, "
+                              f"type reçu: {type(data)}")
+                
+            # Vérifier l'existence des colonnes requises
+            required_columns = {
+                '5m': ['5m_open', '5m_high', '5m_low', '5m_close', '5m_volume'],
+                '1h': ['1h_open', '1h_high', '1h_low', '1h_close', '1h_volume'],
+                '4h': ['4h_open', '4h_high', '4h_low', '4h_close', '4h_volume']
+            }
             
-            # Vérifier les colonnes requises pour chaque timeframe
-            required_columns = set()
-            for tf in self.timeframes:
-                required_columns.update([
-                    f'{tf}_open', f'{tf}_high', f'{tf}_low', 
-                    f'{tf}_close', f'{tf}_volume'
-                ])
-            
-            # Vérifier que toutes les colonnes requises sont présentes
-            missing_columns = required_columns - set(data.columns)
-            if missing_columns:
-                raise ValueError(f"Missing required columns: {missing_columns}")
-            
-            # Vérifier les types de données
-            numeric_columns = data.select_dtypes(include=['float64', 'int64']).columns
-            if not all(col in numeric_columns for col in required_columns):
-                raise ValueError("Some required columns are not numeric")
-            
-            logger.info("Input data validated successfully")
+            # Validation des colonnes par timeframe
+            for tf, cols in required_columns.items():
+                # Vérifier l'existence des colonnes
+                missing_cols = [c for c in cols if c not in data.columns]
+                if missing_cols:
+                    raise ValueError(f"Colonnes manquantes pour le timeframe {tf}: {missing_cols}")
+                    
+                # Vérifier les types de données
+                for col in cols:
+                    if not pd.api.types.is_numeric_dtype(data[col]):
+                        raise TypeError(f"La colonne {col} doit être numérique")
+                        
+                # Vérifier la présence de NaN
+                if data[cols].isna().any().any():
+                    raise ValueError(f"Valeurs NaN détectées dans les colonnes {cols}")
+                    
+                # Vérifier les valeurs extrêmes
+                if (data[cols] <= 0).any().any():
+                    raise ValueError(f"Valeurs négatives ou nulles détectées dans les colonnes {cols}")
+                    
+            # Vérifier l'ordre chronologique
+            if not data.index.is_monotonic_increasing:
+                raise ValueError("Les données doivent être triées par ordre chronologique croissant")
+                
+            # Vérifier la continuité temporelle
+            if len(data) > 1:
+                time_diff = data.index.to_series().diff().mode()[0]
+                if pd.isna(time_diff) or time_diff == 0:
+                    raise ValueError("Les données doivent avoir un intervalle temporel constant")
+                    
+            logger.info("Validation des données d'entrée réussie")
             
         except Exception as e:
-            logger.error(f"Input data validation error: {str(e)}")
+            logger.error(f"Erreur lors de la validation des données: {str(e)}")
             raise
     
     def add_technical_indicators(self, df: pd.DataFrame) -> pd.DataFrame:
@@ -260,41 +286,63 @@ class FeatureEngineer:
 
     def _clean_dataframe(self, df: pd.DataFrame) -> pd.DataFrame:
         """
-        Nettoie le DataFrame des valeurs manquantes et infinies.
+        Nettoie le DataFrame des valeurs manquantes et infinies selon les spécifications ADAN.
         
         Args:
             df: DataFrame à nettoyer
             
         Returns:
             DataFrame nettoyé sans valeurs NaN ni infinies
+            
+        Raises:
+            ValueError: Si le nettoyage ne peut pas être effectué correctement
         """
         try:
-            # Sauvegarder les index originaux
-            original_index = df.index
+            # Validation pré-nettoyage
+            self._validate_input_data(df)
             
-            # Forward fill puis backward fill
-            df_clean = df.ffill().bfill()
+            # 1. Gestion des valeurs infinies
+            if np.isinf(df.values).any():
+                logger.warning("Valeurs infinies détectées - remplacement par NaN")
+                df = df.replace([np.inf, -np.inf], np.nan)
             
-            # Remplacer les valeurs infinies par NaN
-            df_clean = df_clean.replace([float('inf'), float('-inf')], pd.NA)
+            # 2. Gestion des valeurs NaN
+            if df.isna().any().any():
+                logger.warning("Valeurs NaN détectées - début du processus de nettoyage")
+                
+                # a) Interpolation linéaire pour les données temporelles
+                for tf in self.timeframes:
+                    timeframe_cols = [col for col in df.columns if col.startswith(f'{tf}_')]
+                    if timeframe_cols:
+                        df[timeframe_cols] = df[timeframe_cols].interpolate(method='linear')
+                
+                # b) Remplissage avec la moyenne des 5 dernières valeurs
+                for col in df.columns:
+                    if df[col].isna().any():
+                        df[col] = df[col].fillna(df[col].rolling(window=5, min_periods=1).mean())
+                
+                # c) Remplissage final avec la moyenne globale
+                df = df.fillna(df.mean())
             
-            # Compter les valeurs manquantes avant suppression
-            missing_values = df_clean.isna().sum().sum()
-            if missing_values > 0:
-                logger.info(f"Found {missing_values} missing values before cleaning")
+            # 3. Validation post-nettoyage
+            if df.isna().any().any():
+                raise ValueError("NaN values still present after cleaning")
+                
+            if np.isinf(df.values).any():
+                raise ValueError("Infinite values still present after cleaning")
+                
+            # 4. Normalisation des valeurs extrêmes
+            numeric_cols = df.select_dtypes(include=['float64', 'int64']).columns
+            for col in numeric_cols:
+                col_min = df[col].min()
+                col_max = df[col].max()
+                if col_min <= 0 or col_max > 1e6:
+                    logger.warning(f"Valeurs extrêmes détectées dans {col}: min={col_min}, max={col_max}")
+                    df[col] = df[col].clip(lower=0, upper=1e6)
             
-            # Supprimer les lignes avec valeurs manquantes
-            df_clean = df_clean.dropna()
+            logger.info("Nettoyage du DataFrame terminé avec succès")
+            return df
             
-            # Vérifier si des données ont été perdues
-            if len(df_clean) < len(df):
-                logger.warning(f"Lost {len(df) - len(df_clean)} rows during cleaning")
-            
-            # Réinitialiser l'index si nécessaire
-            if not df_clean.index.equals(original_index):
-                df_clean = df_clean.reindex(original_index)
-            
-            return df_clean
             
         except Exception as e:
             logger.error(f"Error during dataframe cleaning: {str(e)}")
