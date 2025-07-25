@@ -26,7 +26,7 @@ TENSORBOARD_DIR = REPORTS_DIR / "tensorboard_analysis"
 TENSORBOARD_DIR.mkdir(parents=True, exist_ok=True)
 
 # Configuration du style
-plt.style.use('seaborn')
+plt.style.use('seaborn-v0_8')
 sns.set_palette("viridis")
 
 def load_tensorboard_logs(log_dir):

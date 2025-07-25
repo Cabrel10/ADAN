@@ -10,6 +10,7 @@ reinforcement learning agent.
 import numpy as np
 from typing import Dict, Any
 import logging
+from ..common.reward_logger import RewardLogger
 
 logger = logging.getLogger(__name__)
 
@@ -41,11 +42,18 @@ class RewardCalculator:
         # Track chunk information
         self.current_chunk_id = 0
         self.chunk_rewards = {}
+        
+        # Initialize reward logger
+        self.reward_logger = RewardLogger(env_config)
+        
+        # Episode tracking for detailed logging
+        self.current_episode_rewards = []
+        self.current_episode_id = 0
 
-        logger.info("RewardCalculator initialized with chunk-based rewards.")
+        logger.info("RewardCalculator initialized with chunk-based rewards and detailed logging.")
 
     def calculate(self, portfolio_metrics: Dict[str, Any], trade_pnl: float, action: int, 
-                 chunk_id: int = None, optimal_chunk_pnl: float = None) -> float:
+                 chunk_id: int = None, optimal_chunk_pnl: float = None, performance_ratio: float = None) -> float:
         """
         Calculates the total reward for the current timestep.
 
@@ -57,6 +65,7 @@ class RewardCalculator:
             action: The action taken by the agent (0: Hold, 1: Buy, 2: Sell).
             chunk_id: The current chunk ID for chunk-based rewards.
             optimal_chunk_pnl: The optimal possible PnL for the current chunk.
+            performance_ratio: The performance ratio for the current chunk (actual_pnl / optimal_pnl).
 
         Returns:
             float: The total reward for the current timestep.
@@ -77,28 +86,140 @@ class RewardCalculator:
             if chunk_id != self.current_chunk_id:
                 self.current_chunk_id = chunk_id
                 
-                # Get the performance ratio for this chunk
-                if hasattr(portfolio_metrics, 'get_chunk_performance_ratio'):
-                    performance_ratio = portfolio_metrics.get_chunk_performance_ratio(
-                        chunk_id, optimal_chunk_pnl
-                    )
+                # Add bonus if performance exceeds threshold
+                if performance_ratio is not None and performance_ratio >= self.performance_threshold:
+                    bonus = self.optimal_trade_bonus * (performance_ratio - self.performance_threshold)
+                    reward += bonus
                     
-                    # Add bonus if performance exceeds threshold
-                    if performance_ratio >= self.performance_threshold:
-                        bonus = self.optimal_trade_bonus * performance_ratio
-                        reward += bonus
-                        
-                        # Store chunk rewards for analysis
-                        self.chunk_rewards[chunk_id] = {
-                            'optimal_pnl': optimal_chunk_pnl,
-                            'performance_ratio': performance_ratio,
-                            'bonus': bonus
-                        }
-                        
-                        logger.info(f"Chunk {chunk_id} performance bonus: {bonus:.4f} "
-                                  f"(Ratio: {performance_ratio:.2f}, Optimal PnL: {optimal_chunk_pnl:.2f}%)")
+                    # Store chunk rewards for analysis
+                    self.chunk_rewards[chunk_id] = {
+                        'optimal_pnl': optimal_chunk_pnl,
+                        'performance_ratio': performance_ratio,
+                        'bonus': bonus
+                    }
+                    
+                    logger.info(f"Chunk {chunk_id} performance bonus: {bonus:.4f} "
+                              f"(Ratio: {performance_ratio:.2f}, Optimal PnL: {optimal_chunk_pnl:.2f}%)")
+
+        # Incorporate risk metrics into reward (e.g., penalize high drawdown or low Sharpe)
+        # This is a placeholder for now, actual implementation will depend on how these metrics are calculated and passed.
+        drawdown = portfolio_metrics.get('drawdown', 0.0)
+        sharpe_ratio = portfolio_metrics.get('sharpe_ratio', 0.0)
+
+        # Example: Penalize large drawdowns
+        if drawdown < -0.05: # If drawdown is worse than -5%
+            reward -= abs(drawdown) * 10 # Scale penalty by drawdown magnitude
+
+        # Example: Reward for good Sharpe ratio (if above a certain threshold)
+        if sharpe_ratio > 0.5:
+            reward += sharpe_ratio * 0.1 # Small bonus for good risk-adjusted returns
 
         # Clip the reward to prevent extreme values
         reward = np.clip(reward, *self.clipping_range)
+        
+        # Detailed reward logging
+        reward_components = {
+            'realized_pnl': trade_pnl * self.pnl_multiplier,
+            'inaction_penalty': self.inaction_penalty if action == 0 else 0.0,
+            'drawdown_penalty': -abs(drawdown) * 10 if drawdown < -0.05 else 0.0,
+            'sharpe_bonus': sharpe_ratio * 0.1 if sharpe_ratio > 0.5 else 0.0,
+            'performance_bonus': 0.0  # Will be updated if bonus is applied
+        }
+        
+        # Update performance bonus in components if applicable
+        if (chunk_id is not None and chunk_id != self.current_chunk_id and 
+            performance_ratio is not None and performance_ratio >= self.performance_threshold):
+            bonus = self.optimal_trade_bonus * (performance_ratio - self.performance_threshold)
+            reward_components['performance_bonus'] = bonus
+            
+            # Log performance bonus separately
+            self.reward_logger.log_performance_bonus({
+                'chunk_id': chunk_id,
+                'optimal_pnl': optimal_chunk_pnl,
+                'actual_pnl': optimal_chunk_pnl * performance_ratio if optimal_chunk_pnl else 0.0,
+                'performance_ratio': performance_ratio,
+                'bonus_amount': bonus,
+                'threshold': self.performance_threshold
+            })
+        
+        # Log detailed reward calculation
+        self.reward_logger.log_reward_calculation({
+            'total_reward': reward,
+            'components': reward_components,
+            'metadata': {
+                'action': action,
+                'trade_pnl': trade_pnl,
+                'drawdown': drawdown,
+                'sharpe_ratio': sharpe_ratio,
+                'chunk_id': chunk_id,
+                'performance_ratio': performance_ratio,
+                'optimal_chunk_pnl': optimal_chunk_pnl,
+                'clipped': bool(reward != np.sum(list(reward_components.values())))
+            }
+        })
+        
+        # Track episode rewards
+        self.current_episode_rewards.append(reward)
+
+        logger.info(f"Reward calculated: {reward:.4f} (PnL: {trade_pnl:.4f}, Action: {action}, Drawdown: {drawdown:.4f}, Sharpe: {sharpe_ratio:.4f}, Chunk ID: {str(chunk_id)}, Performance Ratio: {str(performance_ratio)})")
 
         return float(reward)
+    
+    def finalize_episode(self) -> None:
+        """
+        Finalise l'épisode actuel et log les métriques d'épisode.
+        """
+        if not self.current_episode_rewards:
+            return
+        
+        # Calculer les statistiques de l'épisode
+        episode_rewards = np.array(self.current_episode_rewards)
+        
+        episode_data = {
+            'total_reward': np.sum(episode_rewards),
+            'average_reward': np.mean(episode_rewards),
+            'reward_std': np.std(episode_rewards),
+            'min_reward': np.min(episode_rewards),
+            'max_reward': np.max(episode_rewards),
+            'episode_length': len(episode_rewards),
+            'performance_bonuses': sum(1 for r in self.chunk_rewards.values() if r.get('bonus', 0) > 0),
+            'risk_penalties': sum(1 for r in episode_rewards if r < -0.1)
+        }
+        
+        # Logger l'épisode
+        self.reward_logger.log_episode_reward(self.current_episode_id, episode_data)
+        
+        # Réinitialiser pour le prochain épisode
+        self.current_episode_rewards = []
+        self.current_episode_id += 1
+        
+        logger.info(f"Episode {self.current_episode_id - 1} finalized: "
+                   f"Total reward: {episode_data['total_reward']:.4f}, "
+                   f"Length: {episode_data['episode_length']}")
+    
+    def get_reward_statistics(self) -> Dict[str, Any]:
+        """
+        Obtenir les statistiques détaillées des récompenses.
+        
+        Returns:
+            Dictionnaire contenant les statistiques des récompenses
+        """
+        return self.reward_logger.get_reward_statistics()
+    
+    def save_reward_logs(self, filename: str = None) -> None:
+        """
+        Sauvegarder les logs de récompenses.
+        
+        Args:
+            filename: Nom de fichier optionnel
+        """
+        self.reward_logger.save_reward_logs(filename)
+    
+    def generate_reward_report(self) -> str:
+        """
+        Générer un rapport détaillé des récompenses.
+        
+        Returns:
+            Rapport formaté des récompenses
+        """
+        return self.reward_logger.generate_reward_report()

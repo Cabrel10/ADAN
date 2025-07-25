@@ -105,3 +105,76 @@ class FinanceManager:
             'loss_count': self.loss_count,
             'win_rate': win_rate
         }
+
+    def set_leverage(self, asset: str, leverage: float):
+        """Set leverage for an asset (for futures trading)."""
+        # For now, just store it - could be extended for actual leverage calculations
+        if not hasattr(self, 'leverages'):
+            self.leverages = {}
+        self.leverages[asset] = leverage
+
+    def open_trade(self, symbol: str, trade_type: str, amount_pct: float, entry_price: float, 
+                   sl_pct: float, tp_pct: float) -> Optional[Dict[str, Any]]:
+        """Open a new trade."""
+        trade_value = self.capital_total_usdt * amount_pct
+        units = trade_value / entry_price
+        
+        if trade_type == 'long':
+            if self.execute_buy(symbol, units, entry_price):
+                trade = {
+                    'symbol': symbol,
+                    'type': trade_type,
+                    'units': units,
+                    'entry_price': entry_price,
+                    'sl_price': entry_price * (1 - sl_pct),
+                    'tp_price': entry_price * (1 + tp_pct),
+                    'sl_pct': sl_pct,
+                    'tp_pct': tp_pct,
+                    'timestamp': datetime.now()
+                }
+                return trade
+        else:  # short
+            # For short trades, we'd need to implement short selling logic
+            # For now, just return None
+            pass
+        
+        return None
+
+    def close_trade(self, symbol: str, close_price: float) -> Optional[Dict[str, Any]]:
+        """Close an existing trade."""
+        if symbol in self.positions:
+            position = self.positions[symbol]
+            units = position['units']
+            pnl = self.execute_sell(symbol, units, close_price)
+            
+            if pnl is not None:
+                pnl_pct = ((close_price - position['avg_price']) / position['avg_price']) * 100
+                return {
+                    'symbol': symbol,
+                    'close_price': close_price,
+                    'pnl': pnl,
+                    'pnl_pct': pnl_pct,
+                    'timestamp': datetime.now()
+                }
+        
+        return None
+
+    def check_close_conditions(self, symbol: str, high: float, low: float) -> bool:
+        """Check if stop-loss or take-profit conditions are met."""
+        if symbol not in self.positions:
+            return False
+        
+        # For simplicity, we'll use a basic check
+        # In a real implementation, this would check against stored SL/TP levels
+        position = self.positions[symbol]
+        entry_price = position['avg_price']
+        
+        # Simple volatility-based exit (placeholder logic)
+        volatility_threshold = 0.05  # 5%
+        price_change = abs(high - low) / entry_price
+        
+        return price_change > volatility_threshold
+
+    def update_market_data(self, market_data: Dict[str, float]):
+        """Update market data - alias for update_market_value for compatibility."""
+        self.update_market_value(market_data)

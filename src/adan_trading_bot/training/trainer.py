@@ -9,27 +9,27 @@ import numpy as np
 import torch as th
 import torch.nn as nn
 import pandas as pd
-from typing import Dict, Any, Optional, List, Tuple, Union
+import gymnasium as gym
+from typing import Dict, Any, Optional, List, Tuple, Union, Callable, Type
 from stable_baselines3 import PPO
-from stable_baselines3.common.callbacks import (
-    EvalCallback, 
-    CheckpointCallback,
-    CallbackList,
-    BaseCallback
-)
+from stable_baselines3.common.callbacks import EvalCallback, CheckpointCallback, CallbackList, BaseCallback
 from stable_baselines3.common.monitor import Monitor
 from stable_baselines3.common.vec_env import DummyVecEnv, VecNormalize, VecFrameStack
 from stable_baselines3.common.policies import ActorCriticPolicy
 from stable_baselines3.common.utils import set_random_seed
 from stable_baselines3.common.type_aliases import GymEnv, MaybeCallback
 
-from ..common.utils import get_logger, load_config, create_directories
-from ..data_processing.data_loader import load_merged_data, prepare_multi_timeframe_data
-from ..environment.multi_asset_env import MultiAssetEnv
-from ..models.feature_extractors import CustomCNNFeatureExtractor, get_feature_extractor
+import adan_trading_bot.agent.ppo_agent as ppo_agent
+from adan_trading_bot.common.utils import load_config, create_directories
+import adan_trading_bot.common.utils as utils
+from adan_trading_bot.data_processing.chunked_loader import ChunkedDataLoader
+import adan_trading_bot.data_processing.chunked_loader as chunked_loader
+from adan_trading_bot.environment.multi_asset_chunked_env import MultiAssetChunkedEnv
+import adan_trading_bot.environment.multi_asset_chunked_env as multi_asset_env
+import adan_trading_bot.models.feature_extractors as feature_extractors
 
 # Configure logger
-logger = get_logger()
+logger = utils.get_logger()
 
 class CustomActorCriticPolicy(ActorCriticPolicy):
     """Custom policy with CNN feature extractor for 3D observations."""
@@ -109,8 +109,6 @@ class TrainingConfig:
             th.backends.cudnn.benchmark = False
 
 def create_envs(
-    train_data: Dict[str, pd.DataFrame],
-    val_data: Dict[str, pd.DataFrame],
     config: TrainingConfig,
     env_config: Dict[str, Any]
 ) -> Tuple[GymEnv, GymEnv]:
@@ -118,47 +116,73 @@ def create_envs(
     Create training and evaluation environments.
     
     Args:
-        train_data: Dictionary of training data DataFrames
-        val_data: Dictionary of validation data DataFrames
         config: Training configuration
         env_config: Environment configuration
         
     Returns:
         Tuple of (train_env, eval_env)
     """
-    def make_env(data: Dict[str, pd.DataFrame], is_training: bool = True) -> GymEnv:
-        """Create a single environment."""
-        def _init() -> MultiAssetEnv:
-            env = MultiAssetEnv(
-                data=data,
-                config=env_config,
-                is_training=is_training
+    # Créer le data loader avec les bons paramètres
+    data_loader = ChunkedDataLoader(
+        data_dir='data/final',
+        assets_list=env_config['data']['assets'],
+        timeframes=env_config['data']['timeframes'],
+        features_by_timeframe=env_config['data']['features_per_timeframe'],
+        split='train',
+        chunk_size=config.batch_size
+    )
+    
+    # Ajouter les configurations nécessaires à l'environnement
+    env_config.update({
+        'data': {
+            'assets': ['BTC', 'ETH', 'SOL', 'XRP', 'ADA'],
+            'timeframes': ['5m', '1h', '4h'],
+            'features_per_timeframe': {
+                '5m': ['open', 'high', 'low', 'close', 'volume'],
+                '1h': ['open', 'high', 'low', 'close', 'volume'],
+                '4h': ['open', 'high', 'low', 'close', 'volume']
+            }
+        },
+        'mode': 'train',
+        'initial_balance': 10000.0,
+        'trading_fees': 0.001,
+        'state': {
+            'window_size': 30,
+            'include_portfolio_state': True,
+            'observation_shape': (3, 30, 5)  # (timeframes, window_size, features_per_timeframe)
+        }
+    })
+    
+    # Créer les environnements d'entraînement et d'évaluation
+    train_env = DummyVecEnv([
+        lambda: Monitor(
+            MultiAssetChunkedEnv(
+                config=env_config
             )
-            return env
-        
-        env = _init()
-        env = Monitor(env)
-        
-        # Wrap in DummyVecEnv if using multiple environments
-        if config.n_envs > 1:
-            env = DummyVecEnv([lambda: env] * config.n_envs)
-        else:
-            env = DummyVecEnv([lambda: env])
-        
-        # Frame stacking if enabled
-        if config.use_frame_stack and len(env.observation_space.shape) >= 3:
-            env = VecFrameStack(env, n_stack=config.frame_stack)
-        
-        # Normalize observations and rewards if enabled
-        if config.normalize:
-            env = VecNormalize(env, norm_obs=True, norm_reward=True)
-        
-        return env
-    
-    # Create training and evaluation environments
-    train_env = make_env(train_data, is_training=True)
-    eval_env = make_env(val_data, is_training=False) if val_data is not None else None
-    
+        )
+    ] * config.n_envs)
+
+    # Créer l'environnement d'évaluation
+    eval_env = DummyVecEnv([
+        lambda: Monitor(
+            MultiAssetChunkedEnv(
+                config=env_config
+            )
+        )
+    ])
+
+    # Normaliser les observations si demandé
+    if config.normalize:
+        train_env = VecNormalize(train_env, norm_obs=True, norm_reward=True)
+        if eval_env is not None:
+            eval_env = VecNormalize(eval_env, norm_obs=True, norm_reward=True)
+
+    # Ajouter le stacking de frames si demandé
+    if config.use_frame_stack:
+        train_env = VecFrameStack(train_env, n_stack=config.frame_stack)
+        if eval_env is not None:
+            eval_env = VecFrameStack(eval_env, n_stack=config.frame_stack)
+
     return train_env, eval_env
 
 def train_agent(
@@ -172,40 +196,80 @@ def train_agent(
     Args:
         config_path: Path to the configuration file
         custom_config: Optional dictionary to override config values
-        callbacks: List of additional callbacks to use during training
-        
+        callbacks: Optional list of callbacks for training
+    
     Returns:
         Trained PPO agent
     """
-    # Load configuration
+    # Load and merge configuration
     config = load_config(config_path)
     if custom_config:
         config.update(custom_config)
     
-    # Create training config
-    train_config = TrainingConfig(config.get('training', {}))
+    # Create training configuration
+    training_config = TrainingConfig(config)
     
-    # Load and prepare data
-    logger.info("Loading and preparing data...")
-    train_data = load_merged_data(config['data_sources']['train_dir'])
-    val_data = load_merged_data(config['data_sources']['val_dir']) if 'val_dir' in config['data_sources'] else None
-    
-    # Prepare multi-timeframe data
-    train_data = prepare_multi_timeframe_data(train_data, config)
-    if val_data is not None:
-        val_data = prepare_multi_timeframe_data(val_data, config)
+    # Initialize environment configuration with data parameters
+    env_config = config.get('environment', {})
+    env_config.update({
+        'data': {
+            'assets': ['BTC', 'ETH', 'SOL', 'XRP', 'ADA'],
+            'timeframes': ['5m', '1h', '4h'],
+            'features_per_timeframe': {
+                '5m': ['open', 'high', 'low', 'close', 'volume'],
+                '1h': ['open', 'high', 'low', 'close', 'volume'],
+                '4h': ['open', 'high', 'low', 'close', 'volume']
+            }
+        },
+        'mode': 'train',
+        'initial_balance': 10000.0,
+        'trading_fees': 0.001,
+        'trading_rules': {
+            'futures_enabled': False,
+            'leverage': 1,
+            'commission_pct': 0.1,
+            'futures_commission_pct': 0.02,
+            'min_trade_size': 0.0001,
+            'min_notional_value': 10.0,
+            'max_notional_value': 100000.0
+        },
+        'risk_management': {
+            'capital_tiers': [
+                {'max_capital': 1000, 'max_position_size_pct': 5.0, 'max_drawdown_pct': 2.0},
+                {'max_capital': 10000, 'max_position_size_pct': 3.0, 'max_drawdown_pct': 1.5},
+                {'max_capital': 100000, 'max_position_size_pct': 2.0, 'max_drawdown_pct': 1.0}
+            ],
+            'position_sizing': {
+                'max_risk_per_trade_pct': 1.0,
+                'max_asset_allocation_pct': 20.0,
+                'concentration_limits': {
+                    'BTC': 30.0,
+                    'ETH': 25.0,
+                    'SOL': 20.0,
+                    'XRP': 15.0,
+                    'ADA': 10.0
+                }
+            }
+        },
+        'state': {
+            'window_size': 30,
+            'include_portfolio_state': True
+        }
+    })
     
     # Create environments
-    logger.info("Creating environments...")
-    train_env, eval_env = create_envs(train_data, val_data, train_config, config.get('environment', {}))
+    train_env, eval_env = create_envs(training_config, env_config)
     
     # Define policy kwargs for custom feature extractor
     policy_kwargs = dict(
         features_extractor_class=CustomCNNFeatureExtractor,
         features_extractor_kwargs=dict(
             features_dim=512,
-            channels=config['environment'].get('num_channels', 3),
+            channels=3,
             kernel_sizes=[3, 3, 3],
+            strides=[1, 1, 1],
+            paddings=[1, 1, 1],
+            activation_fn=th.nn.ReLU,
             use_batch_norm=True,
             dropout=0.1
         ),
@@ -214,80 +278,55 @@ def train_agent(
         ortho_init=True
     )
     
-    # Create agent
-    logger.info("Initializing PPO agent...")
-    agent = PPO(
-        policy=CustomActorCriticPolicy,
+    # Create PPO agent
+    agent = create_ppo_agent(
         env=train_env,
-        learning_rate=train_config.learning_rate,
-        n_steps=train_config.n_steps,
-        batch_size=train_config.batch_size,
-        n_epochs=train_config.n_epochs,
-        gamma=train_config.gamma,
-        gae_lambda=train_config.gae_lambda,
-        clip_range=train_config.clip_range,
-        ent_coef=train_config.ent_coef,
-        vf_coef=train_config.vf_coef,
-        max_grad_norm=train_config.max_grad_norm,
+        config=training_config,
+        tensorboard_log=training_config.tensorboard_log,
+        ent_coef=training_config.ent_coef,
+        vf_coef=training_config.vf_coef,
+        max_grad_norm=training_config.max_grad_norm,
+        device=training_config.device,
         policy_kwargs=policy_kwargs,
-        tensorboard_log=train_config.tensorboard_log,
-        verbose=1,
-        device=train_config.device,
-        seed=train_config.seed
+        verbose=1
     )
     
-    # Setup callbacks
-    if callbacks is None:
-        callbacks = []
+    # Create callbacks
+    callback_list = []
     
     # Add checkpoint callback
     checkpoint_callback = CheckpointCallback(
-        save_freq=max(train_config.save_freq // train_config.n_envs, 1),
+        save_freq=train_config.save_freq,
         save_path=train_config.best_model_save_path,
-        name_prefix='model',
-        save_replay_buffer=True,
-        save_vecnormalize=True
+        name_prefix='rl_model'
     )
-    callbacks.append(checkpoint_callback)
+    callback_list.append(checkpoint_callback)
     
-    # Add evaluation callback if validation data is available
+    # Add evaluation callback if we have an evaluation environment
     if eval_env is not None:
         eval_callback = EvalCallback(
             eval_env,
             best_model_save_path=train_config.best_model_save_path,
             log_path=train_config.log_path,
-            eval_freq=max(train_config.eval_freq // train_config.n_envs, 1),
+            eval_freq=train_config.eval_freq,
             deterministic=True,
-            render=False,
-            n_eval_episodes=5,
-            warn=False
+            render=False
         )
-        callbacks.append(eval_callback)
+        callback_list.append(eval_callback)
     
-    # Create callback list
-    callback = CallbackList(callbacks)
+    # Add any additional callbacks
+    if callbacks:
+        callback_list.extend(callbacks)
     
     # Train the agent
-    logger.info(f"Starting training for {train_config.total_timesteps} timesteps...")
-    start_time = time.time()
+    model.learn(
+        total_timesteps=train_config.total_timesteps,
+        callback=CallbackList(callback_list)
+    )
     
-    try:
-        agent.learn(
-            total_timesteps=train_config.total_timesteps,
-            callback=callback,
-            reset_num_timesteps=True,
-            tb_log_name="ppo_cnn_training"
-        )
-    except KeyboardInterrupt:
-        logger.warning("Training interrupted by user.")
-    
-    training_time = time.time() - start_time
-    logger.info(f"Training completed in {training_time:.2f} seconds.")
-    
-    # Save the final model
-    final_model_path = os.path.join(train_config.best_model_save_path, 'final_model')
-    agent.save(final_model_path)
-    logger.info(f"Final model saved to {final_model_path}")
+    # Clean up
+    if train_env is not None:
+        train_env.close()
     
     # Save the environment stats if normalization was used
     if train_config.normalize and hasattr(train_env, 'save'):
@@ -317,14 +356,12 @@ if __name__ == "__main__":
     
     args = parser.parse_args()
     
-    # Override config with command line arguments
-    custom_config = {
-        'training': {
-            'total_timesteps': args.timesteps,
-            'use_gpu': args.gpu
-        },
-        'models_dir': args.model_path
-    }
-    
     # Start training
-    train_agent(args.config, custom_config=custom_config)
+    train_agent(
+        config_path=args.config,
+        custom_config={
+            'total_timesteps': args.timesteps,
+            'use_gpu': args.gpu,
+            'models_dir': args.model_path
+        }
+    )

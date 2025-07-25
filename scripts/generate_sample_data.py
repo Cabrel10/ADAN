@@ -99,7 +99,7 @@ def main():
     """Fonction principale."""
     # Configuration
     config = {
-        'symbols': ['BTC/USDT'],  # Paires de trading à générer
+        'symbols': ["BTC/USDT", "ETH/USDT", "SOL/USDT", "XRP/USDT", "ADA/USDT"],  # Paires de trading à générer
         'timeframes': ['1m', '1h', '3h'],  # Timeframes à générer
         'start_date': '2022-01-01',  # Date de début
         'num_candles': 10000,  # Nombre de bougies à générer par timeframe

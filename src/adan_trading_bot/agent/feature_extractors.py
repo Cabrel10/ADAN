@@ -7,12 +7,32 @@ including a CNN-based feature extractor for processing market data as images.
 import numpy as np
 import torch as th
 import torch.nn as nn
+import torch.nn.functional as F
 import gymnasium as gym
 from stable_baselines3.common.torch_layers import BaseFeaturesExtractor
 
 from ..common.utils import get_logger
 
 logger = get_logger()
+
+
+class ChannelAttention(nn.Module):
+    def __init__(self, num_channels, reduction_ratio=16):
+        super(ChannelAttention, self).__init__()
+        self.avg_pool = nn.AdaptiveAvgPool2d(1)
+        self.max_pool = nn.AdaptiveMaxPool2d(1)
+        self.fc = nn.Sequential(
+            nn.Linear(num_channels, num_channels // reduction_ratio, bias=False),
+            nn.ReLU(),
+            nn.Linear(num_channels // reduction_ratio, num_channels, bias=False)
+        )
+        self.sigmoid = nn.Sigmoid()
+
+    def forward(self, x):
+        avg_out = self.fc(self.avg_pool(x).squeeze(-1).squeeze(-1))
+        max_out = self.fc(self.max_pool(x).squeeze(-1).squeeze(-1))
+        out = avg_out + max_out
+        return self.sigmoid(out).unsqueeze(-1).unsqueeze(-1) * x
 
 
 class CustomCNNFeatureExtractor(BaseFeaturesExtractor):
@@ -80,14 +100,13 @@ class CustomCNNFeatureExtractor(BaseFeaturesExtractor):
             # Pooling layers for downsampling
             "pool_layers": [
                 {"kernel_size": 2, "stride": 2},  # 1/2
-                {"kernel_size": 2, "stride": 2},  # 1/4
-                {"kernel_size": 2, "stride": 2},  # 1/8
-                {"kernel_size": 2, "stride": 2}   # 1/16
+                {"kernel_size": 2, "stride": 2}   # 1/4
             ],
             "activation": "leaky_relu",  # Better for financial data with negative returns
             "batch_norm": True,  # Add batch normalization
             "dropout": 0.3,  # Slightly higher dropout for regularization
-            "fc_layers": [512, 256]  # Larger fully connected layers
+            "fc_layers": [512, 256],  # Larger fully connected layers
+            "use_channel_attention": True # New parameter
         }
         
         # Use provided config or default
@@ -129,8 +148,10 @@ class CustomCNNFeatureExtractor(BaseFeaturesExtractor):
             
             # Update dimensions after convolution and pooling
             # After convolution: (H + 2*padding - kernel_size) / stride + 1
-            height = int((height + 2*conv_config["padding"] - conv_config["kernel_size"]) / conv_config["stride"] + 1)
-            width = int((width + 2*conv_config["padding"] - conv_config["kernel_size"]) / conv_config["stride"] + 1)
+            padding_val = conv_config["padding"][0] if isinstance(conv_config["padding"], tuple) else conv_config["padding"]
+            kernel_size_val = conv_config["kernel_size"][0] if isinstance(conv_config["kernel_size"], tuple) else conv_config["kernel_size"]
+            height = int((height + 2*padding_val - kernel_size_val) / conv_config["stride"] + 1)
+            width = int((width + 2*padding_val - kernel_size_val) / conv_config["stride"] + 1)
             
             # After pooling: (H - kernel_size) / stride + 1
             height = int((height - pool_config["kernel_size"]) / pool_config["stride"] + 1)
@@ -139,6 +160,11 @@ class CustomCNNFeatureExtractor(BaseFeaturesExtractor):
             # Update channels for next layer
             in_channels = conv_config["out_channels"]
         
+        # Add Channel Attention if enabled
+        if self.cnn_config.get("use_channel_attention", False):
+            cnn_layers.append(ChannelAttention(in_channels))
+            logger.info(f"Added Channel Attention layer with {in_channels} channels.")
+
         # Add flatten layer
         cnn_layers.append(nn.Flatten())
         

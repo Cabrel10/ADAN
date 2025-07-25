@@ -16,14 +16,14 @@ from pathlib import Path
 # Add the src directory to the Python path
 sys.path.insert(0, str(Path(__file__).parent.parent / 'src'))
 
-from adan_trading_bot.environment.multi_asset_env import MultiAssetEnv
+from adan_trading_bot.environment.multi_asset_chunked_env import MultiAssetChunkedEnv
 from adan_trading_bot.portfolio.portfolio_manager import PortfolioManager
 from adan_trading_bot.trading.order_manager import OrderManager
 from adan_trading_bot.trading.safety_manager import SafetyManager
 from adan_trading_bot.trading import OrderSide, OrderStatus
 
 # Load test configuration
-CONFIG_PATH = os.path.join(os.path.dirname(__file__), '..', 'config', 'environment_config.yaml')
+CONFIG_PATH = Path(__file__).parent.parent.parent / 'config' / 'environment_config.yaml'
 
 class TestIntegration(unittest.TestCase):
     """Integration tests for the ADAN Trading Bot."""
@@ -53,15 +53,61 @@ class TestIntegration(unittest.TestCase):
             })
         }
     
-    def setUp(self):
-        """Set up test fixtures before each test method."""
-        self.env = MultiAssetEnv(
-            data=self.sample_data,
-            config=self.config,
-            mode='paper'
+    @classmethod
+    def setUpClass(cls):
+        """Set up test fixtures before all tests."""
+        # Load configuration
+        with open(CONFIG_PATH, 'r') as f:
+            cls.config = yaml.safe_load(f)
+        
+        # Create sample market data for testing
+        cls.sample_data = {
+            'BTC/USDT': pd.DataFrame({
+                'open': [50000, 50500, 51000, 50800, 51200],
+                'high': [50500, 51000, 51500, 51300, 51500],
+                'low': [49800, 50300, 50800, 50600, 51000],
+                'close': [50400, 50800, 51200, 51000, 51300],
+                'volume': [100, 120, 150, 130, 140]
+            }),
+            'ETH/USDT': pd.DataFrame({
+                'open': [3000, 3050, 3100, 3080, 3120],
+                'high': [3050, 3100, 3150, 3130, 3150],
+                'low': [2980, 3030, 3080, 3060, 3100],
+                'close': [3040, 3080, 3120, 3100, 3130],
+                'volume': [1000, 1200, 1500, 1300, 1400]
+            })
+        }
+
+        # Create a dummy ChunkedDataLoader that uses the sample_data directly
+        class DummyChunkedDataLoader:
+            def __init__(self, sample_data, assets_list):
+                self.sample_data = sample_data
+                self.assets_list = assets_list
+                self.chunk_size = 10000 # Dummy chunk size
+
+            def load_chunk(self, chunk_id):
+                # For simplicity, return the entire sample_data as a single chunk
+                # In a real scenario, this would load a specific chunk from disk
+                if chunk_id == 0:
+                    return {asset: {'1m': df} for asset, df in self.sample_data.items()} # Wrap in timeframe dict
+                return None
+            
+            def __len__(self):
+                return 1 # Only one chunk for this dummy loader
+
+        cls.dummy_data_loader = DummyChunkedDataLoader(cls.sample_data, list(cls.sample_data.keys()))
+
+        cls.env = MultiAssetChunkedEnv(
+            config={
+                **cls.config,
+                "data": {"assets": list(cls.sample_data.keys())} # Add data section to config
+            },
+            data_loader=cls.dummy_data_loader # Pass the dummy data loader
         )
-    
-    def test_environment_initialization(self):
+
+    def setUp(self):
+        # Reset the environment for each test method
+        self.env.reset()
         """Test that the environment initializes correctly."""
         self.assertIsNotNone(self.env)
         self.assertEqual(len(self.env.assets), 2)

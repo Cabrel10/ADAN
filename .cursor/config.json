@@ -1,0 +1,153 @@
+{
+  "$schema": "https://cursor.sh/schemas/cursor-config-schema.json",
+  "project": {
+    "name": "ADAN Trading Bot",
+    "version": "1.0.0",
+    "description": "Système de trading algorithmique avancé utilisant le Deep Reinforcement Learning"
+  },
+  "ai": {
+    "model": "gpt-4",
+    "temperature": 0.2,
+    "contextWindow": 128000,
+    "maxTokens": 4096
+  },
+  "editor": {
+    "autoFormatOnSave": true,
+    "formatOnSave": true,
+    "autoSave": "afterDelay",
+    "autoSaveDelay": 1000,
+    "wordWrap": "on",
+    "tabSize": 4,
+    "insertSpaces": true,
+    "detectIndentation": false
+  },
+  "languages": {
+    "python": {
+      "pythonPath": "${workspaceFolder}/.venv/bin/python",
+      "linting": {
+        "enabled": true,
+        "pylintEnabled": true,
+        "mypyEnabled": true,
+        "flake8Enabled": true
+      },
+      "formatting": {
+        "provider": "black",
+        "args": ["--line-length", "88"]
+      },
+      "analysis": {
+        "typeCheckingMode": "basic",
+        "autoImportCompletions": true,
+        "autoSearchPaths": true,
+        "useLibraryCodeForTypes": true
+      }
+    }
+  },
+  "tasks": {
+    "version": "2.0.0",
+    "tasks": [
+      {
+        "label": "Install Dependencies",
+        "type": "shell",
+        "command": "uv pip install -r requirements.txt",
+        "group": "build",
+        "problemMatcher": []
+      },
+      {
+        "label": "Run Tests",
+        "type": "shell",
+        "command": "pytest tests/ -v",
+        "group": "test",
+        "problemMatcher": []
+      },
+      {
+        "label": "Lint",
+        "type": "shell",
+        "command": "flake8 src/ tests/ && mypy src/ tests/",
+        "group": "test",
+        "problemMatcher": []
+      },
+      {
+        "label": "Format",
+        "type": "shell",
+        "command": "black src/ tests/ && isort src/ tests/",
+        "group": "build",
+        "problemMatcher": []
+      }
+    ]
+  },
+  "extensions": {
+    "recommendations": [
+      "ms-python.python",
+      "ms-python.vscode-pylance",
+      "ms-python.black-formatter",
+      "ms-python.isort",
+      "ms-python.mypy-type-checker",
+      "ms-python.flake8",
+      "ms-python.pylint"
+    ]
+  },
+  "files": {
+    "exclude": [
+      "**/.git",
+      "**/.mypy_cache",
+      "**/__pycache__",
+      "**/*.pyc",
+      "**/.pytest_cache",
+      "**/.venv",
+      "**/venv",
+      "**/env",
+      "**/data",
+      "**/logs",
+      "**/models"
+    ],
+    "watcher": {
+      "exclude": [
+        "**/.git/objects/**",
+        "**/node_modules/**",
+        "**/.hg/store/**"
+      ]
+    }
+  },
+  "terminal.integrated": {
+    "defaultProfile.linux": "zsh",
+    "profiles.linux": {
+      "zsh": {
+        "path": "zsh",
+        "args": ["-l"]
+      }
+    }
+  },
+  "workbench": {
+    "colorTheme": "Default Dark+",
+    "iconTheme": "material-icon-theme",
+    "startOnWelcome": false,
+    "editor": {
+      "minimap": {
+        "enabled": true
+      },
+      "renderWhitespace": "selection",
+      "renderControlCharacters": true,
+      "renderIndentGuides": true,
+      "renderLineHighlight": "all",
+      "scrollBeyondLastLine": false,
+      "suggestSelection": "first",
+      "wordWrap": "on"
+    }
+  },
+  "python": {
+    "analysis": {
+      "autoImportCompletions": true,
+      "autoSearchPaths": true,
+      "diagnosticMode": "workspace",
+      "stubPath": "typings",
+      "typeCheckingMode": "basic",
+      "useLibraryCodeForTypes": true
+    },
+    "defaultInterpreterPath": "${workspaceFolder}/.venv/bin/python",
+    "formatting.provider": "black",
+    "linting.enabled": true,
+    "linting.flake8Enabled": true,
+    "linting.mypyEnabled": true,
+    "linting.pylintEnabled": true
+  }
+}

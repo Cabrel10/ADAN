@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 import unittest
 import pandas as pd
-from src.adan_trading_bot.environment.data_handler import DataHandler
+from adan_trading_bot.environment.data_handler import DataHandler
 
 class TestDataHandler(unittest.TestCase):
     def setUp(self):

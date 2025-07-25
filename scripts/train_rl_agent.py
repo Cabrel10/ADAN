@@ -12,24 +12,25 @@ Fonctionnalités principales :
 """
 
 import argparse
+import json
 import logging
 import os
-import json
+import sys
+import yaml
+from datetime import datetime
+from pathlib import Path
+from typing import Dict, Any, Optional, List, Tuple
+
 import numpy as np
 import pandas as pd
 import torch
-from pathlib import Path
-import sys
-from typing import Dict, Any, Optional, List, Tuple
-import yaml
-from datetime import datetime
 
 # Stable Baselines 3
 from stable_baselines3 import PPO, A2C, SAC, TD3
 from stable_baselines3.common.callbacks import BaseCallback, CheckpointCallback, EvalCallback, CallbackList
-from stable_baselines3.common.vec_env import DummyVecEnv, VecNormalize, sync_envs_normalization
-from stable_baselines3.common.monitor import Monitor
 from stable_baselines3.common.evaluation import evaluate_policy
+from stable_baselines3.common.monitor import Monitor
+from stable_baselines3.common.vec_env import DummyVecEnv, VecNormalize, sync_envs_normalization
 
 # Configuration du logging
 logging.basicConfig(
@@ -37,7 +38,7 @@ logging.basicConfig(
     format='%(asctime)s - %(levelname)s - %(message)s',
     handlers=[
         logging.StreamHandler(),
-        logging.FileHandler('training.log')
+        logging.FileHandler('logs/training.log')
     ]
 )
 logger = logging.getLogger(__name__)
@@ -47,7 +48,8 @@ project_root = Path(__file__).resolve().parent.parent
 sys.path.append(str(project_root))
 
 # Import des modules personnalisés
-from src.adan_trading_bot.environment.multi_asset_env import AdanTradingEnv
+from src.adan_trading_bot.environment.multi_asset_chunked_env import MultiAssetChunkedEnv
+from src.adan_trading_bot.data_processing.chunked_loader import ChunkedDataLoader
 from src.adan_trading_bot.utils.visualization import TradingVisualizer
 
 class TradingMetricsCallback(BaseCallback):
@@ -143,7 +145,7 @@ def load_config(path: str) -> Dict[str, Any]:
 
 def setup_environment(config: Dict[str, Any], mode: str = 'train') -> Tuple[DummyVecEnv, Dict[str, Any]]:
     """
-    Initialise et configure l'environnement de trading.
+    Initialise et configure l'environnement de trading avec chargement par chunks.
     
     Args:
         config: Configuration du modèle
@@ -180,16 +182,51 @@ def setup_environment(config: Dict[str, Any], mode: str = 'train') -> Tuple[Dumm
     }
     
     # Chargement de la configuration de l'environnement
-    env_config = load_config('config/environment_config.yaml')
+    env_config = load_config(str(project_root / 'config/environment_config.yaml'))
     
     # Fusion des configurations (la plus spécifique écrase la moins spécifique)
     full_config = {**data_config, **env_config, **config}
     
-    # Ajout du split à la configuration
-    full_config['split'] = mode
+    # Ajout du mode (train/val/test) à la configuration
+    full_config['mode'] = mode
     
-    # Création de l'environnement
-    env = AdanTradingEnv(config=full_config)
+    # Ajouter les sections manquantes si elles n'existent pas
+    if 'portfolio' not in full_config:
+        full_config['portfolio'] = {
+            'initial_capital': 1000.0,
+            'max_position_size': 0.1,
+            'transaction_cost': 0.001
+        }
+    
+    if 'risk_management' not in full_config:
+        full_config['risk_management'] = {
+            'max_drawdown': 0.2,
+            'var_confidence': 0.95,
+            'position_size_limit': 0.1,
+            'capital_tiers': [
+                {'min_capital': 0, 'max_capital': 1000, 'max_position_size': 0.05},
+                {'min_capital': 1000, 'max_capital': 10000, 'max_position_size': 0.1},
+                {'min_capital': 10000, 'max_capital': float('inf'), 'max_position_size': 0.15}
+            ]
+        }
+    
+    # Initialisation du DataLoader pour le mode spécifié
+    data_dir = Path(full_config['data']['data_dir'])
+    logger.info(f"Initialisation du ChunkedDataLoader pour le mode {mode}...")
+    
+    # Création du DataLoader pour le mode spécifié
+    data_loader = ChunkedDataLoader(
+        data_dir=data_dir,
+        assets_list=full_config['data']['assets'],
+        timeframes=full_config['data']['timeframes'],
+        split=mode,
+        chunk_size=full_config['data'].get('chunk_size', 10000)
+    )
+    
+    logger.info(f"Chargement des données pour {len(data_loader.assets_list)} actifs et {len(data_loader.timeframes)} timeframes")
+    
+    # Création de l'environnement avec le DataLoader
+    env = MultiAssetChunkedEnv(config=full_config)
     
     # Enveloppement avec Monitor pour le suivi des récompenses
     env = Monitor(env)
@@ -206,7 +243,7 @@ def setup_environment(config: Dict[str, Any], mode: str = 'train') -> Tuple[Dumm
             clip_obs=10.0
         )
     
-    return vec_env, {'env': env, 'config': full_config}
+    return vec_env, full_config
 
 def setup_model(env: DummyVecEnv, config: Dict[str, Any]) -> PPO:
     """Initialise le modèle d'apprentissage par renforcement."""
@@ -225,7 +262,7 @@ def setup_model(env: DummyVecEnv, config: Dict[str, Any]) -> PPO:
     
     # Création du modèle
     model = PPO(
-        policy="MultiInputPolicy",
+        policy="MlpPolicy",
         env=env,
         learning_rate=agent_config.get('learning_rate', 3e-4),
         n_steps=agent_config.get('n_steps', 2048),
@@ -282,27 +319,24 @@ def setup_callbacks(model: PPO, config: Dict[str, Any], eval_env: Optional[Dummy
     
     return CallbackList(callbacks)
 
-def train_model():
+def train_model(config_path: str,
+                 exec_profile: str,
+                 training_timeframe: str,
+                 total_timesteps: int,
+                 initial_capital: float,
+                 resume_path: Optional[str] = None):
     """Fonction principale pour l'entraînement du modèle."""
-    # Configuration des arguments en ligne de commande
-    parser = argparse.ArgumentParser(description="Entraînement de l'agent de trading ADAN avec RL")
-    parser.add_argument(
-        "--config",
-        type=str,
-        default="config/main_config.yaml",
-        help="Chemin vers le fichier de configuration principal"
-    )
-    parser.add_argument(
-        "--resume",
-        type=str,
-        default=None,
-        help="Chemin vers un modèle à reprendre pour l'entraînement"
-    )
-    args = parser.parse_args()
-    
     # Chargement de la configuration
-    logger.info(f"Chargement de la configuration depuis {args.config}")
-    config = load_config(args.config)
+    logger.info(f"Chargement de la configuration depuis {config_path}")
+    config = load_config(config_path)
+    
+    # Mettre à jour la configuration avec les paramètres passés
+    config['run'] = {
+        'exec_profile': exec_profile,
+        'training_timeframe': training_timeframe,
+        'total_timesteps': total_timesteps,
+        'initial_capital': initial_capital
+    }
     
     # Configuration des chemins
     config.setdefault('paths', {})
@@ -310,6 +344,7 @@ def train_model():
     config['paths'].setdefault('checkpoint_dir', 'models/checkpoints')
     config['paths'].setdefault('best_model_dir', 'models/best')
     config['paths'].setdefault('eval_logs_dir', 'logs/eval')
+    config['paths'].setdefault('trained_models_dir', 'models')
     
     # Création des répertoires nécessaires
     for path in config['paths'].values():
@@ -319,9 +354,9 @@ def train_model():
     env, env_metadata = setup_environment(config, mode='train')
     
     # Initialisation du modèle
-    if args.resume:
-        logger.info(f"Reprise de l'entraînement à partir de {args.resume}")
-        model = PPO.load(args.resume, env=env)
+    if resume_path:
+        logger.info(f"Reprise de l'entraînement à partir de {resume_path}")
+        model = PPO.load(resume_path, env=env)
     else:
         model = setup_model(env, config)
     
@@ -329,7 +364,6 @@ def train_model():
     callbacks = setup_callbacks(model, config)
     
     # Entraînement du modèle
-    total_timesteps = config.get('training', {}).get('total_timesteps', 1_000_000)
     logger.info(f"Début de l'entraînement pour {total_timesteps} pas...")
     
     try:
@@ -347,7 +381,7 @@ def train_model():
     
     # Sauvegarde du modèle final
     final_model_path = os.path.join(
-        config.get('paths', {}).get('trained_models_dir', 'models'),
+        config['paths']['trained_models_dir'],
         f"adan_ppo_final_{int(datetime.now().timestamp())}"
     )
     model.save(final_model_path)
@@ -370,7 +404,8 @@ def train_model():
             from src.adan_trading_bot.utils.visualization import generate_training_report
             
             # Création du répertoire de rapports
-            report_dir = os.path.join('reports', f'run_{datetime.now().strftime("%Y%m%d_%H%M%S")}')
+            report_dir = os.path.join('reports', 
+                                    f'run_{datetime.now().strftime("%Y%m%d_%H%M%S")}')
             os.makedirs(report_dir, exist_ok=True)
             
             # Génération du rapport
@@ -381,20 +416,48 @@ def train_model():
                 },
                 portfolio_values=metrics.get('portfolio_values', []),
                 actions=metrics.get('actions', []),
-                prices=[p[0] for p in metrics.get('prices', [])],  # Prix du premier actif
-                returns=np.diff(metrics.get('portfolio_values', [0, 0])) / np.array(metrics.get('portfolio_values', [1, 1])[:-1]),
+                prices=[p[0] for p in metrics.get('prices', [])],
+                returns=np.diff(metrics.get('portfolio_values', [0, 0])) 
+                         / np.array(metrics.get('portfolio_values', [1, 1])[:-1]),
                 output_dir=report_dir
             )
             
             logger.info(f"Rapport de trading généré dans {os.path.abspath(report_dir)}")
             
         except Exception as e:
-            logger.error(f"Erreur lors de la génération du rapport: {str(e)}", exc_info=True)
+            logger.error(f"Erreur lors de la génération du rapport: {str(e)}", 
+                        exc_info=True)
     
     return metrics
 
 if __name__ == "__main__":
-    train_metrics = train_model()
+    parser = argparse.ArgumentParser(description='Train ADAN RL agent.')
+    parser.add_argument('--config', type=str, default='config/main_config.yaml',
+                        help='Path to configuration file')
+    parser.add_argument('--exec_profile', type=str, default='cpu',
+                        help='Execution profile (cpu or gpu)')
+    parser.add_argument('--training_timeframe', type=str, default='1m',
+                        help='Timeframe for training')
+    parser.add_argument('--total_timesteps', type=int, default=50000,
+                        help='Total training timesteps')
+    parser.add_argument('--initial_capital', type=float, default=15.0,
+                        help='Initial capital for training')
+    parser.add_argument(
+        "--resume",
+        type=str,
+        default=None,
+        help="Path to a model to resume training from"
+    )
+    args = parser.parse_args()
+    
+    train_metrics = train_model(
+        config_path=args.config,
+        exec_profile=args.exec_profile,
+        training_timeframe=args.training_timeframe,
+        total_timesteps=args.total_timesteps,
+        initial_capital=args.initial_capital,
+        resume_path=args.resume
+    )
     
     # Sauvegarde des métriques d'entraînement
     if train_metrics:
@@ -402,24 +465,3 @@ if __name__ == "__main__":
         with open(metrics_path, 'w') as f:
             json.dump(train_metrics, f, indent=2)
         logger.info(f"Métriques d'entraînement sauvegardées dans {metrics_path}")
-    logger.info(f"Starting training for {total_timesteps} timesteps...")
-    logger.info(f"Models will be saved every {save_freq} steps in '{save_path}'")
-
-    try:
-        model.learn(
-            total_timesteps=total_timesteps,
-            callback=checkpoint_callback,
-            progress_bar=True
-        )
-    except KeyboardInterrupt:
-        logger.warning("Training interrupted by user.")
-
-    # 5. Save the Final Model
-    final_model_path = Path(save_path) / f"{model_name}_final.zip"
-    model.save(final_model_path)
-
-    logger.info(f"Training finished. Final model saved to: {final_model_path}")
-    logger.info("To evaluate the model, run the evaluation script.")
-
-if __name__ == "__main__":
-    main()

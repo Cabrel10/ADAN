@@ -55,6 +55,11 @@ class OnlineLearningAgent:
         self.learning_config = learning_config or {}
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         
+        # Learning rate scheduling parameters
+        self.initial_lr = self.learning_config.get('learning_rate', 0.00001)
+        self.lr_decay_steps = self.learning_config.get('lr_decay_steps', 10000)
+        self.min_lr = self.learning_config.get('min_lr', 1e-6)
+        
         # Initialisation du buffer d'expérience prioritaire
         self.buffer = PrioritizedExperienceReplayBuffer(
             buffer_size=self.learning_config.get('buffer_size', 10000),
@@ -201,59 +206,7 @@ class OnlineLearningAgent:
         
         return metrics
     
-    def _load_or_initialize_agent(self):
-        """
-        Initialise l'agent d'apprentissage continu.
-        
-        Args:
-            config: Configuration complète du système
-            model_path: Chemin vers le modèle PPO pré-entraîné
-            initial_capital: Capital initial
-            learning_config: Configuration spécifique à l'apprentissage continu
-        """
-        self.config = config
-        self.model_path = Path(model_path)
-        self.initial_capital = initial_capital
-        
-        # Configuration de l'apprentissage
-        self.learning_config = learning_config or {}
-        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        
-        # Initialisation du buffer d'expérience prioritaire
-        self.buffer = PrioritizedExperienceReplayBuffer(
-            buffer_size=self.learning_config.get('buffer_size', 10000),
-            alpha=self.learning_config.get('alpha', 0.6),
-            beta=self.learning_config.get('beta', 0.4),
-            beta_increment=self.learning_config.get('beta_increment', 0.001),
-            epsilon=self.learning_config.get('epsilon', 1e-6)
-        )
-        
-        # Charger ou initialiser le modèle
-        self.agent, self.agent_config = self._load_or_initialize_agent()
-        
-        # Compteurs et états
-        self.episode_count = 0
-        self.step_count = 0
-        self.last_save_time = time.time()
-        self.save_interval = self.learning_config.get('save_interval', 3600)  # 1h par défaut
-        
-        # Répertoire de sauvegarde
-        self.save_dir = Path(self.learning_config.get('save_dir', 'saved_models/online_learning'))
-        self.save_dir.mkdir(parents=True, exist_ok=True)
-        
-        # Initialisation des états
-        self.current_capital = initial_capital
-        self.positions = {}
-        self.last_episode_metrics = {}
-        
-        # Initialisation du client d'échange
-        self.exchange_client = self._initialize_exchange_client()
-        
-        # Initialisation du calculateur de récompense
-        self.reward_calculator = OnlineRewardCalculator(self.config)
-        
-        logger.info(f"OnlineLearningAgent initialisé avec {len(self.buffer)} expériences dans le buffer")
-        logger.info(f"Modèle chargé depuis : {self.model_path}")
+    
     
     def _load_or_initialize_agent(self):
         """
@@ -382,6 +335,29 @@ class OnlineLearningAgent:
             td_errors = torch.abs(targets - current_values).squeeze()
             
             return td_errors.cpu().numpy()
+
+    def _adjust_learning_rate(self):
+        """
+        Adjusts the learning rate using a linear decay schedule.
+        """
+        if self.learning_steps >= self.lr_decay_steps:
+            new_lr = self.min_lr
+        else:
+            decay_factor = 1 - (self.learning_steps / self.lr_decay_steps)
+            new_lr = self.initial_lr * decay_factor
+        
+        # Ensure learning rate doesn't go below minimum
+        new_lr = max(new_lr, self.min_lr)
+        
+        # Update the agent's learning rate
+        if hasattr(self.agent.optimizer, 'param_groups'):
+            for param_group in self.agent.optimizer.param_groups:
+                param_group['lr'] = new_lr
+        else:
+            # Fallback for agents without param_groups (e.g., some custom optimizers)
+            self.agent.learning_rate = new_lr # Assuming agent has a direct learning_rate attribute
+
+        logger.debug(f"Learning rate adjusted to: {new_lr:.6f}")
     
     def learn_from_experience(self, batch_size=256, num_epochs=4):
         """
@@ -1101,6 +1077,9 @@ class OnlineLearningAgent:
                 
                 self.learning_steps += 1
                 
+                # Adjust learning rate
+                self._adjust_learning_rate()
+                
                 # 9. Ajuster le taux d'exploration
                 self._adjust_exploration_rate()
                 
@@ -1169,6 +1148,16 @@ class OnlineLearningAgent:
                 logger.info(f"💰 Current Capital: ${self.current_capital:.2f}")
                 logger.info(f"📊 Open Positions: {len(self.positions)}")
                 logger.info(f"🧠 Learning Steps: {self.learning_steps}")
+                
+                # Log additional KPIs
+                current_metrics = self.reward_calculator.get_performance_summary()
+                logger.info(f"📈 Current PnL: ${current_metrics.get('total_pnl', 0.0):.2f} ({current_metrics.get('win_rate', 0.0):.1f}% Win Rate)")
+                logger.info(f"📉 Max Drawdown: {current_metrics.get('max_drawdown', 0.0):.2f}%")
+                logger.info(f"📊 Sharpe Ratio: {current_metrics.get('sharpe_ratio', 0.0):.2f}")
+
+                # Save metrics to file periodically
+                if iteration % self.learning_config.get('metrics_save_frequency', 10) == 0:
+                    self._save_metrics_to_file(iteration, current_metrics)
                 
                 # 1. Récupérer les données de marché
                 market_data_dict = {}
@@ -1366,6 +1355,36 @@ class OnlineLearningAgent:
             
         except Exception as e:
             logger.error(f"❌ Failed to save learning session: {e}")
+
+    def _save_metrics_to_file(self, iteration: int, metrics: Dict[str, Any]):
+        """Saves key performance metrics to a JSON file."""
+        metrics_path = self.save_dir / "realtime_metrics.json"
+        data = {
+            "timestamp": datetime.now().isoformat(),
+            "iteration": iteration,
+            "capital": self.current_capital,
+            "learning_steps": self.learning_steps,
+            "exploration_rate": self.exploration_rate,
+            "metrics": metrics
+        }
+        
+        # Append to file if it exists, otherwise create new
+        if metrics_path.exists():
+            with open(metrics_path, 'r+') as f:
+                try:
+                    file_data = json.load(f)
+                    if not isinstance(file_data, list):
+                        file_data = [file_data] # Ensure it's a list
+                except json.JSONDecodeError:
+                    file_data = []
+                file_data.append(data)
+                f.seek(0)
+                json.dump(file_data, f, indent=2, default=str)
+                f.truncate()
+        else:
+            with open(metrics_path, 'w') as f:
+                json.dump([data], f, indent=2, default=str)
+        logger.debug(f"Metrics saved to {metrics_path}")
 
 
 def main():

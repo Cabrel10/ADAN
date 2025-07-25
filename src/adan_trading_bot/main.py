@@ -19,7 +19,7 @@ import yaml
 # Ajouter le répertoire parent au PYTHONPATH pour pouvoir importer les modules du package
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 
-from adan_trading_bot.common.custom_logger import setup_logger
+from adan_trading_bot.common.custom_logger import setup_logging
 
 
 def parse_arguments():

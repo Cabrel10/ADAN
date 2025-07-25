@@ -8,6 +8,7 @@ import numpy as np
 import pandas as pd
 from datetime import datetime
 import logging
+from typing import Dict, Any, Optional, List, Tuple, Union
 
 def _is_running_in_colab():
     """Check if the code is running in Google Colab."""
@@ -144,17 +145,19 @@ def load_from_pickle(file_path):
     """
     return joblib.load(file_path)
 
-def create_directories(*dir_paths):
+def create_directories(dir_paths: Union[str, List[str]]) -> None:
     """
-    Create multiple directories if they don't exist.
+    Create the specified directories if they don't exist.
     
     Args:
-        *dir_paths: Variable number of directory paths to create.
+        dir_paths: Path or list of paths to create
     """
+    if isinstance(dir_paths, str):
+        dir_paths = [dir_paths]
+    
     for dir_path in dir_paths:
         if not os.path.exists(dir_path):
             os.makedirs(dir_path, exist_ok=True)
-
 
 def ensure_dir_exists(dir_path):
     """

@@ -7,7 +7,7 @@
 # Configuration des données
 data:
   # Répertoire des données
-  data_dir: "data/final"
+  data_dir: "/home/morningstar/Documents/trading/ADAN/data/final"
   
   # Paires de trading disponibles (5 paires majeures)
   assets: 
@@ -17,117 +17,89 @@ data:
     - "XRP"    # Ripple - Une cryptomonnaie de paiement majeure
     - "ADA"    # Cardano - Une plateforme de contrats intelligents concurrente d'Ethereum
   
-  # Timeframes disponibles (du plus long au plus court)
-  timeframes: ["4h", "1h", "5m"]
+  # Timeframes disponibles (du plus court au plus long)
+  timeframes: ["5m", "1h", "4h"]
   
-  # Colonnes de caractéristiques
-  features: ["open", "high", "low", "close", "volume"]
+  # Configuration des caractéristiques par timeframe
+  features_per_timeframe:
+    "5m":
+      - "OPEN"
+      - "HIGH"
+      - "LOW"
+      - "CLOSE"
+      - "VOLUME"
+      - "RSI_14"
+      - "STOCHk_14_3_3"
+      - "STOCHd_14_3_3"
+      - "CCI_20_0.015"
+      - "ROC_9"
+      - "MFI_14"
+      - "EMA_5"
+      - "EMA_20"
+    "1h":
+      - "OPEN"
+      - "HIGH"
+      - "LOW"
+      - "CLOSE"
+      - "VOLUME"
+      - "RSI_14"
+      - "STOCHk_14_3_3"
+      - "STOCHd_14_3_3"
+      - "CCI_20_0.015"
+      - "ROC_9"
+      - "MFI_14"
+      - "EMA_5"
+      - "EMA_20"
+    "4h":
+      - "OPEN"
+      - "HIGH"
+      - "LOW"
+      - "CLOSE"
+      - "VOLUME"
+      - "RSI_14"
+      - "STOCHk_14_3_3"
+      - "STOCHd_14_3_3"
+      - "CCI_20_0.015"
+      - "ROC_9"
+      - "MFI_14"
+      - "EMA_5"
+      - "EMA_20"
 
 # Configuration de l'agent
 agent:
-  # Algorithme RL à utiliser
   algorithm: "PPO"
-  
-  # Type de politique
   policy: "MultiInputPolicy"
-  
-  # Nombre total de pas d'entraînement
-  total_timesteps: 500000
-  
-  # Taille du batch
-  batch_size: 64
-  
-  # Taille de la fenêtre d'observation
-  window_size: 100
-
-# Configuration de l'environnement
-environment:
-  # Capital initial en USDT
-  initial_balance: 20.0
-  
-  # Frais de trading (0.1% par défaut)
-  trading_fees: 0.001
-  
-  # Nombre maximum de pas par épisode
-  max_steps: 1000
-  
-  # Mode de fonctionnement (backtest, paper, live)
-  mode: "backtest"
 
 # Configuration du logging
 logging:
-  # Niveau de log (DEBUG, INFO, WARNING, ERROR, CRITICAL)
-  level: "INFO"
-  
-  # Dossier de sortie pour les logs
+  level: "DEBUG"
+  config_file: "logging_config.yaml"
   log_dir: "logs"
-  
-  # Fréquence de sauvegarde du modèle (en pas)
+
+# Configuration de l'entraînement
+training:
+  total_timesteps: 50000
+  batch_size: 64
   save_freq: 10000
+  checkpointing:
+    enabled: true
+    save_freq: 50000
+    model_name: "ppo_adan_v1"
+    save_path: "${paths.trained_models_dir}/${training.checkpointing.model_name}"
 
-# ------------------------------------------------------------------------------
-# Paramètres Généraux du Projet
-# ------------------------------------------------------------------------------
-general:
-  # Nom du projet, utilisé pour les logs et les noms de modèles.
-  project_name: "ADAN_Refonte"
-  
-  # Graine aléatoire pour garantir la reproductibilité des expériences.
-  random_seed: 42
-  
-  # Fuseau horaire utilisé pour tous les horodatages.
-  timezone: "UTC"
+# Configuration de l'environnement
+environment:
+  initial_balance: 20.0
+  trading_fee: 0.001
+  max_position_size: 0.1
+  max_positions: 5
+  reward_config:
+    reward_type: "percentage"
+    reward_scale: 1.0
+    penalty_scale: 1.0
 
-# ------------------------------------------------------------------------------
-# Configuration de l'Exécution
-# ------------------------------------------------------------------------------
-# Définit le mode de fonctionnement du script principal.
-run:
-  # Modes possibles: "train", "backtest", "paper_trade", "live_trade", "evaluate"
-  mode: "train"
-  
-  # Activer le mode debug pour des logs plus détaillés et des vérifications.
-  debug_mode: true
-  
-  # Nombre de coeurs CPU à utiliser pour le traitement parallèle (-1 = tous).
-  n_jobs: -1
-
-# ------------------------------------------------------------------------------
-# Gestion des Chemins et Répertoires
-# ------------------------------------------------------------------------------
-# Centralise tous les chemins utilisés dans le projet pour une gestion facile.
+# Configuration des chemins
 paths:
-  # Le répertoire racine du projet.
-  # NOTE: Il est recommandé d'utiliser des chemins relatifs ou des variables
-  # d'environnement pour une meilleure portabilité.
-  base_dir: "."
-  
-  # Sous-répertoires (relatifs à base_dir)
-  data_dir: "${paths.base_dir}/data"
-  raw_data_dir: "${paths.data_dir}/raw"
-  processed_data_dir: "${paths.data_dir}/processed"
-  
-  models_dir: "${paths.base_dir}/models"
-  trained_models_dir: "${paths.models_dir}/rl_agents"
-  
-  logs_dir: "${paths.base_dir}/logs"
-  
-  reports_dir: "${paths.base_dir}/reports"
-  figures_dir: "${paths.reports_dir}/figures"
-  metrics_dir: "${paths.reports_dir}/metrics"
-
-# ------------------------------------------------------------------------------
-# Configuration des Sauvegardes (Checkpoints)
-# ------------------------------------------------------------------------------
-checkpointing:
-  # Activer la sauvegarde automatique du modèle pendant l'entraînement.
-  enabled: true
-  
-  # Fréquence de sauvegarde en nombre de pas de temps (timesteps).
-  save_freq: 50000
-  
-  # Nom du modèle à sauvegarder. Peut inclure des placeholders.
-  model_name: "ppo_adan_v1"
-  
-  # Chemin complet pour la sauvegarde (utilise les variables de la section paths).
-  save_path: "${paths.trained_models_dir}/${checkpointing.model_name}"
+  trained_models_dir: "models/trained"
+  tensorboard_dir: "logs/tensorboard"
+  checkpoints_dir: "models/checkpoints"

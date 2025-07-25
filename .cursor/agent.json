@@ -1,0 +1,226 @@
+{
+  "$schema": "https://cursor.sh/schemas/agent-config-schema.json",
+  "version": "1.0.0",
+  "name": "ADAN Trading Agent",
+  "description": "Configuration pour l'agent Cursor du projet ADAN Trading Bot",
+  
+  "context": {
+    "files": [
+      "SPEC.md",
+      "todo.md",
+      "README.md",
+      "config/config.yaml",
+      "src/adan_trading_bot/__init__.py",
+      "src/adan_trading_bot/environment/state_builder.py",
+      "src/adan_trading_bot/environment/multi_asset_chunked_env.py",
+      "src/adan_trading_bot/portfolio/manager.py",
+      "src/adan_trading_bot/risk/dynamic_behavior_engine.py"
+    ],
+    "directories": [
+      "src/adan_trading_bot",
+      "tests"
+    ],
+    "maxTokens": 32000,
+    "strategy": "smart"
+  },
+  
+  "capabilities": {
+    "codeActions": {
+      "enabled": true,
+      "autoApply": true,
+      "confirmBeforeApply": true
+    },
+    "terminal": {
+      "enabled": true,
+      "autoRun": {
+        "enabled": true,
+        "safeCommands": [
+          "python -m pytest",
+          "black",
+          "isort",
+          "mypy",
+          "flake8"
+        ]
+      }
+    },
+    "fileOperations": {
+      "enabled": true,
+      "allowOverwrite": true,
+      "backupBeforeWrite": true
+    },
+    "webSearch": {
+      "enabled": true,
+      "providers": ["google", "stackoverflow", "github"],
+      "maxResults": 5
+    },
+    "memory": {
+      "enabled": true,
+      "maxItems": 1000,
+      "autoPrune": true
+    }
+  },
+  
+  "workflows": {
+    "default": {
+      "name": "Développement standard",
+      "description": "Workflow par défaut pour le développement de fonctionnalités",
+      "steps": [
+        {
+          "name": "Comprendre la tâche",
+          "prompt": "Analyse la tâche actuelle et les fichiers concernés. Pose des questions si nécessaire pour clarifier les exigences."
+        },
+        {
+          "name": "Planifier l'implémentation",
+          "prompt": "Crée un plan détaillé des modifications à apporter. Inclus les fichiers à modifier et les étapes à suivre."
+        },
+        {
+          "name": "Implémenter les changements",
+          "prompt": "Effectue les modifications de code nécessaires en suivant les bonnes pratiques et la structure du projet."
+        },
+        {
+          "name": "Tester les modifications",
+          "prompt": "Exécute les tests unitaires et d'intégration pertinents. Corrige les erreurs si nécessaire."
+        },
+        {
+          "name": "Documenter les changements",
+          "prompt": "Met à jour la documentation, les commentaires et les messages de commit pour refléter les modifications."
+        },
+        {
+          "name": "Réviser et finaliser",
+          "prompt": "Vérifie que tous les critères d'acceptation sont remplis et que le code est prêt pour la revue."
+        }
+      ]
+    },
+    "bugfix": {
+      "name": "Correction de bug",
+      "description": "Workflow pour la résolution de bugs",
+      "steps": [
+        {
+          "name": "Reproduire le bug",
+          "prompt": "Identifie les étapes pour reproduire le bug de manière fiable."
+        },
+        {
+          "name": "Localiser la cause",
+          "prompt": "Analyse le code pour identifier la cause racine du problème."
+        },
+        {
+          "name": "Proposer un correctif",
+          "prompt": "Développe une solution pour corriger le bug sans introduire de régressions."
+        },
+        {
+          "name": "Tester la correction",
+          "prompt": "Vérifie que le correctif résout le bug et ne crée pas de nouveaux problèmes."
+        },
+        {
+          "name": "Documenter la correction",
+          "prompt": "Ajoute des commentaires et de la documentation pour expliquer le correctif."
+        }
+      ]
+    }
+  },
+  
+  "rules": {
+    "codeStyle": {
+      "enforcePEP8": true,
+      "maxLineLength": 88,
+      "docstringStyle": "google",
+      "importOrder": [
+        "standard_library",
+        "third_party",
+        "local"
+      ],
+      "typeHints": "always"
+    },
+    "tradingSpecific": {
+      "validateObservationShapes": true,
+      "checkRiskParameters": true,
+      "enforceCapitalTiers": true
+    },
+    "testing": {
+      "requireTests": true,
+      "minCoverage": 80,
+      "testNamingConvention": "test_*.py"
+    },
+    "documentation": {
+      "requireDocstrings": true,
+      "requireTypeHints": true,
+      "updateReadmeOnChanges": true
+    },
+    "security": {
+      "scanForSecrets": true,
+      "preventCommitSecrets": true,
+      "allowedSecrets": []
+    }
+  },
+  
+  "templates": {
+    "commitMessage": {
+      "template": "{type}({scope}): {subject}\n\n{body}\n\n{footer}",
+      "types": [
+        "feat", "fix", "docs", "style", "refactor",
+        "perf", "test", "build", "ci", "chore", "revert"
+      ],
+      "scopes": [
+        "env", "models", "data", "api", "ui", "config", "tests", "docs"
+      ]
+    },
+    "pullRequest": {
+      "template": "## Description\n\n## Type de changement\n- [ ] Correction de bug\n- [ ] Nouvelle fonctionnalité\n- [ ] Modification majeure\n- [ ] Documentation\n\n## Liste des changements\n- \n\n## Tests effectués\n- [ ] Tests unitaires\n- [ ] Tests d'intégration\n- [ ] Tests manuels\n\n## Captures d'écran (si applicable)\n\n## Notes supplémentaires"
+    }
+  },
+  
+  "autoFix": {
+    "enabled": true,
+    "onSave": true,
+    "rules": [
+      "autoFormat",
+      "organizeImports",
+      "fixSimpleErrors"
+    ]
+  },
+  
+  "notifications": {
+    "enabled": true,
+    "desktop": true,
+    "sound": true,
+    "events": [
+      "taskComplete",
+      "error",
+      "warning",
+      "reminder"
+    ]
+  },
+  
+  "versionControl": {
+    "autoStage": true,
+    "autoCommit": false,
+    "commitMessageTemplate": "{type}({scope}): {subject}",
+    "branchNamingConvention": "{type}/{ticket}-{description}"
+  },
+  
+  "modelSettings": {
+    "temperature": 0.2,
+    "maxTokens": 4000,
+    "topP": 0.95,
+    "frequencyPenalty": 0.0,
+    "presencePenalty": 0.0,
+    "stopSequences": ["\n\n"]
+  },
+  
+  "experimental": {
+    "autocomplete": {
+      "enabled": true,
+      "maxSuggestions": 5,
+      "delay": 100
+    },
+    "codeLens": {
+      "enabled": true,
+      "showTestStatus": true,
+      "showCodeCoverage": true
+    },
+    "inlineSuggestions": {
+      "enabled": true,
+      "showOnType": true
+    }
+  }
+}

@@ -1,0 +1,213 @@
+# ==============================================================================
+# CONFIGURATION DU PIPELINE DE DONNÉES
+# ==============================================================================
+# Configuration pour le chargement, le traitement et l'ingénierie des features.
+
+# Configuration des sources de données
+data_sources:
+  - name: 'crypto_data'
+    group_name: 'Données cryptos'
+    directory: 'raw/{TIMEFRAME}'
+    format: 'csv'
+    filename_pattern: '{ASSET}USDT.csv'
+    assets: ['BTC', 'ETH', 'SOL', 'XRP', 'ADA']
+    timeframes: ['5m', '1h', '4h']
+    features_ready: false  # Indique que les indicateurs doivent être calculés
+
+data_pipeline:
+  source: 'local'  # 'local' ou 'ccxt'
+  
+  # Configuration pour le chargement local
+  local_data:
+    directory: 'data/raw'
+    format: 'csv'  # Utilisation de CSV pour les données brutes
+    
+  # Configuration CCXT
+  ccxt_download:
+    exchange: 'binance'  # Exchange avec une grande liquidité et fiabilité
+    symbols:  # Paires majeures avec bonne liquidité
+      - 'BTC/USDT'    # Bitcoin
+      - 'ETH/USDT'    # Ethereum
+      - 'SOL/USDT'    # Solana
+      - 'XRP/USDT'    # Ripple
+      - 'ADA/USDT'    # Cardano
+    since: '2023-01-01'  # 1 an de données pour commencer
+    
+  # Traitement des données
+  processing:
+    merge_timeframes: true
+    timestamp_col: 'timestamp'
+    timestamp_format: 'ISO8601'
+    
+    # Gestion des chunks pour la mémoire
+    chunk_size: 1000
+    num_chunks_in_memory: 3
+    
+    # Métadonnées de fraîcheur
+    add_freshness_metadata: true
+    freshness_column: 'minutes_since_update'
+
+# ==============================================================================
+# CONFIGURATION DES ASSETS ET TOKENOMICS
+# ==============================================================================
+assets:
+  BTC:
+    name: 'Bitcoin'
+    type: 'Store of Value'
+    max_supply: 21000000
+    circulating_supply: 19400000
+    
+  ETH:
+    name: 'Ethereum'
+    type: 'Smart Contract Platform'
+    max_supply: null  # Pas de max supply
+    circulating_supply: 122000000
+    
+  SOL:
+    name: 'Solana'
+    type: 'Smart Contract Platform'
+    max_supply: null
+    circulating_supply: 436000000
+    
+  XRP:
+    name: 'Ripple'
+    type: 'Payment'
+    max_supply: 100000000000
+    circulating_supply: 54000000000
+    
+  ADA:
+    name: 'Cardano'
+    type: 'Smart Contract Platform'
+    max_supply: 45000000000
+    circulating_supply: 35400000000
+
+# ==============================================================================
+# CONFIGURATION DU FEATURE ENGINEERING
+# ==============================================================================
+feature_engineering:
+  # Timeframes supportés
+  timeframes: ['5m', '1h', '4h']
+  
+  # Colonnes à normaliser
+  columns_to_normalize: 
+    - 'open'
+    - 'high'
+    - 'low'
+    - 'close'
+    - 'volume'
+  
+  # Configuration des indicateurs techniques
+  indicators:
+    # Indicateurs de tendance
+    - name: 'sma_20'
+      type: 'sma'
+      length: 20
+      
+    - name: 'ema_9'
+      type: 'ema'
+      length: 9
+      
+    - name: 'ema_21'
+      type: 'ema'
+      length: 21
+      
+    - name: 'ema_50'
+      type: 'ema'
+      length: 50
+      
+    - name: 'ema_200'
+      type: 'ema'
+      length: 200
+      
+    - name: 'macd'
+      type: 'macd'
+      fast: 12
+      slow: 26
+      signal: 9
+      
+    # Indicateurs de momentum
+    - name: 'rsi_14'
+      type: 'rsi'
+      length: 14
+      
+    - name: 'stoch_14_3_3'
+      type: 'stoch'
+      k: 14
+      d: 3
+      smooth_k: 3
+      
+    - name: 'cci_20'
+      type: 'cci'
+      length: 20
+      
+    - name: 'adx_14'
+      type: 'adx'
+      length: 14
+      
+    - name: 'williams_14'
+      type: 'willr'
+      length: 14
+      
+    # Indicateurs de volatilité
+    - name: 'bbands_20_2'
+      type: 'bbands'
+      length: 20
+      std: 2.0
+      
+    - name: 'atr_14'
+      type: 'atr'
+      length: 14
+      
+    # Indicateurs de volume
+    - name: 'obv'
+      type: 'obv'
+      
+    - name: 'vwap'
+      type: 'vwap'
+      
+    - name: 'mfi_14'
+      type: 'mfi'
+      length: 14
+
+# ==============================================================================
+# CONFIGURATION DES INDICATEURS PAR TIMEFRAME
+# ==============================================================================
+# Configuration des indicateurs techniques à calculer pour chaque timeframe
+
+# Configuration des indicateurs par timeframe
+indicators_by_timeframe:
+  # Indicateurs pour le timeframe 5 minutes
+  "5m":
+    - 'ema_9'
+    - 'ema_21'
+    - 'rsi_14'
+    - 'macd'
+    - 'bbands_20_2'
+    - 'atr_14'
+    - 'vwap'
+    - 'obv'
+    - 'mfi_14'
+  
+  # Indicateurs pour le timeframe 1 heure
+  "1h":
+    - 'ema_21'
+    - 'ema_50'
+    - 'rsi_14'
+    - 'macd'
+    - 'adx_14'
+    - 'bbands_20_2'
+    - 'atr_14'
+    - 'obv'
+    - 'mfi_14'
+    
+  # Indicateurs pour le timeframe 4 heures
+  "4h":
+    - 'ema_50'
+    - 'ema_200'
+    - 'rsi_14'
+    - 'macd'
+    - 'adx_14'
+    - 'bbands_20_2'
+    - 'atr_14'
+    - 'obv'
+    - 'mfi_14'

@@ -24,7 +24,8 @@ sys.path.insert(0, str(project_root / "src"))
 
 from adan_trading_bot.common.utils import get_logger, load_config
 from adan_trading_bot.exchange_api.connector import get_exchange_client, validate_exchange_config
-from adan_trading_bot.environment.order_manager import OrderManager
+from adan_trading_bot.portfolio.portfolio_manager import PortfolioManager
+from adan_trading_bot.trading.order_manager import OrderManager, Order, OrderType, OrderSide, OrderStatus
 from adan_trading_bot.environment.state_builder import StateBuilder
 from adan_trading_bot.agent.ppo_agent import load_agent
 
@@ -45,8 +46,12 @@ class PaperTradingAgent:
         self.config = config
         self.model_path = model_path
         self.initial_capital = initial_capital
-        self.current_capital = initial_capital
-        self.positions = {}
+        
+        # Initialiser le PortfolioManager
+        # Le config passé ici doit contenir toutes les sections nécessaires (trading_rules, risk_management, etc.)
+        self.portfolio_manager = PortfolioManager(env_config=config)
+        self.current_capital = self.portfolio_manager.total_capital # Utiliser le capital du portfolio manager
+        self.positions = self.portfolio_manager.positions # Utiliser les positions du portfolio manager
         
         # Actifs à trader
         self.assets = config.get('data', {}).get('assets', [])
@@ -205,7 +210,7 @@ class PaperTradingAgent:
     
     def _initialize_order_manager(self):
         """Initialise le gestionnaire d'ordres."""
-        self.order_manager = OrderManager(self.config, exchange_client=self.exchange)
+        self.order_manager = OrderManager(portfolio_manager=self.portfolio_manager)
         logger.info("✅ OrderManager initialized")
     
     def _initialize_state_builder(self):
@@ -729,55 +734,27 @@ class PaperTradingAgent:
             current_price = current_prices[asset_id]
             
             if trade_type == "BUY":
-                # Allouer 20% du capital disponible pour cet achat
-                allocation_percent = 0.2
-                allocated_value = self.current_capital * allocation_percent
+                # Calculer la taille de la position en utilisant le PortfolioManager
+                # Pour le paper trading, nous allons utiliser une confiance de 1.0 pour simplifier
+                size = self.portfolio_manager.calculate_position_size(action_type="buy", asset=asset_id, current_price=current_price, confidence=1.0)
                 
-                logger.info(f"🔄 Executing BUY {asset_id}: ${allocated_value:.2f} at ${current_price:.6f}")
-                
-                reward_mod, status, info = self.order_manager.execute_order(
-                    asset_id=asset_id,
-                    action_type=1,  # BUY
-                    current_price=current_price,
-                    capital=self.current_capital,
-                    positions=self.positions,
-                    allocated_value_usdt=allocated_value
-                )
-                
-                if info.get('new_capital') is not None:
-                    self.current_capital = info['new_capital']
-                
-                return {
-                    "status": status,
-                    "message": f"BUY {asset_id}",
-                    "info": info,
-                    "reward_mod": reward_mod
-                }
+                if self.portfolio_manager.validate_position(asset_id, size, current_price):
+                    logger.info(f"🔄 Executing BUY {asset_id}: {size:.6f} units at ${current_price:.6f}")
+                    self.portfolio_manager.open_position(asset_id, current_price, size)
+                    return {"status": "SUCCESS", "message": f"BUY {asset_id}"}
+                else:
+                    logger.warning(f"⚠️ BUY order for {asset_id} invalid. Skipping.")
+                    return {"status": "INVALID_ORDER", "message": f"BUY order for {asset_id} invalid"}
                 
             elif trade_type == "SELL":
-                if asset_id not in self.positions or self.positions[asset_id]["qty"] <= 0:
-                    logger.warning(f"⚠️ Cannot SELL {asset_id}: No position")
+                if self.portfolio_manager.positions[asset_id].is_open:
+                    size = self.portfolio_manager.positions[asset_id].size
+                    logger.info(f"🔄 Executing SELL {asset_id}: {size:.6f} units at ${current_price:.6f}")
+                    self.portfolio_manager.close_position(asset_id, current_price)
+                    return {"status": "SUCCESS", "message": f"SELL {asset_id}"}
+                else:
+                    logger.warning(f"⚠️ Cannot SELL {asset_id}: No open position.")
                     return {"status": "NO_POSITION", "message": f"No position to sell for {asset_id}"}
-                
-                logger.info(f"🔄 Executing SELL {asset_id}: {self.positions[asset_id]['qty']:.6f} at ${current_price:.6f}")
-                
-                reward_mod, status, info = self.order_manager.execute_order(
-                    asset_id=asset_id,
-                    action_type=2,  # SELL
-                    current_price=current_price,
-                    capital=self.current_capital,
-                    positions=self.positions
-                )
-                
-                if info.get('new_capital') is not None:
-                    self.current_capital = info['new_capital']
-                
-                return {
-                    "status": status,
-                    "message": f"SELL {asset_id}",
-                    "info": info,
-                    "reward_mod": reward_mod
-                }
             
         except Exception as e:
             logger.error(f"❌ Error executing {trade_type} for {asset_id}: {e}")
@@ -801,8 +778,8 @@ class PaperTradingAgent:
                 iteration += 1
                 logger.info(f"\n{'='*60}")
                 logger.info(f"🔄 ITERATION {iteration}/{max_iterations}")
-                logger.info(f"💰 Current Capital: ${self.current_capital:.2f}")
-                logger.info(f"📊 Open Positions: {len(self.positions)}")
+                logger.info(f"💰 Current Capital: ${self.portfolio_manager.total_capital:.2f}")
+                logger.info(f"📊 Open Positions: {len([p for p in self.portfolio_manager.positions.values() if p.is_open])}")
                 
                 # 1. Récupérer les données de marché
                 market_data_dict = {}
@@ -821,6 +798,9 @@ class PaperTradingAgent:
                     logger.warning("⚠️ No market data available - skipping iteration")
                     time.sleep(sleep_seconds)
                     continue
+
+                # Mettre à jour le PortfolioManager avec les prix actuels
+                self.portfolio_manager.update_market_price(current_prices)
                 
                 # 2. Construire l'observation pour l'agent
                 observation = self.process_market_data_for_agent(market_data_dict)
@@ -851,20 +831,20 @@ class PaperTradingAgent:
                     "asset_id": asset_id,
                     "trade_type": trade_type,
                     "execution_result": execution_result,
-                    "capital_before": self.current_capital,
-                    "positions_count": len(self.positions)
+                    "capital_before": self.portfolio_manager.total_capital, # Utiliser le capital du portfolio manager
+                    "positions_count": len([p for p in self.portfolio_manager.positions.values() if p.is_open]) # Compter les positions ouvertes
                 }
                 
                 self.decision_history.append(decision_record)
                 
                 # 6. Afficher le résumé
-                pnl = self.current_capital - self.initial_capital
+                pnl = self.portfolio_manager.total_capital - self.initial_capital
                 pnl_pct = (pnl / self.initial_capital) * 100
                 
                 logger.info(f"💼 Portfolio Summary:")
-                logger.info(f"   💰 Capital: ${self.current_capital:.2f}")
+                logger.info(f"   💰 Capital: ${self.portfolio_manager.total_capital:.2f}")
                 logger.info(f"   📈 PnL: ${pnl:.2f} ({pnl_pct:+.2f}%)")
-                logger.info(f"   🎯 Positions: {list(self.positions.keys())}")
+                logger.info(f"   🎯 Positions: {list(self.portfolio_manager.positions.keys())}")
                 
                 # 7. Attendre avant la prochaine décision
                 if iteration < max_iterations:
@@ -885,7 +865,7 @@ class PaperTradingAgent:
             summary_file = project_root / f"paper_trading_summary_{timestamp}.json"
             
             # Calculer les statistiques finales
-            final_pnl = self.current_capital - self.initial_capital
+            final_pnl = self.portfolio_manager.total_capital - self.initial_capital
             final_pnl_pct = (final_pnl / self.initial_capital) * 100
             
             summary = {
@@ -893,13 +873,13 @@ class PaperTradingAgent:
                     "start_time": datetime.now().isoformat(),
                     "model_path": str(self.model_path),
                     "initial_capital": self.initial_capital,
-                    "final_capital": self.current_capital,
+                    "final_capital": self.portfolio_manager.total_capital,
                     "total_pnl": final_pnl,
                     "pnl_percentage": final_pnl_pct,
                     "total_decisions": len(self.decision_history),
                     "assets_traded": self.assets
                 },
-                "final_positions": self.positions,
+                "final_positions": {asset: {attr: getattr(position, attr) for attr in ['is_open', 'entry_price', 'size', 'stop_loss_pct', 'take_profit_pct']} for asset, position in self.portfolio_manager.positions.items()},
                 "decision_history": [
                     {k: v if k != "timestamp" else v.isoformat() for k, v in record.items()}
                     for record in self.decision_history
@@ -912,7 +892,7 @@ class PaperTradingAgent:
             
             logger.info(f"📊 Trading summary saved: {summary_file}")
             logger.info(f"🎯 Final Results:")
-            logger.info(f"   💰 Capital: ${self.initial_capital:.2f} -> ${self.current_capital:.2f}")
+            logger.info(f"   💰 Capital: ${self.initial_capital:.2f} -> ${self.portfolio_manager.total_capital:.2f}")
             logger.info(f"   📈 PnL: ${final_pnl:.2f} ({final_pnl_pct:+.2f}%)")
             logger.info(f"   🔄 Decisions: {len(self.decision_history)}")
             

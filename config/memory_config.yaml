@@ -1,0 +1,143 @@
+# ==============================================================================
+# CONFIGURATION DE LA GESTION MÉMOIRE
+# ==============================================================================
+# Configuration pour les optimisations matérielles et la gestion de la mémoire
+# selon les contraintes : RAM totale 12 Go, RAM entraînement 7 Go, CPU 5 cœurs
+
+# ------------------------------------------------------------------------------
+# Contraintes Matérielles
+# ------------------------------------------------------------------------------
+hardware_constraints:
+  total_ram_gb: 12
+  training_ram_gb: 7
+  cpu_cores: 5
+  
+# ------------------------------------------------------------------------------
+# Configuration du Lazy Chunk Loader
+# ------------------------------------------------------------------------------
+chunk_loader:
+  # Stratégie de chargement séquentiel
+  strategy: "sequential"
+  
+  # Un seul chunk en mémoire à la fois
+  max_chunks_in_memory: 1
+  
+  # Taille optimale des chunks pour éviter les dépassements mémoire
+  chunk_size: 1000
+  
+  # Nettoyage agressif de la mémoire
+  aggressive_cleanup: true
+  
+  # Force le garbage collection après chaque chunk
+  force_gc: true
+  
+  # Préchargement désactivé pour économiser la mémoire
+  prefetch: false
+
+# ------------------------------------------------------------------------------
+# Configuration de l'Agent (Architecture Light)
+# ------------------------------------------------------------------------------
+agent_memory:
+  # Architecture CNN simplifiée
+  architecture: "light"
+  
+  # Petites tailles de batch
+  batch_size: 32
+  
+  # Buffer d'entraînement optimisé
+  buffer_size: 2048
+  
+  # Nombre d'environnements (DummyVecEnv)
+  n_envs: 1
+  
+  # Désactiver le frame stacking pour économiser la mémoire
+  frame_stack: false
+  
+  # Gradient accumulation pour compenser les petits batches
+  gradient_accumulation_steps: 2
+
+# ------------------------------------------------------------------------------
+# Configuration du Traitement des Données
+# ------------------------------------------------------------------------------
+data_processing:
+  # Traitement séquentiel des actifs
+  sequential_processing: true
+  
+  # Nettoyage mémoire après chaque étape
+  cleanup_after_step: true
+  
+  # Libération explicite des ressources
+  explicit_resource_release: true
+  
+  # Optimisation des buffers
+  optimized_buffers: true
+  
+  # Désactiver la mise en cache pour économiser la mémoire
+  disable_caching: true
+
+# ------------------------------------------------------------------------------
+# Monitoring de la Mémoire
+# ------------------------------------------------------------------------------
+memory_monitoring:
+  # Activer le monitoring de la RAM
+  enabled: true
+  
+  # Seuil d'alerte (en pourcentage de la RAM totale)
+  warning_threshold_pct: 80
+  
+  # Seuil critique (déclenche un nettoyage forcé)
+  critical_threshold_pct: 90
+  
+  # Fréquence de vérification (en secondes)
+  check_interval_seconds: 30
+  
+  # Log des métriques mémoire
+  log_metrics: true
+
+# ------------------------------------------------------------------------------
+# Configuration du Garbage Collection
+# ------------------------------------------------------------------------------
+garbage_collection:
+  # Force le GC après chaque chunk
+  force_after_chunk: true
+  
+  # Force le GC après chaque épisode
+  force_after_episode: true
+  
+  # Seuil de déclenchement automatique
+  auto_threshold: 0.8
+  
+  # Génération à nettoyer (0=tous, 1=gen1+, 2=gen2 seulement)
+  generation: 0
+
+# ------------------------------------------------------------------------------
+# Configuration des Optimisations PyTorch
+# ------------------------------------------------------------------------------
+pytorch_optimizations:
+  # Utiliser les optimisations CPU
+  use_cpu_optimizations: true
+  
+  # Nombre de threads PyTorch
+  num_threads: 4
+  
+  # Désactiver CUDA même si disponible
+  force_cpu: true
+  
+  # Optimisations mémoire
+  memory_efficient: true
+  
+  # Désactiver l'autograd quand possible
+  no_grad_inference: true
+
+# ------------------------------------------------------------------------------
+# Configuration des Limites
+# ------------------------------------------------------------------------------
+limits:
+  # Limite mémoire par processus (en MB)
+  max_memory_mb: 6000
+  
+  # Limite du nombre de fichiers ouverts
+  max_open_files: 100
+  
+  # Timeout pour les opérations mémoire (en secondes)
+  memory_timeout: 300

@@ -30,7 +30,7 @@ from stable_baselines3.common.save_util import load_from_zip_file, save_to_zip_f
 from stable_baselines3.common.utils import get_schedule_fn, update_learning_rate, get_linear_fn, safe_mean
 
 from .common.utils import get_logger, load_config, create_directories
-from .environment.multi_asset_env import AdanTradingEnv
+from .environment.multi_asset_chunked_env import MultiAssetChunkedEnv
 from .models.feature_extractors import CustomCNNFeatureExtractor
 
 logger = get_logger()
@@ -469,6 +469,7 @@ class OnlineLearningCallback(BaseCallback):
         except Exception as e:
             logger.error(f"Error in _learn_from_experiences: {str(e)}", exc_info=True)
 
+    
 class OnlineLearningAgent:
     """
     Agent for online learning that can continuously improve a pre-trained model.
@@ -487,6 +488,7 @@ class OnlineLearningAgent:
         model: PPO,
         env: GymEnv,
         config: Dict[str, Any],
+        experience_buffer: Optional[Union[PrioritizedReplayBuffer, ReplayBuffer]] = None,
         experience_buffer_size: int = 10000,
         batch_size: int = 64,
         learn_every: int = 100,
@@ -555,29 +557,13 @@ class OnlineLearningAgent:
         self.use_ewc = use_ewc
         self.ewc_lambda = ewc_lambda
         self.target_update_freq = target_update_freq
+        self.experience_buffer = experience_buffer or self._create_experience_buffer(experience_buffer_size, batch_size, use_prioritized_replay, prioritized_replay_alpha, prioritized_replay_beta, prioritized_replay_eps, env, model)
         
         # Create save directory if it doesn't exist
         if self.save_path is not None:
             os.makedirs(self.save_path, exist_ok=True)
         
-        # Initialize experience buffer
-        if use_prioritized_replay:
-            self.experience_buffer = PrioritizedReplayBuffer(
-                buffer_size=experience_buffer_size,
-                batch_size=batch_size,
-                alpha=prioritized_replay_alpha,
-                beta=prioritized_replay_beta,
-                epsilon=prioritized_replay_eps
-            )
-        else:
-            self.experience_buffer = ReplayBuffer(
-                buffer_size=experience_buffer_size,
-                observation_space=env.observation_space,
-                action_space=env.action_space,
-                device=model.device,
-                n_envs=env.num_envs if hasattr(env, 'num_envs') else 1,
-                optimize_memory_usage=True
-            )
+        
         
         # Setup callbacks
         self.callbacks = []
@@ -703,6 +689,25 @@ class OnlineLearningAgent:
             
             # Close environment
             self.env.close()
+
+    def _create_experience_buffer(self, buffer_size, batch_size, use_prioritized_replay, alpha, beta, eps, env, model):
+        if use_prioritized_replay:
+            return PrioritizedReplayBuffer(
+                buffer_size=buffer_size,
+                batch_size=batch_size,
+                alpha=alpha,
+                beta=beta,
+                epsilon=eps
+            )
+        else:
+            return ReplayBuffer(
+                buffer_size=buffer_size,
+                observation_space=env.observation_space,
+                action_space=env.action_space,
+                device=model.device,
+                n_envs=env.num_envs if hasattr(env, 'num_envs') else 1,
+                optimize_memory_usage=True
+            )
 
 def create_online_learning_agent(
     model_path: str,

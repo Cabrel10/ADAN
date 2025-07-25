@@ -19,7 +19,6 @@ from pathlib import Path
 
 from ..common.utils import get_logger
 from ..common.replay_logger import ReplayLogger
-from .finance_manager import FinanceManager
 
 logger = get_logger(__name__)
 
@@ -84,7 +83,7 @@ class DynamicBehaviorEngine:
     """
     
     def __init__(self, config: Optional[Dict[str, Any]] = None, 
-                 finance_manager: Optional[FinanceManager] = None):
+                 finance_manager: Optional[Any] = None):
         """
         Initialise le DBE avec la configuration fournie.
         
@@ -117,11 +116,7 @@ class DynamicBehaviorEngine:
             self.config.update(config)
         
         # Initialisation du gestionnaire financier
-        self.finance_manager = finance_manager or FinanceManager(
-            initial_capital=10000.0,
-            fee_pct=0.001,
-            min_order_usdt=10.0
-        )
+        self.finance_manager = finance_manager
         
         # État interne
         self.state = {
@@ -146,6 +141,8 @@ class DynamicBehaviorEngine:
         self.win_rates = []
         self.drawdowns = []
         self.position_durations = []
+        self.pnl_history = []
+        self.trade_results = []
         
         # Initialisation du logger de relecture
         log_config = self.config.get('logging', {})
@@ -158,8 +155,25 @@ class DynamicBehaviorEngine:
         log_level = log_config.get('log_level', 'INFO').upper()
         logging.getLogger().setLevel(getattr(logging, log_level))
         
+        # Initialisation des paramètres de lissage
+        self.smoothing_factor = self.config.get('smoothing_factor', 0.1)  # Facteur de lissage exponentiel
+        self.smoothed_params = {
+            'sl_pct': self.config.get('risk_parameters', {}).get('base_sl_pct', 0.02),
+            'tp_pct': self.config.get('risk_parameters', {}).get('base_tp_pct', 0.04)
+        }
+        
+        # Configuration de la persistance d'état
+        self.state_persistence_enabled = config.get('state_persistence', {}).get('enabled', True) if config else True
+        self.state_save_path = config.get('state_persistence', {}).get('save_path', 'logs/dbe/state') if config else 'logs/dbe/state'
+        self.state_save_interval = config.get('state_persistence', {}).get('save_interval', 100) if config else 100
+        
+        # Créer le répertoire de sauvegarde si nécessaire
+        if self.state_persistence_enabled:
+            Path(self.state_save_path).mkdir(parents=True, exist_ok=True)
+        
         logger.info("🚀 Dynamic Behavior Engine initialisé (version avancée)")
         logger.info(f"Configuration: {json.dumps(self._serialize_config(), indent=2)}")
+        logger.info(f"Persistance d'état: {'Activée' if self.state_persistence_enabled else 'Désactivée'}")
 
     def _serialize_config(self) -> Dict[str, Any]:
         """Sérialise la configuration pour le logging."""
@@ -205,6 +219,9 @@ class DynamicBehaviorEngine:
             
             # Ajustement du niveau de risque
             self._adjust_risk_level()
+
+            # Adaptation du facteur de lissage
+            self._adapt_smoothing_factor()
             
             logger.debug(f"État DBE mis à jour - Step: {self.state['current_step']} | "
                        f"Régime: {self.state['market_regime']} | "
@@ -250,6 +267,59 @@ class DynamicBehaviorEngine:
             'market_regime': self.state['market_regime']
         })
 
+    @property
+    def market_regime(self) -> str:
+        """Get current market regime."""
+        return self.state.get('market_regime', 'NEUTRAL')
+
+    @property
+    def current_step(self) -> int:
+        """Get current step."""
+        return self.state.get('current_step', 0)
+
+    @property
+    def risk_level(self) -> float:
+        """Get current risk level."""
+        return self.state.get('current_risk_level', 1.0)
+
+    def save_state(self, filepath: str) -> None:
+        """Save the current state to a file."""
+        state_data = {
+            'state': self.state,
+            'trade_history': self.trade_history,
+            'decision_history': [vars(snapshot) for snapshot in self.decision_history],
+            'win_rates': self.win_rates,
+            'drawdowns': self.drawdowns,
+            'position_durations': self.position_durations
+        }
+        
+        with open(filepath, 'wb') as f:
+            pickle.dump(state_data, f)
+        
+        logger.info(f"DBE state saved to {filepath}")
+
+    def load_state(self, filepath: str) -> None:
+        """Load state from a file."""
+        with open(filepath, 'rb') as f:
+            state_data = pickle.load(f)
+        
+        self.state = state_data['state']
+        self.trade_history = state_data['trade_history']
+        self.decision_history = [DBESnapshot(**snapshot) for snapshot in state_data['decision_history']]
+        self.win_rates = state_data['win_rates']
+        self.drawdowns = state_data['drawdowns']
+        self.position_durations = state_data['position_durations']
+        
+        logger.info(f"DBE state loaded from {filepath}")
+
+    def get_status(self) -> str:
+        """Get current status as a formatted string."""
+        return f"DBE Status - Step: {self.current_step}, Regime: {self.market_regime}, Risk: {self.risk_level:.2f}"
+
+    def on_trade_closed(self, trade_result: Dict[str, Any]) -> None:
+        """Process a closed trade result."""
+        self._process_trade_result(trade_result)
+
     def compute_dynamic_modulation(self) -> Dict[str, Any]:
         """
         Calcule la modulation dynamique des paramètres de trading.
@@ -265,6 +335,7 @@ class DynamicBehaviorEngine:
                 'reward_boost': 1.0,
                 'penalty_inaction': 0.0,
                 'position_size_pct': self.config.get('position_sizing', {}).get('base_position_size', 0.1),
+                'leverage': self.config.get('position_sizing', {}).get('base_leverage', 1.0),
                 'risk_mode': 'NORMAL',  # 'DEFENSIVE', 'NORMAL', 'AGGRESSIVE'
                 'learning_rate': None,
                 'ent_coef': None,
@@ -272,7 +343,7 @@ class DynamicBehaviorEngine:
             }
             
             # Calcul des paramètres de risque
-            self._compute_risk_parameters(mod)
+            self._compute_risk_parameters(self.state, mod)
             
             # Application des modulations spécifiques au régime de marché
             self._apply_market_regime_modulation(mod)
@@ -318,21 +389,7 @@ class DynamicBehaviorEngine:
                 'error': str(e)
             }
     
-    def _compute_risk_parameters(self, mod: Dict[str, Any]) -> None:
-        """Calcule les paramètres de risque en fonction de l'état actuel."""
-        # Facteurs configurables
-        risk_params_config = self.config.get('risk_parameters', {})
-        drawdown_sl_factor = risk_params_config.get('drawdown_sl_factor', 2.0)
-        min_drawdown_threshold = risk_params_config.get('min_drawdown_threshold', 2.0)
-        
-        # Ajustement en fonction du drawdown (seulement si > seuil minimal)
-        effective_drawdown = max(0, self.state['drawdown'] - min_drawdown_threshold)
-        drawdown_impact = 1.0 + (effective_drawdown / 100.0) * drawdown_sl_factor
-        
-        # Application de l'impact
-        mod['sl_pct'] *= drawdown_impact
-        # Le TP est resserré lorsque le risque (drawdown) augmente
-        mod['tp_pct'] *= (1.0 / drawdown_impact if drawdown_impact > 0 else 1.0)
+
     
     def _apply_market_regime_modulation(self, mod: Dict[str, Any]) -> None:
         """Applique les modulations spécifiques au régime de marché."""
@@ -351,9 +408,9 @@ class DynamicBehaviorEngine:
     def _adjust_learning_parameters(self, mod: Dict[str, Any]) -> None:
         """Ajuste les paramètres d'apprentissage en fonction du risque."""
         learning_config = self.config.get('learning', {})
-        lr_range = learning_config.get('learning_rate_range', [1e-5, 1e-3])
-        ent_coef_range = learning_config.get('ent_coef_range', [0.001, 0.1])
-        gamma_range = learning_config.get('gamma_range', [0.9, 0.999])
+        lr_range = [float(x) for x in learning_config.get('learning_rate_range', [1e-5, 1e-3])]
+        ent_coef_range = [float(x) for x in learning_config.get('ent_coef_range', [0.001, 0.1])]
+        gamma_range = [float(x) for x in learning_config.get('gamma_range', [0.9, 0.999])]
         
         # Ajustement basé sur le niveau de risque
         risk_factor = self.state['current_risk_level']
@@ -673,7 +730,7 @@ class DynamicBehaviorEngine:
             return False
     
     @classmethod
-    def load_state(cls, filepath: Union[str, Path], finance_manager: Optional[FinanceManager] = None) -> Optional['DynamicBehaviorEngine']:
+    def load_state(cls, filepath: Union[str, Path], finance_manager: Optional[Any] = None) -> Optional['DynamicBehaviorEngine']:
         """
         Charge un état précédemment sauvegardé.
         
@@ -716,37 +773,24 @@ class DynamicBehaviorEngine:
         if not self.finance_manager:
             portfolio_value = 0.0
             free_cash = 0.0
-            invested = 0.0
-            total_return = 0.0
         else:
-            portfolio_metrics = self.finance_manager.get_performance_metrics()
-            portfolio_value = portfolio_metrics.get('total_capital', 0.0)
-            free_cash = portfolio_metrics.get('free_capital', 0.0)
-            invested = portfolio_metrics.get('invested_capital', 0.0)
-            total_return = portfolio_metrics.get('total_return', 0.0)
+            metrics = self.finance_manager.get_performance_metrics()
+            portfolio_value = metrics.get('total_capital', 0.0)
+            free_cash = metrics.get('free_capital', 0.0)
         
         return {
             'timestamp': datetime.utcnow().isoformat(),
             'step': self.state['current_step'],
-            'portfolio': {
-                'total_value': portfolio_value,
-                'free_cash': free_cash,
-                'invested': invested,
-                'total_return_pct': total_return
-            },
-            'trading': {
-                'total_trades': len(self.trade_history),
-                'win_rate': self.state.get('winrate', 0.0) * 100,  # en pourcentage
-                'consecutive_losses': self.state.get('consecutive_losses', 0),
-                'position_duration': self.state.get('position_duration', 0)
-            },
-            'risk': {
-                'current_risk_level': self.state.get('current_risk_level', 1.0),
-                'market_regime': self.state.get('market_regime', 'UNKNOWN'),
-                'current_drawdown': self.state.get('drawdown', 0.0),
-                'volatility': self.state.get('volatility', 0.0)
-            },
-            'last_modulation': self.state.get('last_modulation', {})
+            'market_regime': self.state['market_regime'],
+            'risk_level': self.state['current_risk_level'],
+            'portfolio_value': portfolio_value,
+            'free_cash': free_cash,
+            'drawdown': self.state['drawdown'],
+            'winrate': self.state['winrate'],
+            'consecutive_losses': self.state['consecutive_losses'],
+            'last_modulation': self.state.get('last_modulation', {}),
+            'total_decisions': len(self.decision_history),
+            'total_trades': len(self.trade_history)
         }
     
     def reset(self) -> None:
@@ -774,6 +818,14 @@ class DynamicBehaviorEngine:
         self.win_rates = []
         self.drawdowns = []
         self.position_durations = []
+        self.pnl_history = []
+        self.trade_results = []
+
+        # Réinitialisation des paramètres lissés aux valeurs de base
+        self.smoothed_params = {
+            'sl_pct': self.config.get('risk_parameters', {}).get('base_sl_pct', 0.02),
+            'tp_pct': self.config.get('risk_parameters', {}).get('base_tp_pct', 0.04)
+        }
         
         # Réinitialisation du gestionnaire financier si disponible
         if self.finance_manager:
@@ -781,6 +833,70 @@ class DynamicBehaviorEngine:
         
         logger.info("DBE réinitialisé")
     
+    def _reset_for_new_chunk(self) -> None:
+        """
+        Réinitialise les métriques spécifiques au chunk, mais conserve l'historique
+        et les paramètres lissés pour la continuité entre les chunks.
+        """
+        self.state['current_step'] = 0
+        self.state['last_trade_pnl'] = 0.0
+        self.state['consecutive_losses'] = 0
+        self.state['position_duration'] = 0
+        self.state['volatility'] = 0.0
+        self.state['market_regime'] = 'NEUTRAL'
+        self.state['trend_strength'] = 0.0
+        
+        # Les historiques (trade_history, decision_history, win_rates, drawdowns, pnl_history, trade_results)
+        # et les smoothed_params, current_risk_level sont conservés pour la continuité.
+        
+        logger.info("🔄 DBE: Réinitialisation pour un nouveau chunk (continuité préservée)")
+
+    def _adapt_smoothing_factor(self) -> None:
+        """
+        Adapte le facteur de lissage (smoothing_factor) en fonction des performances récentes.
+        - Réduit le lissage (augmente smoothing_factor) si les performances sont bonnes (winrate élevé, faible drawdown).
+        - Augmente le lissage (diminue smoothing_factor) si les performances sont mauvaises (winrate faible, drawdown élevé).
+        """
+        current_winrate = self.state.get('winrate', 0.0)
+        current_drawdown = self.state.get('drawdown', 0.0)
+
+        # Paramètres de configuration pour l'adaptation du lissage
+        adapt_config = self.config.get('smoothing_adaptation', {
+            'min_smoothing': 0.01,
+            'max_smoothing': 0.5,
+            'winrate_threshold_good': 0.6,
+            'winrate_threshold_bad': 0.4,
+            'drawdown_threshold_good': 5.0, # in percent
+            'drawdown_threshold_bad': 15.0, # in percent
+            'adaptation_rate': 0.01
+        })
+
+        min_smoothing = adapt_config['min_smoothing']
+        max_smoothing = adapt_config['max_smoothing']
+        winrate_threshold_good = adapt_config['winrate_threshold_good']
+        winrate_threshold_bad = adapt_config['winrate_threshold_bad']
+        drawdown_threshold_good = adapt_config['drawdown_threshold_good']
+        drawdown_threshold_bad = adapt_config['drawdown_threshold_bad']
+        adaptation_rate = adapt_config['adaptation_rate']
+
+        new_smoothing_factor = self.smoothing_factor
+
+        # Ajustement basé sur le winrate
+        if current_winrate > winrate_threshold_good:
+            new_smoothing_factor += adaptation_rate # Reduce smoothing (faster adaptation)
+        elif current_winrate < winrate_threshold_bad:
+            new_smoothing_factor -= adaptation_rate # Increase smoothing (slower adaptation)
+
+        # Ajustement basé sur le drawdown
+        if current_drawdown < drawdown_threshold_good: # Lower drawdown is good
+            new_smoothing_factor += adaptation_rate
+        elif current_drawdown > drawdown_threshold_bad: # Higher drawdown is bad
+            new_smoothing_factor -= adaptation_rate
+
+        # Clip the smoothing factor to stay within bounds
+        self.smoothing_factor = np.clip(new_smoothing_factor, min_smoothing, max_smoothing)
+        logger.debug(f"Smoothing factor adapted to: {self.smoothing_factor:.3f} (Winrate: {current_winrate:.2f}, Drawdown: {current_drawdown:.2f})")
+
     def __str__(self) -> str:
         """Représentation textuelle de l'état du DBE."""
         status = self.get_status()
@@ -833,120 +949,6 @@ class DynamicBehaviorEngine:
     def __del__(self):
         if hasattr(self, 'dbe_log_file') and not self.dbe_log_file.closed:
             self.dbe_log_file.close()
-    
-    def update_state(self, live_metrics: Dict[str, Any]) -> None:
-        """
-        Met à jour l'état interne avec les dernières métriques.
-        
-        Args:
-            live_metrics: Dictionnaire des métriques en temps réel
-        """
-        # Mise à jour de l'état avec les nouvelles métriques
-        self.state.update(live_metrics)
-        
-        # Mise à jour des historiques pour le calcul des métriques
-        if 'trade_pnl_pct' in live_metrics and live_metrics['trade_pnl_pct'] is not None:
-            self.trade_results.append(1 if live_metrics['trade_pnl_pct'] > 0 else 0)
-            self.pnl_history.append(live_metrics['trade_pnl_pct'])
-            
-            # Mettre à jour le winrate sur les 100 derniers trades
-            if len(self.trade_results) > 100:
-                self.trade_results.pop(0)
-            
-            if len(self.pnl_history) > 100:
-                self.pnl_history.pop(0)
-            
-            self.state['winrate'] = np.mean(self.trade_results) if self.trade_results else 0.5
-            self.state['avg_trade_pnl_pct'] = np.mean(self.pnl_history) if self.pnl_history else 0.0
-        
-        # Calcul de la volatilité récente (écart-type des rendements)
-        if len(self.pnl_history) >= 10:
-            returns = np.array(self.pnl_history[-20:])  # Derniers 20 rendements
-            self.state['volatility'] = np.std(returns)
-            
-            # Détection du régime de marché basée sur la volatilité
-            if self.state['volatility'] > self.config.get('volatility_threshold_high', 0.03):
-                self.state['market_regime'] = "VOLATILE"
-            elif self.state['volatility'] < self.config.get('volatility_threshold_low', 0.01):
-                self.state['market_regime'] = "SIDEWAYS"
-            else:
-                self.state['market_regime'] = "TRENDING"
-        
-        # Calcul de la force de la tendance (basé sur le ratio de Hurst ou simplement la pente)
-        if len(self.pnl_history) >= 20:
-            # Approche simplifiée: pente de la régression linéaire sur les 20 derniers rendements
-            x = np.arange(len(self.pnl_history[-20:]))
-            y = np.cumsum(self.pnl_history[-20:])  # Prix simulé
-            z = np.polyfit(x, y, 1)
-            self.state['trend_strength'] = min(1.0, max(0.0, abs(z[0]) * 100))  # Normalisé 0-1
-    
-    def compute_dynamic_modulation(self) -> Dict[str, Any]:
-        """
-        Calcule la modulation dynamique des paramètres de trading.
-        
-        Returns:
-            Dictionnaire contenant les paramètres modulés
-        """
-        try:
-            # Initialisation des paramètres de base
-            mod = {
-                'sl_pct': self.config.get('risk_parameters', {}).get('base_sl_pct', 0.02),
-                'tp_pct': self.config.get('risk_parameters', {}).get('base_tp_pct', 0.04),
-                'reward_boost': 1.0,
-                'penalty_inaction': 0.0,
-                'position_size_pct': self.config.get('position_sizing', {}).get('base_position_size', 0.1),
-                'risk_mode': 'NORMAL',  # 'DEFENSIVE', 'NORMAL', 'AGGRESSIVE'
-                'learning_rate': None,
-                'ent_coef': None,
-                'gamma': None
-            }
-            
-            # Calcul des paramètres de risque
-            self._compute_risk_parameters(mod)
-            
-            # Application des modulations spécifiques au régime de marché
-            self._apply_market_regime_modulation(mod)
-            
-            # Ajustement des paramètres d'apprentissage
-            self._adjust_learning_parameters(mod)
-            
-            # Validation et ajustement final des paramètres
-            self._validate_parameters(mod)
-            
-            # Création d'un snapshot de la décision
-            snapshot = DBESnapshot(
-                step=self.state['current_step'],
-                market_regime=self.state['market_regime'],
-                risk_level=self.state['current_risk_level'],
-                sl_pct=mod['sl_pct'],
-                tp_pct=mod['tp_pct'],
-                position_size_pct=mod['position_size_pct'],
-                reward_boost=mod['reward_boost'],
-                penalty_inaction=mod['penalty_inaction'],
-                metrics=self.state['performance_metrics'].copy()
-            )
-            
-            # Ajout à l'historique des décisions
-            self.decision_history.append(snapshot)
-            self.state['last_modulation'] = mod.copy()
-            
-            # Journalisation de la décision
-            self._log_decision(snapshot, mod)
-            
-            return mod
-            
-        except Exception as e:
-            logger.error(f"Erreur lors du calcul de la modulation: {e}", exc_info=True)
-            # Retourner une modulation sécurisée en cas d'erreur
-            return {
-                'sl_pct': 0.02,
-                'tp_pct': 0.04,
-                'reward_boost': 1.0,
-                'penalty_inaction': 0.0,
-                'position_size_pct': 0.1,
-                'risk_mode': 'NORMAL',
-                'error': str(e)
-            }
     
     def _compute_risk_parameters(self, state: Dict[str, Any], mod: Dict[str, Any]) -> None:
         """Calcule les paramètres de risque dynamiques (SL/TP)."""

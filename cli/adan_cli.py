@@ -1,3 +1,4 @@
+import sys
 import argparse
 import yaml
 from pathlib import Path
@@ -52,7 +53,7 @@ def plot_live(args):
 
 def process_data(args):
     print("Processing raw data into datasets via scripts/process_data.py...")
-    python_executable = str(Path("/home/morningstar/miniconda3/envs/trading_env/bin/python"))
+    python_executable = sys.executable
     script_path = Path(__file__).parent.parent / 'scripts' / 'process_data.py'
     command = [python_executable, str(script_path)]
     if args.timeframe:
@@ -67,7 +68,7 @@ def process_data(args):
 
 def merge_data(args):
     print("Merging processed data via scripts/merge_processed_data.py...")
-    python_executable = str(Path("/home/morningstar/miniconda3/envs/trading_env/bin/python"))
+    python_executable = sys.executable
     script_path = Path(__file__).parent.parent / 'scripts' / 'merge_processed_data.py'
     try:
         subprocess.run([python_executable, str(script_path)], check=True)
@@ -79,7 +80,7 @@ def merge_data(args):
 
 def download_data(symbol, timeframe, exchange):
     print(f"Downloading historical data for {symbol} ({timeframe}) from {exchange}...")
-    python_executable = str(Path("/home/morningstar/miniconda3/envs/trading_env/bin/python"))
+    python_executable = sys.executable
     script_path = Path(__file__).parent.parent / 'scripts' / 'download_historical_data.py'
     try:
         subprocess.run([python_executable, str(script_path), "--symbol", symbol, "--timeframe", timeframe, "--exchange", exchange], check=True)
@@ -159,7 +160,7 @@ def main():
 
     # update-config command
     update_config_parser = subparsers.add_parser("update-config", help="Modify configuration YAML files")
-    update_config_parser.add_argument("--type", required=True, choices=['dbe', 'environment', 'main', 'data'], help="Type of config file (dbe, environment, main, data)")
+    update_config_parser.add_argument("--type", required=True, choices=['dbe', 'environment', 'main', 'data', 'agent'], help="Type of config file (dbe, environment, main, data, agent)")
     update_config_parser.add_argument("--section", required=True, help="Configuration section (e.g., risk_parameters, reward, learning)")
     update_config_parser.add_argument("--key", required=True, help="New value for the configuration key")
     update_config_parser.add_argument("--value", required=True, help="New value for the configuration key")

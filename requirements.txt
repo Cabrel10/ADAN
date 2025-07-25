@@ -18,6 +18,7 @@ pyarrow>=15.0.0
 ccxt>=4.2.0
 ta>=0.10.0
 pandas-ta>=0.3.14b0
+watchdog>=3.0.0
 
 # Utilitaires
 rich>=13.0.0
@@ -25,6 +26,8 @@ tqdm>=4.65.0
 requests>=2.31.0
 python-dateutil>=2.8.0
 pytz>=2024.1
+fastapi>=0.100.0
+uvicorn[standard]>=0.22.0
 
 # ===================================
 # Interface de trading avancée (TradingView/MetaTrader-like)

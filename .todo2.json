@@ -1,0 +1,182 @@
+{
+  "$schema": "https://todo2.dev/schema.json",
+  "version": 1,
+  "name": "ADAN Trading Bot",
+  "description": "Gestion des tâches pour le projet ADAN Trading Bot",
+  "views": {
+    "board": {
+      "visible": true,
+      "columns": [
+        { "id": "backlog", "title": "📥 Backlog" },
+        { "id": "todo", "title": "📋 À Faire" },
+        { "id": "in_progress", "title": "🚧 En Cours" },
+        { "id": "review", "title": "👀 En Revue" },
+        { "id": "blocked", "title": "⛔ Bloqué" },
+        { "id": "done", "title": "✅ Terminé" }
+      ]
+    },
+    "list": {
+      "visible": true,
+      "groupBy": "status",
+      "sortBy": "priority"
+    },
+    "calendar": {
+      "visible": true,
+      "firstDayOfWeek": 1,
+      "showWeekNumbers": true
+    }
+  },
+  "filters": {
+    "showCompleted": false,
+    "showArchived": false,
+    "tags": [
+      { "id": "bug", "color": "#ff4d4f", "description": "Bug ou problème à résoudre" },
+      { "id": "feature", "color": "#52c41a", "description": "Nouvelle fonctionnalité" },
+      { "id": "improvement", "color": "#1890ff", "description": "Amélioration" },
+      { "id": "documentation", "color": "#722ed1", "description": "Documentation" },
+      { "id": "refactor", "color": "#faad14", "description": "Refactorisation" },
+      { "id": "test", "color": "#13c2c2", "description": "Tests" }
+    ],
+    "priorities": [
+      { "id": "low", "color": "#8c8c8c", "description": "Basse priorité" },
+      { "id": "medium", "color": "#fa8c16", "description": "Priorité moyenne" },
+      { "id": "high", "color": "#f5222d", "description": "Haute priorité" },
+      { "id": "critical", "color": "#a8071a", "description": "Critique" }
+    ],
+    "statuses": [
+      { "id": "todo", "name": "À Faire", "color": "#d9d9d9" },
+      { "id": "in_progress", "name": "En Cours", "color": "#1890ff" },
+      { "id": "review", "name": "En Revue", "color": "#722ed1" },
+      { "id": "done", "name": "Terminé", "color": "#52c41a" },
+      { "id": "blocked", "name": "Bloqué", "color": "#f5222d" },
+      { "id": "backlog", "name": "Backlog", "color": "#8c8c8c" }
+    ]
+  },
+  "settings": {
+    "autoArchive": true,
+    "autoSave": true,
+    "autoSync": true,
+    "defaultPriority": "medium",
+    "defaultStatus": "todo",
+    "enableGitIntegration": true,
+    "enableTimeTracking": true,
+    "timeTracking": {
+      "enabled": true,
+      "workDayHours": 8,
+      "workWeekDays": [1, 2, 3, 4, 5],
+      "dailyWorkHours": {
+        "monday": 8,
+        "tuesday": 8,
+        "wednesday": 8,
+        "thursday": 8,
+        "friday": 8,
+        "saturday": 0,
+        "sunday": 0
+      }
+    },
+    "notifications": {
+      "enabled": true,
+      "desktop": true,
+      "sound": true,
+      "reminderBeforeDue": "30 minutes"
+    }
+  },
+  "templates": {
+    "bug": {
+      "title": "[BUG] ",
+      "description": "## Description du bug\n\n## Étapes pour reproduire\n1. \n2. \n3. \n\n## Comportement attendu\n\n## Comportement actuel\n\n## Informations supplémentaires\n- Version : \n- Navigateur : \n- OS : \n\n## Captures d'écran (si applicable)",
+      "tags": ["bug"],
+      "priority": "high"
+    },
+    "feature": {
+      "title": "[FEATURE] ",
+      "description": "## Description de la fonctionnalité\n\n## Objectifs\n- [ ] Objectif 1\n- [ ] Objectif 2\n\n## Critères d'acceptation\n- [ ] Critère 1\n- [ ] Critère 2\n\n## Dépendances\n- [ ] Dépendance 1\n- [ ] Dépendance 2",
+      "tags": ["feature"],
+      "priority": "medium"
+    },
+    "task": {
+      "title": "[TASK] ",
+      "description": "## Description de la tâche\n\n## Étapes à suivre\n1. \n2. \n3. \n\n## Livrables\n- [ ] Livrable 1\n- [ ] Livrable 2",
+      "tags": [],
+      "priority": "medium"
+    }
+  },
+  "workflows": [
+    {
+      "name": "Développement de fonctionnalité",
+      "description": "Workflow type pour le développement d'une nouvelle fonctionnalité",
+      "steps": [
+        { "status": "backlog", "name": "Backlog" },
+        { "status": "todo", "name": "À faire" },
+        { "status": "in_progress", "name": "En développement" },
+        { "status": "review", "name": "En revue de code" },
+        { "status": "done", "name": "Terminé" }
+      ]
+    },
+    {
+      "name": "Correction de bug",
+      "description": "Workflow pour la correction d'un bug",
+      "steps": [
+        { "status": "todo", "name": "À faire" },
+        { "status": "in_progress", "name": "En cours de correction" },
+        { "status": "review", "name": "En test" },
+        { "status": "done", "name": "Corrigé" }
+      ]
+    }
+  ],
+  "sprints": {
+    "currentSprint": "Sprint 1 - Correction des Dimensions",
+    "sprintGoal": "Résoudre les problèmes critiques de dimensionnement des observations et consolider la configuration",
+    "sprints": [
+      {
+        "id": "sprint1",
+        "name": "Sprint 1 - Mise en place",
+        "startDate": "2025-07-01",
+        "endDate": "2025-07-31",
+        "goal": "Mise en place de l'infrastructure de base et des composants principaux"
+      },
+      {
+        "id": "sprint2",
+        "name": "Sprint 2 - Intégration des modèles",
+        "startDate": "2025-08-01",
+        "endDate": "2025-08-31",
+        "goal": "Intégration des modèles de machine learning et optimisation"
+      },
+      {
+        "id": "sprint3",
+        "name": "Sprint 3 - Interface utilisateur",
+        "startDate": "2025-09-01",
+        "endDate": "2025-09-30",
+        "goal": "Développement de l'interface utilisateur et des tableaux de bord"
+      }
+    ]
+  },
+  "reports": {
+    "velocity": {
+      "enabled": true,
+      "sprintLength": 30,
+      "storyPointsField": "storyPoints"
+    },
+    "burndown": {
+      "enabled": true,
+      "showIdeal": true,
+      "showRemaining": true
+    },
+    "cycleTime": {
+      "enabled": true,
+      "stages": ["todo", "in_progress", "review", "done"]
+    }
+  },
+  "integrations": {
+    "github": {
+      "enabled": true,
+      "repository": "votre-utilisateur/votre-depot",
+      "syncIssues": true,
+      "syncPullRequests": true
+    },
+    "slack": {
+      "enabled": false,
+      "webhookUrl": ""
+    }
+  }
+}

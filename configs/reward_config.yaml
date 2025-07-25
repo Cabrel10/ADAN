@@ -1,0 +1,134 @@
+# ==============================================================================
+# CONFIGURATION DU SYSTÈME DE RÉCOMPENSES
+# ==============================================================================
+# Configuration pour le calcul des récompenses et le reward shaping.
+
+# ------------------------------------------------------------------------------
+# Paramètres de Base des Récompenses
+# ------------------------------------------------------------------------------
+reward_shaping:
+  # Multiplicateurs de récompense
+  realized_pnl_multiplier: 1.0      # Multiplicateur pour le PnL réalisé
+  unrealized_pnl_multiplier: 0.1    # Multiplicateur pour le PnL latent
+  
+  # Contrôle des valeurs de récompense
+  reward_clipping_range: [-3.0, 3.0]  # Plage de clipping des récompenses
+  
+  # Bonus de performance
+  optimal_trade_bonus: 2.0           # Bonus maximal pour trades optimaux
+  performance_threshold: 0.6         # Seuil de performance pour bonus
+  
+  # Configuration des chunks
+  chunk_size: 2000                   # Taille de chunk pour évaluation
+  
+  # Paramètres d'apprentissage continu
+  use_ewc: true                      # Utiliser Elastic Weight Consolidation
+  ewc_lambda: 0.2                    # Poids EWC pour rétention mémoire
+  
+  # Configuration de la mémoire de rejeu
+  use_prioritized_replay: true       # Utiliser Prioritized Experience Replay
+  prioritized_replay_alpha: 0.6      # Paramètre alpha pour PER
+  prioritized_replay_beta: 0.4       # Paramètre beta pour PER
+  prioritized_replay_eps: 1e-6       # Epsilon pour éviter division par zéro
+
+# ------------------------------------------------------------------------------
+# Pénalités
+# ------------------------------------------------------------------------------
+penalties:
+  # Pénalité pour action invalide
+  invalid_action: -0.1               # Pénalité pour action non autorisée
+  
+  # Pénalité pour rejet d'ordre
+  order_rejection: -0.5              # Pénalité pour ordre rejeté par l'échange
+  
+  # Paramètres d'inaction
+  inaction_freq_threshold: 0.15      # Seuil de fréquence d'inaction (15%)
+  inaction_pnl_threshold: 0.05       # Seuil de PnL pour pénalité d'inaction
+  base_inaction_penalty: -0.001      # Pénalité de base pour inaction
+  
+  # Pénalité d'inaction générale
+  inaction_penalty: -0.001           # Pénalité d'inaction standard
+
+# ------------------------------------------------------------------------------
+# Récompenses de Trading
+# ------------------------------------------------------------------------------
+trading_rewards:
+  # Récompenses pour différents types de trades
+  profitable_trade_bonus: 0.1       # Bonus pour trade profitable
+  loss_trade_penalty: -0.05         # Pénalité pour trade perdant
+  
+  # Récompenses basées sur la durée
+  quick_profit_bonus: 0.05           # Bonus pour profit rapide
+  holding_penalty: -0.001            # Pénalité pour position trop longue
+  
+  # Récompenses de gestion des risques
+  risk_management_bonus: 0.02        # Bonus pour bonne gestion du risque
+  excessive_risk_penalty: -0.1       # Pénalité pour risque excessif
+
+# ------------------------------------------------------------------------------
+# Récompenses de Portfolio
+# ------------------------------------------------------------------------------
+portfolio_rewards:
+  # Récompenses basées sur la performance du portfolio
+  portfolio_growth_multiplier: 1.0   # Multiplicateur pour croissance du portfolio
+  drawdown_penalty_multiplier: 2.0   # Multiplicateur de pénalité pour drawdown
+  
+  # Récompenses de diversification
+  diversification_bonus: 0.01        # Bonus pour diversification
+  concentration_penalty: -0.02       # Pénalité pour concentration excessive
+  
+  # Récompenses de stabilité
+  stability_bonus: 0.005             # Bonus pour stabilité des performances
+  volatility_penalty: -0.01          # Pénalité pour volatilité excessive
+
+# ------------------------------------------------------------------------------
+# Récompenses Adaptatives
+# ------------------------------------------------------------------------------
+adaptive_rewards:
+  # Adaptation selon les conditions de marché
+  bull_market_multiplier: 1.1        # Multiplicateur en marché haussier
+  bear_market_multiplier: 0.9        # Multiplicateur en marché baissier
+  sideways_market_multiplier: 1.0    # Multiplicateur en marché latéral
+  volatile_market_multiplier: 0.8    # Multiplicateur en marché volatil
+  
+  # Adaptation selon la performance
+  high_performance_bonus: 0.05       # Bonus pour haute performance
+  low_performance_penalty: -0.02     # Pénalité pour faible performance
+  
+  # Adaptation temporelle
+  learning_phase_multiplier: 1.2     # Multiplicateur en phase d'apprentissage
+  exploitation_phase_multiplier: 1.0 # Multiplicateur en phase d'exploitation
+
+# ------------------------------------------------------------------------------
+# Métriques de Performance
+# ------------------------------------------------------------------------------
+performance_metrics:
+  # Seuils pour évaluation de performance
+  excellent_performance_threshold: 0.8  # Seuil pour performance excellente
+  good_performance_threshold: 0.6       # Seuil pour bonne performance
+  poor_performance_threshold: 0.3       # Seuil pour performance médiocre
+  
+  # Fenêtres d'évaluation
+  short_term_window: 100              # Fenêtre court terme (steps)
+  medium_term_window: 500             # Fenêtre moyen terme (steps)
+  long_term_window: 2000              # Fenêtre long terme (steps)
+
+# ------------------------------------------------------------------------------
+# Configuration Avancée
+# ------------------------------------------------------------------------------
+advanced_settings:
+  # Normalisation des récompenses
+  normalize_rewards: true             # Normaliser les récompenses
+  reward_scaling_factor: 1.0          # Facteur d'échelle des récompenses
+  
+  # Lissage des récompenses
+  reward_smoothing: true              # Activer le lissage des récompenses
+  smoothing_factor: 0.1               # Facteur de lissage exponentiel
+  
+  # Récompenses différées
+  delayed_rewards: false              # Activer les récompenses différées
+  delay_steps: 10                     # Nombre de steps de délai
+  
+  # Récompenses hiérarchiques
+  hierarchical_rewards: false         # Activer les récompenses hiérarchiques
+  hierarchy_levels: 3                 # Nombre de niveaux hiérarchiques

@@ -1,0 +1,562 @@
+
+  # ==============================================================================
+  # FICHIER DE CONFIGURATION UNIQUE POUR ADAN
+  # ==============================================================================
+  # Ce fichier centralise toutes les configurations du projet ADAN, y compris
+  # les données, l'environnement, l'agent, l'entraînement, et le logging.
+
+  # ------------------------------------------------------------------------------
+  # Paramètres Généraux du Projet
+  # ------------------------------------------------------------------------------
+  general:
+    project_name: "ADAN"
+    random_seed: 42
+    timezone: "UTC"
+    debug_mode: true
+    n_jobs: -1
+
+  # ------------------------------------------------------------------------------
+  # Gestion des Chemins et Répertoires
+  # ------------------------------------------------------------------------------
+  paths:
+    base_dir: "/home/morningstar/Documents/trading/ADAN"
+    data_dir: "${paths.base_dir}/data"
+    raw_data_dir: "${paths.data_dir}/raw"
+    processed_data_dir: "${paths.data_dir}/processed"
+    indicators_data_dir: "${paths.processed_data_dir}/indicators"
+    final_data_dir: "${paths.data_dir}/final"
+    models_dir: "${paths.base_dir}/models"
+    trained_models_dir: "${paths.models_dir}/rl_agents"
+    logs_dir: "${paths.base_dir}/logs"
+    reports_dir: "${paths.base_dir}/reports"
+    figures_dir: "${paths.reports_dir}/figures"
+    metrics_dir: "${paths.reports_dir}/metrics"
+
+  # ------------------------------------------------------------------------------
+  # Configuration des Données
+  # ------------------------------------------------------------------------------
+  data:
+    data_dir: "${paths.indicators_data_dir}"
+    assets: ["BTC", "ETH", "SOL", "XRP", "ADA"]
+    timeframes: ["5m", "1h", "4h"]
+    features_per_timeframe:
+      "5m": ["OPEN", "HIGH", "LOW", "CLOSE", "VOLUME", "RSI_14", "STOCHk_14_3_3", "STOCHd_14_3_3", "CCI_20_0.015", "ROC_9", "MFI_14", "EMA_5", "EMA_20", "SUPERTREND_14_2.0", "PSAR_0.02_0.2"]
+      "1h": ["OPEN", "HIGH", "LOW", "CLOSE", "VOLUME", "RSI_14", "MACD_12_26_9", "MACD_HIST_12_26_9", "CCI_20_0.015", "MFI_14", "EMA_50", "EMA_100", "SMA_200", "ICHIMOKU_9_26_52", "PSAR_0.02_0.2"]
+      "4h": ["OPEN", "HIGH", "LOW", "CLOSE", "VOLUME", "RSI_14", "MACD_12_26_9", "CCI_20_0.015", "MFI_14", "EMA_50", "SMA_200", "ICHIMOKU_9_26_52", "SUPERTREND_14_3.0", "PSAR_0.02_0.2"]
+    window_size: 3
+    observation_shape: [3, 3, 15]  # 15 features par timeframe
+    portfolio:
+      initial_balance: 100.0
+      trading_fees: 0.01
+      max_steps: 100
+      risk:
+        max_drawdown: 0.1
+        position_size: 0.1
+        stop_loss: 0.02
+        take_profit: 0.05
+    split:
+      train_start: "2023-01-01"
+      train_end: "2023-01-02"
+      val_start: "2023-01-02"
+      val_end: "2023-01-03"
+      test_start: "2023-01-03"
+      test_end: "2023-01-04"
+    data_loader:
+      strategy: "lazy_sequential"
+      batch_size: 32
+      num_workers: 1
+      prefetch_factor: 1
+      pin_memory: false
+      chunk_config:
+        chunk_size: 100
+        max_chunks_in_memory: 1
+        aggressive_cleanup: true
+        force_gc_after_chunk: true
+    chunked_loader:
+      chunk_size: 500
+      shuffle: true
+      num_workers: 2
+      pin_memory: false
+      drop_last: true
+    window:
+      size: 20
+      stride: 1
+      overlap: true
+    memory_optimizations:
+      disable_caching: true
+      explicit_cleanup: true
+      memory_monitoring: true
+      memory_warning_threshold_mb: 5600
+      memory_critical_threshold_mb: 6300
+    cpu_config:
+      num_threads: 4
+      torch_num_threads: 4
+      force_cpu: true
+
+  # ------------------------------------------------------------------------------
+  # Configuration du Feature Engineering
+  # ------------------------------------------------------------------------------
+  feature_engineering:
+    timeframes: ["5m", "1h", "4h"]
+    columns_to_normalize:
+      - "open"
+      - "high"
+      - "low"
+      - "close"
+      - "volume"
+    indicators:
+      # Configuration des indicateurs par timeframe
+      timeframes:
+        # --- 5 minutes (scalping / micro-tendances) ---
+        "5m":
+          momentum:
+            - "RSI_14"
+            - "STOCH_14_3"
+            - "CCI_20"
+            - "ROC_9"
+            - "MFI_14"
+          trend:
+            - "EMA_5"
+            - "EMA_20"
+            - "SUPERTREND_14_2.0"
+            - "PSAR_0.02_0.2"
+          volatility:
+            - "ATR_14"
+            - "BB_20_2.0"
+          volume:
+            - "VWAP"
+            - "OBV"
+          
+        # --- 1 heure (swing-trading / tendance moyenne) ---
+        "1h":
+          momentum:
+            - "RSI_14"
+            - "MACD_12_26_9"
+            - "MACD_HIST_12_26_9"
+            - "CCI_20"
+            - "MFI_14"
+          trend:
+            - "EMA_50"
+            - "EMA_100"
+            - "SMA_200"
+            - "ICHIMOKU_9_26_52"
+            - "PSAR_0.02_0.2"
+          volatility:
+            - "ATR_14"
+            - "BB_20_2.0"
+          volume:
+            - "OBV"
+            - "VWAP"
+          
+        # --- 4 heures (position-trading / tendance long terme) ---
+        "4h":
+          momentum:
+            - "RSI_14"
+            - "MACD_12_26_9"
+            - "CCI_20"
+            - "MFI_14"
+          trend:
+            - "SMA_200"
+            - "EMA_50"
+            - "ICHIMOKU_9_26_52"
+            - "SUPERTREND_14_3.0"
+            - "PSAR_0.02_0.2"
+          volatility:
+            - "ATR_14"
+            - "BB_20_2.0"
+          volume:
+            - "OBV"
+            - "VWAP_DAILY"
+            - "VWAP_WEEKLY"
+      
+      # Paramètres généraux des indicateurs
+      common:
+        # Paramètres pour les bandes de Bollinger
+        bollinger:
+          window: 20
+          window_dev: 2.0
+        # Paramètres pour le RSI
+        rsi:
+          window: 14
+        # Paramètres pour le MACD
+        macd:
+          fast: 12
+          slow: 26
+          signal: 9
+        # Paramètres pour l'ATR
+        atr:
+          window: 14
+        # Paramètres pour le SuperTrend
+        supertrend:
+          window: 14
+          multiplier: 2.0  # Valeur par défaut, peut être écrasé par timeframe spécifique
+        # Paramètres pour le SAR Parabolique
+        psar:
+          step: 0.02
+          max_step: 0.2
+    preprocessing:
+      fillna: true
+      normalize: true
+      remove_outliers: true
+      min_data_points: 50
+    performance:
+      chunk_size: 1000
+      n_jobs: -1
+      cache_indicators: true
+      parallel_timeframes: true
+    validation:
+      check_nan_percentage: true
+      max_nan_percentage: 0.05
+      check_feature_correlation: true
+      max_correlation_threshold: 0.95
+
+  # ------------------------------------------------------------------------------
+  # Configuration de l'Environnement de Trading
+  # ------------------------------------------------------------------------------
+  environment:
+    initial_balance: 20.0
+    trading_fees: 0.01
+    max_steps: 100
+    assets: ["BTC", "ETH", "SOL", "XRP", "ADA"]
+    observation_shape: [3000]  # Taille totale de l'observation sans les features du portefeuille
+    portfolio_features: 10     # Nombre de features du portefeuille à ajouter
+    mode: "backtest"
+    base_currency: "USDT"
+    
+    # Configuration de l'état
+    state:
+      window_size: 50
+      warmup_steps: 49  # window_size - 1
+      timeframes: ["5m", "1h", "4h"]
+      features_per_timeframe:
+        "5m": ["open", "high", "low", "close", "volume", "minutes_since_update", "RSI_14", "STOCH_14_3", "CCI_20", "ROC_9", "MFI_14", "EMA_5", "EMA_20", "SUPERTREND_14_2.0", "PSAR_0.02_0.2", "ATR_14", "BB_20_2.0", "VWAP", "OBV"]
+        "1h": ["open", "high", "low", "close", "volume", "minutes_since_update", "RSI_14", "MACD_12_26_9", "MACD_HIST_12_26_9", "CCI_20", "MFI_14", "EMA_50", "EMA_100", "SMA_200", "ICHIMOKU_9_26_52", "PSAR_0.02_0.2", "ATR_14", "BB_20_2.0", "OBV", "VWAP"]
+        "4h": ["open", "high", "low", "close", "volume", "minutes_since_update", "RSI_14", "MACD_12_26_9", "CCI_20", "MFI_14", "SMA_200", "EMA_50", "ICHIMOKU_9_26_52", "SUPERTREND_14_3.0", "PSAR_0.02_0.2", "ATR_14", "BB_20_2.0", "OBV", "VWAP_DAILY", "VWAP_WEEKLY"]
+      include_portfolio_state: true
+    
+    
+    risk_management:
+      position_sizing:
+        max_risk_per_trade_pct: 1.0
+        max_asset_allocation_pct: 20.0
+        concentration_limits:
+          BTC: 30.0
+          ETH: 25.0
+          SOL: 20.0
+          XRP: 15.0
+          ADA: 10.0
+        take_profit:
+          enabled: true
+          risk_reward_ratio: 2.0
+          trailing_enabled: true
+          trailing_deviation_pct: 1.0
+    penalties:
+      invalid_action: -0.1
+      order_rejection: -0.5
+      inaction_freq_threshold: 0.15
+      inaction_pnl_threshold: 0.05
+      base_inaction_penalty: -0.001
+    reward_shaping:
+      realized_pnl_multiplier: 1.0
+      unrealized_pnl_multiplier: 0.1
+      reward_clipping_range: [-3.0, 3.0]
+      optimal_trade_bonus: 2.0
+      performance_threshold: 0.6
+      chunk_size: 5000  # Augmenter pour s'assurer d'avoir assez de données pour le warm-up
+      use_ewc: true
+      ewc_lambda: 0.2
+      use_prioritized_replay: true
+
+  # ------------------------------------------------------------------------------
+  # Configuration des Règles de Trading
+  # ------------------------------------------------------------------------------
+  trading_rules:
+    # Paramètres généraux
+    futures_enabled: false
+    leverage: 1
+    commission_pct: 0.1
+    futures_commission_pct: 0.02
+    
+    # Contrôles de taille de position
+    min_trade_size: 0.0001
+    min_notional_value: 10.0
+    max_notional_value: 100000.0
+    min_order_value_usdt: 10.0
+    min_remaining_capital_usdt: 1.0
+    
+    # Gestion du risque
+    max_leverage: 10
+    slippage_pct: 0.0005
+    
+    # Ordres stop et take-profit
+    stop_loss: 0.02       # 2% de stop-loss par défaut
+    take_profit: 0.04     # 4% de take-profit par défaut
+    trailing_stop: 0.01   # 1% pour le trailing stop
+    
+    # Seuils de sécurité
+    max_daily_drawdown: 0.05  # 5% de drawdown journalier maximum
+    max_position_size: 0.2    # 20% du capital maximum par position
+
+  # ------------------------------------------------------------------------------
+  # Configuration des Paliers de Capital
+  # ------------------------------------------------------------------------------
+  capital_tiers:
+    - name: "Micro Capital"
+      min_capital: 11.0
+      max_capital: 30.0
+      max_position_size_pct: 90
+      leverage: 1.0
+      risk_per_trade_pct: 1.0
+      max_drawdown_pct: 5.0
+
+    - name: "Small Capital"
+      min_capital: 30.0
+      max_capital: 100.0
+      max_position_size_pct: 70
+      leverage: 1.0
+      risk_per_trade_pct: 1.5
+      max_drawdown_pct: 4.0
+
+    - name: "Medium Capital"
+      min_capital: 100.0
+      max_capital: 300.0
+      max_position_size_pct: 60
+      leverage: 1.0
+      risk_per_trade_pct: 2.0
+      max_drawdown_pct: 3.5
+
+    - name: "High Capital"
+      min_capital: 300.0
+      max_capital: 1000.0
+      max_position_size_pct: 35
+      leverage: 1.0
+      risk_per_trade_pct: 2.5
+      max_drawdown_pct: 3.0
+
+    - name: "Enterprise"
+      min_capital: 1000.0
+      max_capital: null  # Pas de limite supérieure
+      max_position_size_pct: 20
+      leverage: 1.0
+      risk_per_trade_pct: 3.0
+      max_drawdown_pct: 2.5
+
+  # ------------------------------------------------------------------------------
+  # Configuration du Portefeuille
+  # ------------------------------------------------------------------------------
+  portfolio:
+    initial_capital: 20.0
+    base_currency: "USDT"
+    rebalance_interval: "1d"
+    max_drawdown: 25.0
+    max_trade_size_pct: 10.0
+
+  # ------------------------------------------------------------------------------
+  # Configuration de l'Agent RL
+  # ------------------------------------------------------------------------------
+  agent:
+    algorithm: "PPO"
+    policy: "MultiInputPolicy"
+    # Configuration pour tests initiaux
+    # Pour le débogage
+    seed: 42
+    verbose: 1
+    deterministic_inference: true
+    custom_log_freq_rollouts: 10
+    eval_freq: 2500
+    checkpoint_freq: 5000
+    n_envs: 4  # 4 environnements parallèles comme demandé
+    batch_size: 64  # Taille de batch réduite
+    buffer_size: 100000
+    window_size: 100
+    features_extractor_kwargs:
+      cnn_configs:
+        "1m":
+          input_shape: [1, 100, 10]
+          conv_layers:
+            - {filters: 32, kernel_size: 3, strides: 1, padding: 'same', activation: 'relu'}
+            - {filters: 64, kernel_size: 3, strides: 1, padding: 'same', activation: 'relu'}
+          pool_layers:
+            - {pool_size: 2, strides: 2}
+          dropout: 0.2
+        "1h":
+          input_shape: [1, 100, 10]
+          conv_layers:
+            - {filters: 32, kernel_size: 3, strides: 1, padding: 'same', activation: 'relu'}
+            - {filters: 64, kernel_size: 3, strides: 1, padding: 'same', activation: 'relu'}
+          pool_layers:
+            - {pool_size: 2, strides: 2}
+          dropout: 0.2
+        "3h":
+          input_shape: [1, 100, 8]
+          conv_layers:
+            - {filters: 16, kernel_size: 3, strides: 1, padding: 'same', activation: 'relu'}
+            - {filters: 32, kernel_size: 3, strides: 1, padding: 'same', activation: 'relu'}
+          pool_layers:
+            - {pool_size: 2, strides: 2}
+          dropout: 0.1
+      fc_layers: [256, 128]
+      dropout: 0.2
+      activation: "leaky_relu"
+    policy_kwargs:
+      net_arch:
+        shared: [256, 128]
+        pi: [64, 32]
+        vf: [64, 32]
+      activation_fn: "leaky_relu"
+      gamma: 0.99
+      gae_lambda: 0.95
+      ent_coef: 0.01
+      ent_coef_annealing: True
+      learning_rate: 0.0003
+      learning_rate_schedule: 'linear'
+      n_steps: 1024  # Moins de pas entre les mises à jour
+      batch_size: 64
+      n_epochs: 2  # Seulement 2 époques pour les tests initiaux
+      nminibatches: 4
+      clip_range: "lambda f: f * 0.2" # Correction pour le clip_range
+      clip_range_vf: 0.2
+      l2_penalty: 0.0
+      dropout: 0.1
+      batch_norm: True
+      target_update_interval: 1
+      target_update_freq: 1000
+      exploration_noise: 0.1
+      exploration_noise_type: 'normal'
+      ou_params:
+        mu: 0.0
+        theta: 0.15
+        sigma: 0.2
+      random_exploration: 10000
+      exploration_strategy: 'gaussian'
+      normalize_observations: false
+      normalize_rewards: false
+    ppo:
+      n_steps: 1024  # Moins de pas entre les mises à jour
+      batch_size: 64
+      n_epochs: 2  # Seulement 2 époques pour les tests initiaux
+      gae_lambda: 0.95
+      clip_range: 0.2
+      clip_range_vf: null
+      ent_coef: 0.01
+      vf_coef: 0.5
+      max_grad_norm: 0.5
+      normalize_advantage: True
+      use_sde: False
+      sde_sample_freq: -1
+      use_reparameterization: False
+
+  # ------------------------------------------------------------------------------
+  # Configuration de l'Entraînement
+  # ------------------------------------------------------------------------------
+  training:
+    num_instances: 4
+    timesteps_per_instance: 25000
+    batch_size: 64
+    save_freq: 1000
+    checkpointing:
+      enabled: true
+      save_freq: 5000
+      model_name: "ppo_adan_v1"
+      save_path: "${paths.trained_models_dir}/${training.checkpointing.model_name}"
+
+  # ------------------------------------------------------------------------------
+  # Configuration des Récompenses
+  # ------------------------------------------------------------------------------
+  reward_shaping:
+    position_reward: 1.0
+    commission_reward: -0.1
+    slippage_reward: -0.1
+    drawdown_penalty: -1.0
+    profit_factor_bonus: 0.5
+    risk_reward_ratio: 2.0
+    max_position_size: 0.1
+    max_order_size: 0.01
+    min_order_value_usdt: 10
+    commission_pct: 0.001
+    slippage_pct: 0.001
+
+  # Configuration du Logging
+  # ------------------------------------------------------------------------------
+  logging:
+    version: 1
+    disable_existing_loggers: false
+    log_dirs:
+      base: "logs"
+      dbe_replay: "logs/dbe_replay"
+      metrics: "logs/metrics"
+      models: "logs/models"
+      performance: "logs/performance"
+      data_quality: "logs/data_quality"
+      memory: "logs/memory"
+    formatters:
+      standard:
+        format: "%(asctime)s - %(name)-25s - %(levelname)-8s - %(message)s"
+        datefmt: "%Y-%m-%d %H:%M:%S"
+      detailed:
+        format: "%(asctime)s - %(name)-25s - %(levelname)-8s - %(filename)s:%(lineno)d - %(message)s"
+        datefmt: "%Y-%m-%d %H:%M:%S"
+      json:
+        class: pythonjsonlogger.jsonlogger.JsonFormatter
+        format: "%(asctime)s %(name)s %(levelname)s %(filename)s %(lineno)s %(message)s"
+        datefmt: "%Y-%m-%d %H:%M:%S"
+    handlers:
+      console:
+        class: logging.StreamHandler
+        level: INFO
+        formatter: standard
+        stream: ext://sys.stdout
+      file_handler:
+        class: logging.handlers.TimedRotatingFileHandler
+        level: DEBUG
+        formatter: detailed
+        filename: logs/adan.log
+        when: 'midnight'
+        backupCount: 30
+        encoding: utf-8
+        utc: True
+      error_file_handler:
+        class: logging.handlers.RotatingFileHandler
+        level: ERROR
+        formatter: detailed
+        filename: logs/error.log
+        maxBytes: 10485760
+        backupCount: 10
+        encoding: utf-8
+      json_file_handler:
+        class: logging.handlers.RotatingFileHandler
+        level: INFO
+        formatter: json
+        filename: logs/adan_structured.log
+        maxBytes: 10485760
+        backupCount: 10
+        encoding: utf-8
+    loggers:
+      '':
+        level: WARNING
+        handlers: [console, file_handler, error_file_handler]
+        propagate: no
+      adan:
+        level: INFO
+        handlers: [console, file_handler, json_file_handler]
+        propagate: no
+      tensorflow:
+        level: WARNING
+        handlers: [file_handler]
+        propagate: no
+      stable_baselines3:
+        level: INFO
+        handlers: [file_handler]
+        propagate: no
+      urllib3:
+        level: WARNING
+        handlers: [file_handler]
+        propagate: no
+      pyarrow:
+        level: WARNING
+        handlers: [file_handler]
+        propagate: no
+    root:
+      level: WARNING
+      handlers: [console, file_handler, error_file_handler]
+      propagate: no

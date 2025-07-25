@@ -2,17 +2,22 @@
 # -*- coding: utf-8 -*-
 import unittest
 import numpy as np
-from src.adan_trading_bot.environment.action_translator import ActionTranslator
-from src.adan_trading_bot.environment.portfolio_manager import PortfolioManager
+from adan_trading_bot.environment.action_translator import ActionTranslator
+from adan_trading_bot.portfolio.portfolio_manager import PortfolioManager
 
 class TestActionTranslator(unittest.TestCase):
     def setUp(self):
         self.assets = ['BTCUSDT', 'ETHUSDT']
         self.translator = ActionTranslator(self.assets)
         self.capital_tiers = [
-            {'threshold': 0, 'max_positions': 1, 'allocation_per_trade': 0.95, 'reward_multiplier': 1.0}
+            {'min_capital': 0, 'max_positions': 1, 'allocation_per_trade': 0.95, 'reward_multiplier': 1.0}
         ]
-        self.portfolio = PortfolioManager(1000.0, self.assets, 0.001, self.capital_tiers)
+        self.portfolio = PortfolioManager({
+            'initial_capital': 1000.0,
+            'assets': self.assets,
+            'trading_rules': {'commission_pct': 0.001, 'futures_enabled': False, 'min_trade_size': 0.0001, 'min_notional_value': 10.0, 'max_notional_value': 100000.0},
+            'risk_management': {'capital_tiers': self.capital_tiers}
+        })
         self.current_prices = {'BTCUSDT': 10000, 'ETHUSDT': 500}
 
     def test_buy_action(self):

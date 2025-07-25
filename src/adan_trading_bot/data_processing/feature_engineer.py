@@ -29,7 +29,7 @@ class FeatureEngineer:
     def __init__(self, data_config: Dict[str, Any], models_dir: str = 'models'):
         """
         Initializes the FeatureEngineer.
-
+        
         Args:
             data_config: A dictionary, typically from data_config.yaml.
             models_dir: Directory to save or load the scaler object.
@@ -43,227 +43,259 @@ class FeatureEngineer:
         self.scaler = StandardScaler()
         self.fitted = False
 
+        # Vérifier la configuration
+        self._validate_config()
+        
         logger.info("FeatureEngineer initialized.")
-
+    
+    def _validate_config(self) -> None:
+        """
+        Vérifie la validité de la configuration.
+        """
+        try:
+            # Vérifier les timeframes
+            if not isinstance(self.timeframes, list) or not all(isinstance(tf, str) for tf in self.timeframes):
+                raise ValueError("Timeframes must be a list of strings")
+            
+            # Vérifier les indicateurs
+            if not isinstance(self.indicators_config, dict):
+                raise ValueError("Indicators config must be a dictionary")
+            
+            # Vérifier les colonnes à normaliser
+            if not isinstance(self.columns_to_normalize, list) or not all(isinstance(col, str) for col in self.columns_to_normalize):
+                raise ValueError("Columns to normalize must be a list of strings")
+            
+            # Vérifier que tous les indicateurs existent
+            for indicator in self.indicators_config:
+                if indicator not in pta.indicators:
+                    raise ValueError(f"Invalid indicator: {indicator}")
+            
+            logger.info("Configuration validated successfully")
+            
+        except Exception as e:
+            logger.error(f"Configuration validation error: {str(e)}")
+            raise
+    
     def process_data(self, data: pd.DataFrame, fit_scaler: bool = False) -> pd.DataFrame:
         """
-        Main processing pipeline for feature engineering.
-
+        Pipeline principal pour le feature engineering.
+        
         Args:
-            data: The merged DataFrame from the DataLoader.
-            fit_scaler: If True, fits the scaler to the data. Should only be
-                        done on the training dataset.
-
+            data: DataFrame contenant les données de marché
+            fit_scaler: Si True, ajuste le scaler aux données
+            
         Returns:
-            The processed DataFrame with all features and normalizations applied.
+            DataFrame avec les features ingénierisées
+
+        Raises:
+            ValueError: Si les colonnes à normaliser ne sont pas présentes dans le DataFrame
         """
-        # 1. Calculate indicators for each timeframe
-        data_with_indicators = self._calculate_all_indicators(data)
+        try:
+            # Vérifier la cohérence des données d'entrée
+            self._validate_input_data(data)
 
-        # 2. Handle any missing values that might have been generated
-        data_filled = self._handle_missing_values(data_with_indicators)
+            # Ajouter les indicateurs techniques
+            data = self.add_technical_indicators(data)
 
-        # 3. Normalize the data
-        data_normalized = self._normalize_features(data_filled, fit=fit_scaler)
-        
-        logger.info(f"Feature engineering complete. DataFrame shape: {data_normalized.shape}")
-        return data_normalized
+            # Vérifier que les colonnes à normaliser existent
+            missing_cols = [col for col in self.columns_to_normalize if col not in data.columns]
+            if missing_cols:
+                raise ValueError(f"Colonnes manquantes pour la normalisation: {missing_cols}")
 
-    def _calculate_all_indicators(self, data: pd.DataFrame) -> pd.DataFrame:
-        """
-        Iterates through each timeframe and calculates the configured indicators.
-        """
-        df = data.copy()
-        for tf in self.timeframes:
-            logger.debug(f"Calculating indicators for timeframe: {tf}")
-            # Construct a temporary DataFrame with standard column names for pandas_ta
-            temp_df = pd.DataFrame({
-                'open': df[f'open_{tf}'],
-                'high': df[f'high_{tf}'],
-                'low': df[f'low_{tf}'],
-                'close': df[f'close_{tf}'],
-                'volume': df[f'volume_{tf}']
-            })
-
-            # Use pandas_ta to calculate indicators based on the config
-            temp_df.ta.strategy(self._get_ta_strategy(), append=True)
-
-            # Merge the new indicator columns back into the main DataFrame
-            # with the correct timeframe suffix.
-            indicator_cols = [col for col in temp_df.columns if col not in temp_df.columns[:5]]
-            for col in indicator_cols:
-                df[f"{col}_{tf}"] = temp_df[col]
-        
-        return df
-
-    def _get_ta_strategy(self) -> List[Dict]:
-        """
-        Converts the YAML indicator config into a list of dictionaries that
-        pandas_ta can understand.
-        """
-        strategy = []
-        for indicator, params in self.indicators_config.items():
-            if isinstance(params, list): # For indicators with multiple configs (e.g., SMA)
-                for p in params:
-                    strategy.append({"kind": indicator, **p})
-            else:
-                strategy.append({"kind": indicator, **params})
-        logger.debug(f"Generated pandas_ta strategy: {strategy}")
-        return strategy
-
-    def _handle_missing_values(self, data: pd.DataFrame) -> pd.DataFrame:
-        """
-        Fills missing values using forward-fill and then back-fill.
-        """
-        # Using ffill and bfill is generally safe for financial time series.
-        return data.ffill().bfill()
-
-    def _normalize_features(self, data: pd.DataFrame, fit: bool) -> pd.DataFrame:
-        """
-        Applies StandardScaler to the features specified in the config.
-        """
-        df = data.copy()
-        # Dynamically build the list of columns to scale based on config and available data
-        cols_to_scale = []
-        for base_col_name in self.columns_to_normalize:
-            for tf in self.timeframes:
-                # Check for base columns (e.g., 'close_1m')
-                tf_col_name = f"{base_col_name}_{tf}"
-                if tf_col_name in df.columns:
-                    cols_to_scale.append(tf_col_name)
-                # Check for indicator columns (e.g., 'SMA_20_1m')
-                # This requires a more robust check
-                for indicator_col in df.columns:
-                    if indicator_col.startswith(base_col_name) and indicator_col.endswith(tf):
-                        if indicator_col not in cols_to_scale:
-                            cols_to_scale.append(indicator_col)
-        
-        # Ensure we only use columns that actually exist
-        final_cols_to_scale = [col for col in cols_to_scale if col in df.columns]
-        logger.info(f"Found {len(final_cols_to_scale)} columns to normalize.")
-
-        if not final_cols_to_scale:
-            logger.warning("No columns found to normalize. Skipping scaling.")
-            return df
-
-        if fit:
-            logger.info("Fitting scaler and transforming data.")
-            df[final_cols_to_scale] = self.scaler.fit_transform(df[final_cols_to_scale])
-            self.save_scaler()
-            self.fitted = True
-        else:
-            if not self.fitted:
-                self.load_scaler()
-            logger.info("Transforming data using existing scaler.")
-            df[final_cols_to_scale] = self.scaler.transform(df[final_cols_to_scale])
-            
-        return df
-
-    def save_scaler(self) -> None:
-        """Saves the fitted scaler object to a file."""
-        logger.info(f"Saving scaler to {self.scaler_path}")
-        self.scaler_path.parent.mkdir(parents=True, exist_ok=True)
-        joblib.dump(self.scaler, self.scaler_path)
-
-    def load_scaler(self) -> None:
-        """Loads a pre-fitted scaler object from a file."""
-        if not self.scaler_path.exists():
-            raise FileNotFoundError(f"Scaler file not found at {self.scaler_path}. "
-                                    "Please fit the scaler on training data first.")
-        logger.info(f"Loading scaler from {self.scaler_path}")
-        self.scaler = joblib.load(self.scaler_path)
-        self.fitted = True
-
-
-def add_technical_indicators(df: pd.DataFrame, indicators_config: List[Dict], timeframe: str) -> Tuple[pd.DataFrame, List[str]]:
-    """
-    Ajoute des indicateurs techniques à un DataFrame de données de marché.
-    
-    Args:
-        df: DataFrame contenant les données OHLCV
-        indicators_config: Liste des indicateurs à ajouter
-        timeframe: Période de temps (ex: '1h', '4h')
-        
-    Returns:
-        Tuple contenant le DataFrame avec les indicateurs ajoutés et la liste des noms des indicateurs ajoutés
-    """
-    from typing import List, Dict, Tuple
-    import pandas_ta as ta
-    
-    if df.empty:
-        return df, []
-    
-    # Faire une copie pour éviter les modifications inattendues
-    df = df.copy()
-    
-    # Liste pour stocker les noms des indicateurs ajoutés
-    added_features = []
-    
-    # Dictionnaire pour mapper les types d'indicateurs aux fonctions pandas_ta
-    indicator_functions = {
-        'sma': lambda p: ta.sma(df['close'], length=p['length']),
-        'ema': lambda p: ta.ema(df['close'], length=p['length']),
-        'rsi': lambda p: ta.rsi(df['close'], length=p['length']),
-        'macd': lambda p: ta.macd(df['close'], fast=p.get('fast', 12), slow=p.get('slow', 26), signal=p.get('signal', 9)),
-        'bbands': lambda p: ta.bbands(df['close'], length=p.get('length', 20), std=p.get('std', 2.0)),
-        'atr': lambda p: ta.atr(df['high'], df['low'], df['close'], length=p.get('length', 14)),
-        'obv': lambda p: ta.obv(df['close'], df['volume']),
-        'vwap': lambda p: ta.vwap(df['high'], df['low'], df['close'], df['volume']),
-        'mfi': lambda p: ta.mfi(df['high'], df['low'], df['close'], df['volume'], length=p.get('length', 14)),
-        'adx': lambda p: ta.adx(df['high'], df['low'], df['close'], length=p.get('length', 14)),
-        'cci': lambda p: ta.cci(df['high'], df['low'], df['close'], length=p.get('length', 20)),
-        'willr': lambda p: ta.willr(df['high'], df['low'], df['close'], length=p.get('length', 14)),
-        'stoch': lambda p: ta.stoch(df['high'], df['low'], df['close'], 
-                                   k=p.get('k', 14), d=p.get('d', 3), smooth_k=p.get('smooth_k', 3))
-    }
-    
-    # Parcourir la configuration des indicateurs
-    for indicator_config in indicators_config:
-        if isinstance(indicator_config, str):
-            # Si c'est une chaîne, c'est une référence à un indicateur prédéfini
-            indicator_name = indicator_config
-            indicator_type = indicator_name.split('_')[0]  # Ex: 'sma_20' -> 'sma'
-            
-            # Vérifier si l'indicateur est pris en charge
-            if indicator_type not in indicator_functions:
-                logger.warning(f"Indicateur non pris en charge: {indicator_name}")
-                continue
-                
-            # Générer un nom de colonne unique
-            col_name = f"{indicator_name}"
-            
-            # Récupérer les paramètres par défaut
-            params = {}
-            if indicator_type in ['sma', 'ema', 'rsi', 'atr', 'mfi', 'adx', 'cci', 'willr']:
-                # Extraire la longueur du nom (ex: 'sma_20' -> 20)
+            # Normaliser les données
+            if fit_scaler:
                 try:
-                    params['length'] = int(indicator_name.split('_')[1])
-                except (IndexError, ValueError):
-                    # Utiliser la valeur par défaut
-                    params['length'] = 14
+                    self.scaler.fit(data[self.columns_to_normalize])
+                    joblib.dump(self.scaler, self.scaler_path)
+                    logger.info(f"Scaler fitted and saved to {self.scaler_path}")
+                    self.fitted = True
+                except Exception as e:
+                    logger.error(f"Error fitting scaler: {str(e)}")
+                    raise
+
+            # Transformer les données
+            data[self.columns_to_normalize] = self.scaler.transform(data[self.columns_to_normalize])
+
+            # Nettoyer les valeurs NaN
+            data = self._clean_dataframe(data)
+
+            logger.info(f"Feature engineering complete. DataFrame shape: {data.shape}")
+            return data
+
+        except Exception as e:
+            logger.error(f"Error during feature engineering: {str(e)}")
+            raise
+    
+    def _validate_input_data(self, data: pd.DataFrame) -> None:
+        """
+        Vérifie la cohérence des données d'entrée.
+        """
+        try:
+            # Vérifier que le DataFrame n'est pas vide
+            if data.empty:
+                raise ValueError("Input DataFrame is empty")
             
-            # Calculer l'indicateur
-            result = indicator_functions[indicator_type](params)
+            # Vérifier les colonnes requises pour chaque timeframe
+            required_columns = set()
+            for tf in self.timeframes:
+                required_columns.update([
+                    f'{tf}_open', f'{tf}_high', f'{tf}_low', 
+                    f'{tf}_close', f'{tf}_volume'
+                ])
             
-            # Gérer les résultats (certains indicateurs retournent plusieurs colonnes)
-            if isinstance(result, pd.DataFrame):
-                # Renommer les colonnes pour éviter les conflits
-                for col in result.columns:
-                    new_col = f"{col}_{timeframe}" if not col.endswith(timeframe) else col
-                    df[new_col] = result[col]
-                    added_features.append(new_col)
-            else:
-                # C'est une seule série
-                new_col = f"{indicator_name}_{timeframe}"
-                df[new_col] = result
-                added_features.append(new_col)
+            # Vérifier que toutes les colonnes requises sont présentes
+            missing_columns = required_columns - set(data.columns)
+            if missing_columns:
+                raise ValueError(f"Missing required columns: {missing_columns}")
+            
+            # Vérifier les types de données
+            numeric_columns = data.select_dtypes(include=['float64', 'int64']).columns
+            if not all(col in numeric_columns for col in required_columns):
+                raise ValueError("Some required columns are not numeric")
+            
+            logger.info("Input data validated successfully")
+            
+        except Exception as e:
+            logger.error(f"Input data validation error: {str(e)}")
+            raise
     
-    # Nettoyer les valeurs NaN qui peuvent résulter du calcul des indicateurs
-    df = df.ffill().bfill()
+    def add_technical_indicators(self, df: pd.DataFrame) -> pd.DataFrame:
+        """
+        Ajoute les indicateurs techniques configurés pour chaque timeframe.
+        """
+        for tf in self.timeframes:
+            logger.debug(f"Calculating 22+ indicators for timeframe: {tf}")
+            
+            temp_df = pd.DataFrame({
+                'open': df[f'{tf}_open'],
+                'high': df[f'{tf}_high'],
+                'low': df[f'{tf}_low'],
+                'close': df[f'{tf}_close'],
+                'volume': df[f'{tf}_volume']
+            })
+            
+            # EMA
+            temp_df[f'EMA_5_{tf}'] = pta.ema(temp_df['close'], length=5)
+            temp_df[f'EMA_10_{tf}'] = pta.ema(temp_df['close'], length=10)
+            temp_df[f'EMA_20_{tf}'] = pta.ema(temp_df['close'], length=20)
+            temp_df[f'EMA_50_{tf}'] = pta.ema(temp_df['close'], length=50)
+            
+            # SMA
+            temp_df[f'SMA_10_{tf}'] = pta.sma(temp_df['close'], length=10)
+            temp_df[f'SMA_20_{tf}'] = pta.sma(temp_df['close'], length=20)
+            temp_df[f'SMA_50_{tf}'] = pta.sma(temp_df['close'], length=50)
+            
+            # RSI
+            temp_df[f'RSI_14_{tf}'] = pta.rsi(temp_df['close'], length=14)
+            
+            # MACD
+            macd = pta.macd(temp_df['close'])
+            temp_df[f'MACD_{tf}'] = macd['MACD_12_26_9']
+            temp_df[f'MACD_Signal_{tf}'] = macd['MACDs_12_26_9']
+            temp_df[f'MACD_Hist_{tf}'] = macd['MACDh_12_26_9']
+            
+            # Ichimoku
+            ichimoku = pta.ichimoku(temp_df['high'], temp_df['low'], temp_df['close'])
+            temp_df[f'Ichimoku_Conversion_{tf}'] = ichimoku['ITS_9_26_52']
+            temp_df[f'Ichimoku_Base_{tf}'] = ichimoku['IKS_9_26_52']
+            temp_df[f'Ichimoku_SpanA_{tf}'] = ichimoku['ISA_9_26_52']
+            temp_df[f'Ichimoku_SpanB_{tf}'] = ichimoku['ISB_9_26_52']
+            
+            # SuperTrend
+            supertrend = pta.supertrend(temp_df['high'], temp_df['low'], temp_df['close'])
+            temp_df[f'SuperTrend_{tf}'] = supertrend['SUPERT_10_3.0']
+            temp_df[f'SuperTrend_Direction_{tf}'] = supertrend['SUPERTd_10_3.0']
+            
+            # Parabolic SAR
+            psar = pta.psar(temp_df['high'], temp_df['low'], temp_df['close'])
+            temp_df[f'PSAR_{tf}'] = psar['PSARs_0.02_0.2']
+            
+            # Bollinger Bands
+            bbands = pta.bbands(temp_df['close'])
+            temp_df[f'BB_Middle_{tf}'] = bbands['BBM_20_2.0']
+            temp_df[f'BB_Upper_{tf}'] = bbands['BBU_20_2.0']
+            temp_df[f'BB_Lower_{tf}'] = bbands['BBL_20_2.0']
+            
+            # Fusionner les nouveaux indicateurs dans le DataFrame principal
+            for col in temp_df.columns:
+                if col not in df.columns:
+                    df[col] = temp_df[col]
+            
+            logger.info(f"Added technical indicators for timeframe {tf}")
+        
+        return df
     
-    # Supprimer les lignes restantes avec des valeurs manquantes
-    df.dropna(inplace=True)
-    
-    logger.info(f"Ajout de {len(added_features)} indicateurs techniques pour le timeframe {timeframe}")
-    
-    return df, added_features
+    def _calculate_volume_indicators(self, df: pd.DataFrame, tf: str) -> Tuple[pd.DataFrame, List[str]]:
+        """
+        Calcule les 5 indicateurs de volume.
+        """
+        indicators = []
+        
+        # OBV (On Balance Volume)
+        col_name = f"OBV_{tf}"
+        df[col_name] = pta.obv(df[f'{tf}_close'], df[f'{tf}_volume'])
+        indicators.append(col_name)
+        
+        # Volume Weighted Average Price (VWAP)
+        col_name = f"VWAP_{tf}"
+        df[col_name] = pta.vwap(df[f'{tf}_high'], df[f'{tf}_low'], df[f'{tf}_close'], df[f'{tf}_volume'])
+        indicators.append(col_name)
+        
+        # Money Flow Index (MFI)
+        col_name = f"MFI_{tf}"
+        df[col_name] = pta.mfi(df[f'{tf}_high'], df[f'{tf}_low'], df[f'{tf}_close'], df[f'{tf}_volume'])
+        indicators.append(col_name)
+        
+        # Chaikin Money Flow (CMF)
+        col_name = f"CMF_{tf}"
+        df[col_name] = pta.cmf(df[f'{tf}_high'], df[f'{tf}_low'], df[f'{tf}_close'], df[f'{tf}_volume'])
+        indicators.append(col_name)
+        
+        # Force Index
+        col_name = f"Force_{tf}"
+        df[col_name] = pta.force(df[f'{tf}_close'], df[f'{tf}_volume'])
+        indicators.append(col_name)
+        
+        return df, indicators
+
+    def _clean_dataframe(self, df: pd.DataFrame) -> pd.DataFrame:
+        """
+        Nettoie le DataFrame des valeurs manquantes et infinies.
+        
+        Args:
+            df: DataFrame à nettoyer
+            
+        Returns:
+            DataFrame nettoyé sans valeurs NaN ni infinies
+        """
+        try:
+            # Sauvegarder les index originaux
+            original_index = df.index
+            
+            # Forward fill puis backward fill
+            df_clean = df.ffill().bfill()
+            
+            # Remplacer les valeurs infinies par NaN
+            df_clean = df_clean.replace([float('inf'), float('-inf')], pd.NA)
+            
+            # Compter les valeurs manquantes avant suppression
+            missing_values = df_clean.isna().sum().sum()
+            if missing_values > 0:
+                logger.info(f"Found {missing_values} missing values before cleaning")
+            
+            # Supprimer les lignes avec valeurs manquantes
+            df_clean = df_clean.dropna()
+            
+            # Vérifier si des données ont été perdues
+            if len(df_clean) < len(df):
+                logger.warning(f"Lost {len(df) - len(df_clean)} rows during cleaning")
+            
+            # Réinitialiser l'index si nécessaire
+            if not df_clean.index.equals(original_index):
+                df_clean = df_clean.reindex(original_index)
+            
+            return df_clean
+            
+        except Exception as e:
+            logger.error(f"Error during dataframe cleaning: {str(e)}")
+            raise

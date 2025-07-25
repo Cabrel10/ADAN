@@ -29,7 +29,7 @@ EVAL_DIR = REPORTS_DIR / "evaluations"
 EVAL_DIR.mkdir(parents=True, exist_ok=True)
 
 # Configuration du style
-plt.style.use('seaborn')
+plt.style.use('seaborn-v0_8')
 sns.set_palette("viridis")
 
 # Import de l'environnement personnalisé
