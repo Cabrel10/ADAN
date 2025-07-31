@@ -1,5 +1,0 @@
-
-risk_monitoring:
-  enabled: true
-  log_level: INFO
-  log_file: logs/risk_monitoring.log

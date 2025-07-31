@@ -1,0 +1,12 @@
+--- New Call ---
+Raw path from config: ${paths.base_dir}/data/processed
+Resolved base_dir: /home/morningstar/Documents/trading/bot/${paths.base_dir}/data/processed
+Does base_dir exist? False
+--- New Call ---
+Raw path from config: ${paths.base_dir}/data/processed
+Resolved base_dir: /home/morningstar/Documents/trading/bot/${paths.base_dir}/data/processed
+Does base_dir exist? False
+--- New Call ---
+Raw path from config: ${paths.base_dir}/data/processed
+Resolved base_dir: /home/morningstar/Documents/trading/bot/${paths.base_dir}/data/processed
+Does base_dir exist? False

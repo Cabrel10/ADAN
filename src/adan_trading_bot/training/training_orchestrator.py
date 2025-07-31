@@ -1,550 +1,370 @@
+"""Module d'orchestration de la formation des modèles de trading."""
+
 import logging
-import os
-import multiprocessing
-import random
 import time
-from collections import deque
-from typing import Any, Dict, List, Optional, Tuple, Callable
-from pathlib import Path
-
-import gymnasium as gym
 import numpy as np
-import torch as th
-from stable_baselines3.common.buffers import ReplayBuffer
-from stable_baselines3.common.vec_env import DummyVecEnv, SubprocVecEnv
-from stable_baselines3.common.callbacks import BaseCallback
-from stable_baselines3.common.utils import safe_mean
+import torch
+import threading
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Callable
 
-from ..environment.multi_asset_chunked_env import MultiAssetChunkedEnv
-from ..common.utils import get_logger, get_project_root
-from ..common.config_watcher import ConfigWatcher
-
-logger = get_logger(__name__)
 
 class TrainingOrchestrator:
-    """
-    Orchestrates the training of an RL agent across multiple trading environments.
+    """Orchestrateur principal pour la formation distribuée des modèles de trading."""
 
-    Manages parallel environment execution, curriculum learning, and a shared
-    experience buffer.
-    """
-
-    def __init__(self, config: Dict[str, Any], agent_class: Any, agent_config: Dict[str, Any], env_factory: Optional[Callable[..., gym.Env]] = None, test_mode_no_real_buffer: bool = False):
-        """
-        Initializes the TrainingOrchestrator.
+    def __init__(self, config: Dict[str, Any], shared_buffer=None):
+        """Initialise l'orchestrateur de formation.
 
         Args:
-            config: Main configuration dictionary for the orchestrator.
-            agent_class: The Stable-Baselines3 agent class (e.g., PPO, A2C).
-            agent_config: Configuration dictionary for the agent.
+            config: Configuration de l'orchestrateur
+            shared_buffer: Buffer d'expérience partagé optionnel
         """
         self.config = config
-        self.agent_class = agent_class
-        self.agent_config = agent_config
-        self.env_factory = env_factory
-        self.test_mode_no_real_buffer = test_mode_no_real_buffer
+        self.logger = logging.getLogger(__name__)
+        self.worker_models = {}
+        self.sync_lock = threading.Lock()
+        self.global_step = 0
+        self.last_sync_step = 0
+        self.last_sync_time = time.time()
+        self.averaged_model = None
+        self.shared_buffer = shared_buffer
 
-        self.num_envs = self.config.get("num_environments", 1)
-        self.curriculum_learning_enabled = self.config.get("curriculum_learning", False)
-        self.shared_buffer_enabled = self.config.get("shared_experience_buffer", False)
-        self.buffer_size = self.config.get("replay_buffer_size", 100000)
-
-        self.environments: List[gym.Env] = []
-        self.vec_env: Optional[gym.vector.VecEnv] = None
-        self.agent: Optional[Any] = None
-        self.shared_replay_buffer: Optional[ReplayBuffer] = None
-        self.config_watcher: Optional[ConfigWatcher] = None
-        self.dbe_instance: Optional[Any] = None  # Reference to DBE instance
-
-        self._setup_environments()
-        self._setup_agent()
-        self._setup_shared_buffer()
-        self._setup_config_watcher()
-
-        logger.info(f"TrainingOrchestrator initialized with {self.num_envs} environments.")
-        if self.curriculum_learning_enabled:
-            logger.info("Curriculum learning is ENABLED.")
-        if self.shared_buffer_enabled:
-            logger.info("Shared experience buffer is ENABLED.")
-
-    def _setup_environments(self) -> None:
-        """Sets up multiple trading environments."""
-        logger.info(f"Setting up {self.num_envs} environments...")
-        env_configs = self._generate_env_configs()
-
-        # Create env factory function that can be pickled
-        env_factory = self.env_factory
+        # Métriques de suivi
+        self.metrics = {
+            "episode_rewards": [],
+            "episode_lengths": [],
+            "learning_rates": [],
+            "entropy_coeffs": [],
+            "best_mean_reward": -np.inf,
+            "buffer_size": [],
+            "buffer_additions": 0,
+            "buffer_samples_used": 0,
+            "last_buffer_stats": {}
+        }
         
-        def make_env(env_config):
-            """Helper function to create an environment instance."""
-            def _init():
-                if env_factory:
-                    env = env_factory(env_config)  # Pass config to factory
-                else:
-                    env = MultiAssetChunkedEnv(env_config)
-                return env
-            return _init
+        # Configuration du monitoring
+        self.monitoring_interval = config.get("monitoring_interval", 60)  # secondes
+        self.last_monitor_update = time.time()
 
-        # Create a single environment first to get the proper observation space
-        logger.info("Creating sample environment to determine observation space...")
-        sample_env = make_env(env_configs[0])()
-        sample_env.reset()  # Initialize the observation space
-        logger.info(f"Sample environment observation space: {sample_env.observation_space}")
-        sample_env.close()
+        # Configuration des intervalles
+        # 5 min par défaut pour le monitoring
+        self.monitoring_interval = config.get("monitoring_interval", 300)
+        # Pas entre les synchronisations
+        self.sync_frequency = config.get("sync_frequency", 100)
+        self.last_monitor_update = time.time()
 
-        if self.num_envs > 1:
-            # Use SubprocVecEnv for parallel execution
-            self.vec_env = SubprocVecEnv([make_env(cfg) for cfg in env_configs])
-        else:
-            # Use DummyVecEnv for single environment
-            self.vec_env = DummyVecEnv([make_env(env_configs[0])])
+    def _log_buffer_stats(self, force: bool = False) -> None:
+        """Enregistre les statistiques du buffer partagé.
         
-        logger.info("Environments setup complete.")
-
-    def _generate_env_configs(self) -> List[Dict[str, Any]]:
+        Args:
+            force: Si True, force la journalisation même si l'intervalle n'est pas atteint
         """
-        Generates configuration dictionaries for each environment.
-        Can implement curriculum learning logic here.
-        """
-        base_env_config = self.config.get("environment_config", {})
-        env_configs = []
-
-        # For now, just duplicate the base config. Curriculum learning will modify this.
-        all_assets = self.config["environment_config"]["data"]["assets"]
-        num_assets = len(all_assets)
-        
-        for i in range(self.num_envs):
-            env_config = base_env_config.copy()
-            env_config["trading_rules"] = {}
-            env_config["capital_tiers"] = {}
-            if self.curriculum_learning_enabled and num_assets > 0:
-                # Assign a different asset to each environment in a round-robin fashion
-                asset_for_env = all_assets[i % num_assets]
-                env_config["data"]["assets"] = [asset_for_env]
-                logger.info(f"Environment {i} assigned asset: {asset_for_env}")
-            env_configs.append(env_config)
-        return env_configs
-
-    def _setup_agent(self) -> None:
-        """Sets up the Stable-Baselines3 agent."""
-        # Ensure environments are properly initialized by resetting them
-        logger.info("Initializing environments to set up observation spaces...")
-        self.vec_env.reset()
-        
-        # Remove any training-specific parameters from the agent config
-        agent_config = self.agent_config.copy()
-        training_params = {}
-        
-        # Extract training parameters that should be passed to learn() instead of __init__
-        training_param_keys = ['total_timesteps', 'callback', 'log_interval', 'tb_log_name', 'reset_num_timesteps']
-        for key in training_param_keys:
-            if key in agent_config:
-                training_params[key] = agent_config.pop(key)
-        
-        # Store training params for later use in train_agent()
-        self.training_params = training_params
-        
-        # The agent needs to be initialized with the vectorized environment
-        # PPO requires policy as first argument, then env
-        policy = agent_config.pop('policy', 'MlpPolicy')  # Default to MlpPolicy
-        self.agent = self.agent_class(policy, self.vec_env, **agent_config)
-        logger.info(f"Agent {self.agent_class.__name__} setup complete.")
-
-    def _setup_shared_buffer(self) -> None:
-        """Sets up a shared replay buffer if enabled."""
-        if self.shared_buffer_enabled:
-            if self.test_mode_no_real_buffer:
-                from unittest.mock import MagicMock
-                self.shared_replay_buffer = MagicMock()
-                logger.info("Shared ReplayBuffer mocked for test mode.")
-            else:
-                # The buffer needs to be compatible with the observation and action spaces
-                self.shared_replay_buffer = ReplayBuffer(
-                    self.buffer_size,
-                    self.vec_env.observation_space,
-                    self.vec_env.action_space,
-                    device=self.agent_config.get("device", "auto"),
-                    n_envs=self.num_envs,
-                )
-                logger.info(f"Shared ReplayBuffer setup with size {self.buffer_size}.")
-
-    def _setup_config_watcher(self) -> None:
-        """Sets up the ConfigWatcher for dynamic configuration reloading."""
-        # Check if dynamic adaptation is enabled
-        dynamic_adaptation_enabled = self.config.get("dynamic_adaptation", {}).get("enabled", True)
-        
-        if not dynamic_adaptation_enabled:
-            logger.info("Dynamic configuration adaptation is disabled")
+        current_time = time.time()
+        if not force and current_time - self.last_monitor_update < self.monitoring_interval:
             return
-        
-        try:
-            # Initialize ConfigWatcher with config directory
-            project_root = Path(get_project_root())
-            config_dir = project_root / "config"
-            self.config_watcher = ConfigWatcher(str(config_dir), enabled=True)
-            
-            # Register callbacks for different configuration types
-            self.config_watcher.register_callback('training', self._on_training_config_change)
-            self.config_watcher.register_callback('environment', self._on_environment_config_change)
-            self.config_watcher.register_callback('dbe', self._on_dbe_config_change)
-            self.config_watcher.register_callback('risk', self._on_risk_config_change)
-            self.config_watcher.register_callback('reward', self._on_reward_config_change)
-            
-            # Try to get DBE instance from environments for direct updates
-            self._get_dbe_instance()
-            
-            logger.info("🔄 ConfigWatcher setup complete - Dynamic reload enabled")
-            
-        except Exception as e:
-            logger.error(f"Failed to setup ConfigWatcher: {e}")
-            self.config_watcher = None
 
-    def _get_dbe_instance(self) -> None:
-        """Get reference to DBE instance from environments for direct updates."""
-        try:
-            if hasattr(self.vec_env, 'envs') and len(self.vec_env.envs) > 0:
-                # For DummyVecEnv, access the first environment
-                first_env = self.vec_env.envs[0]
-                if hasattr(first_env, 'dbe'):
-                    self.dbe_instance = first_env.dbe
-                    logger.debug("DBE instance reference obtained")
-            elif hasattr(self.vec_env, 'get_attr'):
-                # For SubprocVecEnv, try to get DBE through get_attr
-                try:
-                    dbe_list = self.vec_env.get_attr('dbe')
-                    if dbe_list and len(dbe_list) > 0:
-                        self.dbe_instance = dbe_list[0]  # Use first environment's DBE
-                        logger.debug("DBE instance reference obtained via get_attr")
-                except:
-                    logger.debug("Could not get DBE instance via get_attr")
-        except Exception as e:
-            logger.debug(f"Could not get DBE instance: {e}")
-
-    
-
-    def _on_environment_config_change(self, config_type: str, new_config: Dict[str, Any], changes: Dict[str, Any]) -> None:
-        """Handle environment configuration changes."""
-        logger.info(f"🔄 Environment config changed: {list(changes.keys())}")
-        
-        try:
-            # Update trading rules if changed
-            if any(key.startswith('trading_rules') for key in changes.keys()):
-                logger.info("📊 Trading rules updated - will apply on next episode reset")
-            
-            # Update capital tiers if changed
-            if any(key.startswith('capital_tiers') for key in changes.keys()):
-                logger.info("💰 Capital tiers updated - will apply on next episode reset")
-            
-            # Update risk modulation parameters
-            if any(key.startswith('risk_modulation') for key in changes.keys()):
-                logger.info("⚠️ Risk modulation updated - will apply immediately")
-                # These changes will be picked up by the DBE on next update
+        if self.shared_buffer is not None:
+            try:
+                # Récupérer les statistiques détaillées du buffer
+                stats = self.shared_buffer.get_stats()
                 
-        except Exception as e:
-            logger.error(f"Error updating environment config: {e}")
-
-    def _on_dbe_config_change(self, config_type: str, new_config: Dict[str, Any], changes: Dict[str, Any]) -> None:
-        """Handle DBE configuration changes."""
-        logger.info(f"🔄 DBE config changed: {list(changes.keys())}")
-        
-        try:
-            if self.dbe_instance:
-                # Update risk parameters
-                if any(key.startswith('risk_parameters') for key in changes.keys()):
-                    risk_params = new_config.get('risk_parameters', {})
-                    if hasattr(self.dbe_instance, 'config'):
-                        self.dbe_instance.config['risk_parameters'].update(risk_params)
-                        logger.info("✅ DBE risk parameters updated")
+                # Mettre à jour les métriques de base
+                self.metrics["buffer_size"].append((self.global_step, stats.get("size", 0)))
+                self.metrics["buffer_additions"] = stats.get("total_added", 0)
+                self.metrics["buffer_samples_used"] = stats.get("total_sampled", 0)
                 
-                # Update mode thresholds
-                if any(key.startswith('modes') for key in changes.keys()):
-                    modes = new_config.get('modes', {})
-                    if hasattr(self.dbe_instance, 'config'):
-                        self.dbe_instance.config['modes'].update(modes)
-                        logger.info("✅ DBE mode thresholds updated")
+                # Journalisation détaillée
+                log_msg = [
+                    "\n" + "="*50,
+                    "BUFFER STATISTIQUES DÉTAILLÉES",
+                    "="*50,
+                    f"Taille: {stats.get('size', 0):,}/{stats.get('max_size', 0):,} "
+                    f"({stats.get('utilization_percent', 0):.1f}%)",
+                    f"Ajouts totaux: {stats.get('total_added', 0):,} "
+                    f"({stats.get('add_rate_per_second', 0):.1f}/s)",
+                    f"Échantillons utilisés: {stats.get('total_sampled', 0):,} "
+                    f"({stats.get('sample_rate_per_second', 0):.1f}/s)",
+                    f"Dernier ajout: il y a {stats.get('seconds_since_last_add', 0):.1f}s",
+                    f"Dernier échantillonnage: il y a {stats.get('seconds_since_last_sample', 0):.1f}s",
+                    f"Priorité max: {stats.get('priority_max', 0):.4f}, Beta: {stats.get('beta', 0):.4f}",
+                    "="*50
+                ]
                 
-                # Update learning parameters
-                if any(key.startswith('learning') for key in changes.keys()):
-                    learning_params = new_config.get('learning', {})
-                    if hasattr(self.dbe_instance, 'config'):
-                        self.dbe_instance.config['learning'].update(learning_params)
-                        logger.info("✅ DBE learning parameters updated")
-                        
-                # Force DBE to recalculate parameters with new config
-                if hasattr(self.dbe_instance, 'compute_dynamic_modulation'):
-                    logger.info("🔄 Triggering DBE recalculation with new parameters")
-                    
-            else:
-                logger.warning("DBE instance not available for direct updates")
+                self.logger.info("\n".join(log_msg))
                 
-        except Exception as e:
-            logger.error(f"Error updating DBE config: {e}")
-
-    def _on_risk_config_change(self, config_type: str, new_config: Dict[str, Any], changes: Dict[str, Any]) -> None:
-        """Handle risk configuration changes."""
-        logger.info(f"🔄 Risk config changed: {list(changes.keys())}")
-        
-        try:
-            # Update dynamic adaptation settings
-            if 'dynamic_adaptation' in changes:
-                adaptation_config = changes['dynamic_adaptation']['new_value']
-                logger.info(f"✅ Dynamic adaptation settings updated: {adaptation_config}")
-            
-            # Update risk metrics thresholds
-            if any(key.startswith('risk_metrics') for key in changes.keys()):
-                logger.info("📊 Risk metrics thresholds updated")
-            
-            # Update position sizing parameters
-            if any(key.startswith('position_sizing') for key in changes.keys()):
-                logger.info("💼 Position sizing parameters updated")
+                # Mettre à jour les métriques pour TensorBoard/MLflow
+                self.metrics["last_buffer_stats"] = {
+                    **stats,  # Inclure toutes les statistiques du buffer
+                    "timestamp": current_time,
+                    "global_step": self.global_step
+                }
                 
-        except Exception as e:
-            logger.error(f"Error updating risk config: {e}")
-
-    def _on_reward_config_change(self, config_type: str, new_config: Dict[str, Any], changes: Dict[str, Any]) -> None:
-        """Handle reward configuration changes."""
-        logger.info(f"🔄 Reward config changed: {list(changes.keys())}")
-        
-        try:
-            # Update reward shaping parameters
-            if any(key.startswith('reward_shaping') for key in changes.keys()):
-                logger.info("🎯 Reward shaping parameters updated")
-            
-            # Update penalty parameters
-            if any(key.startswith('penalties') for key in changes.keys()):
-                logger.info("⚠️ Penalty parameters updated")
+                # Vérifier les problèmes potentiels
+                if stats.get("size", 0) == 0:
+                    self.logger.warning("Le buffer est vide! Vérifiez l'ajout d'expériences.")
+                    
+                if stats.get("seconds_since_last_add", 0) > 300:  # 5 minutes
+                    self.logger.warning(
+                        f"Aucun ajout au buffer depuis {stats['seconds_since_last_add']/60:.1f} minutes. "
+                        "Vérifiez les workers d'expérience."
+                    )
+                    
+                if stats.get("utilization_percent", 0) > 90:
+                    self.logger.warning(
+                        f"Le buffer est presque plein ({stats['utilization_percent']:.1f}%). "
+                        "Envisagez d'augmenter sa taille ou d'ajuster la stratégie d'échantillonnage."
+                    )
                 
-        except Exception as e:
-            logger.error(f"Error updating reward config: {e}")
-            
-    def _on_training_config_change(self, config_type: str, new_config: Dict[str, Any], changes: Dict[str, Any]) -> None:
-        """Handle training configuration changes."""
-        logger.info(f"🔄 Training config changed: {list(changes.keys())}")
-        logger.debug(f"Full changes dict: {changes}")
-        
-        if not hasattr(self, 'agent') or self.agent is None:
-            logger.warning("Agent not initialized, cannot apply training config changes")
-            return
-            
-        try:
-            # Handle learning rate updates
-            if 'learning_rate' in changes:
-                try:
-                    new_lr = float(changes['learning_rate']['new_value'])
-                    old_lr = self.agent.learning_rate
-                    
-                    # Update learning rate for all parameter groups
-                    for i, param_group in enumerate(self.agent.policy.optimizer.param_groups):
-                        param_group['lr'] = new_lr
-                    
-                    logger.info(f"✅ Learning rate updated: {old_lr} -> {new_lr}")
-                    
-                except (ValueError, TypeError) as e:
-                    logger.error(f"Invalid learning rate value: {changes['learning_rate']}. Error: {e}")
-            
-            # Handle entropy coefficient updates
-            if 'ent_coef' in changes:
-                try:
-                    new_ent_coef = float(changes['ent_coef']['new_value'])
-                    old_ent_coef = self.agent.ent_coef
-                    self.agent.ent_coef = new_ent_coef
-                    logger.info(f"✅ Entropy coefficient updated: {old_ent_coef} -> {new_ent_coef}")
-                    
-                except (ValueError, TypeError) as e:
-                    logger.error(f"Invalid entropy coefficient value: {changes['ent_coef']}. Error: {e}")
-            
-            # Handle clip range updates
-            if 'clip_range' in changes:
-                try:
-                    new_clip_range = float(changes['clip_range']['new_value'])
-                    old_clip_range = self.agent.clip_range
-                    self.agent.clip_range = new_clip_range
-                    logger.info(f"✅ Clip range updated: {old_clip_range} -> {new_clip_range}")
-                    
-                except (ValueError, TypeError) as e:
-                    logger.error(f"Invalid clip range value: {changes['clip_range']}. Error: {e}")
-            
-        except Exception as e:
-            logger.error(f"Error applying training config changes: {e}", exc_info=True)
-
-    def train_agent(self, total_timesteps: int = None, callback: Optional[BaseCallback] = None) -> None:
-        """
-        Trains the RL agent.
-
-        Args:
-            total_timesteps: Total number of timesteps to train for. If None, will use value from config.
-            callback: Optional callback for training process.
-        """
-        # Use provided timesteps or fall back to config
-        if total_timesteps is None:
-            total_timesteps = self.training_params.get('total_timesteps', 10000)
-            
-        # Set up training parameters
-        train_kwargs = self.training_params.copy()
-        train_kwargs['total_timesteps'] = total_timesteps
-        
-        # Get callback if specified in config or passed as argument
-        if callback:
-            train_kwargs['callback'] = callback
+                # Ne pas réinitialiser les compteurs ici car ils sont maintenant gérés par le buffer
+                
+            except Exception as e:
+                self.logger.error(f"Erreur lors de la récupération des stats du buffer: {e}", exc_info=True)
         else:
-            callback = self._get_training_callback()
-            if callback:
-                train_kwargs['callback'] = callback
-            
-        logger.info(f"Starting agent training for {total_timesteps} timesteps...")
-        self.agent.learn(**train_kwargs)
-        logger.info("Agent training complete.")
+            self.logger.warning("Aucun buffer partagé configuré pour le monitoring")
+        
+        self.last_monitor_update = current_time
 
-    def _get_training_callback(self) -> Optional[BaseCallback]:
-        """
-        Returns a custom callback for training, if shared buffer or curriculum
-        learning is enabled.
-        """
-        if self.shared_buffer_enabled or self.curriculum_learning_enabled:
-            # This callback will handle adding experiences to the shared buffer
-            # and potentially adjusting curriculum.
-            class CustomTrainingCallback(BaseCallback):
-                def __init__(self, orchestrator_instance, verbose=0):
-                    super().__init__(verbose)
-                    self.orchestrator = orchestrator_instance
-
-                def _on_step(self) -> bool:
-                    # This method is called after each step in the environment
-                    # If shared buffer is enabled, add transitions to it
-                    if self.orchestrator.shared_buffer_enabled:
-                        # Accessing internal buffer of the agent to copy transitions
-                        # This might be agent-specific (e.g., PPO's rollouts)
-                        # For simplicity, we'll assume a generic way to get last transitions
-                        # In a real scenario, you might need to hook into the agent's collect_rollouts
-                        # or use a custom VecEnvWrapper that adds to the shared buffer.
-                        # For now, this is a placeholder.
-                        # self.orchestrator.shared_replay_buffer.add(...
-                        pass # TODO: Implement shared buffer population
-
-                    # Curriculum learning adjustments
-                    if self.orchestrator.curriculum_learning_enabled:
-                        # TODO: Implement curriculum adjustment logic
-                        pass
-                    return True
-            return CustomTrainingCallback(self)
-        return None
-
-    def save_agent(self, path: str) -> None:
-        """
-        Saves the trained agent.
+    def _synchronize_models(self, force: bool = False) -> bool:
+        """Synchronise les modèles des workers en moyennant leurs poids.
 
         Args:
-            path: Path to save the agent.
-        """
-        if self.agent:
-            self.agent.save(path)
-            logger.info(f"Agent saved to {path}")
-        else:
-            logger.warning("No agent to save.")
-
-    def load_agent(self, path: str) -> None:
-        """
-        Loads a pre-trained agent.
-
-        Args:
-            path: Path to the saved agent.
-        """
-        self.agent = self.agent_class.load(path, env=self.vec_env)
-        logger.info(f"Agent loaded from {path}")
-
-    def evaluate_agent(self, num_episodes: int = 10) -> Dict[str, Any]:
-        """
-        Evaluates the trained agent.
-
-        Args:
-            num_episodes: Number of episodes to run for evaluation.
+            force: Si True, force la synchronisation même si la fréquence
+                   n'est pas atteinte
 
         Returns:
-            Dictionary of evaluation metrics.
+            bool: True si la synchronisation a eu lieu, False sinon
         """
-        if not self.agent:
-            logger.warning("No agent to evaluate. Train or load an agent first.")
-            return {}
+        # Mettre à jour les statistiques du buffer
+        self._log_buffer_stats(force)
+        if not self._should_sync_models() and not force:
+            return False
 
-        logger.info(f"Evaluating agent for {num_episodes} episodes...")
-        episode_rewards = []
-        for i in range(num_episodes):
-            obs, info = self.vec_env.reset()
-            done = False
-            episode_reward = 0
-            while not done:
-                action, _ = self.agent.predict(obs, deterministic=True)
-                obs, reward, terminated, truncated, info = self.vec_env.step(action)
-                done = terminated or truncated
-                episode_reward += reward[0] # Assuming single environment for simplicity in reward aggregation
-            episode_rewards.append(episode_reward)
-            logger.info(f"Episode {i+1}/{num_episodes} finished with reward: {episode_reward:.2f}")
+        start_time = time.time()
+        with self.sync_lock:
+            if len(self.worker_models) < 2:
+                return False
 
-        mean_reward = safe_mean(episode_rewards)
-        logger.info(f"Evaluation complete. Mean reward: {mean_reward:.2f}")
-        return {"mean_reward": mean_reward, "episode_rewards": episode_rewards}
+            # Récupérer les modèles à synchroniser
+            models = list(self.worker_models.values())
 
-    def close(self) -> None:
+            # Calculer la moyenne des poids
+            self._average_models(models)
+
+            # Mettre à jour le dernier pas de synchronisation
+            self.last_sync_step = self.global_step
+            self.last_sync_time = time.time()
+
+            self.logger.debug(
+                f"Modèles synchronisés en {time.time() - start_time:.2f}s "
+                f"(étape {self.global_step}, {len(models)} workers)"
+            )
+
+            return True
+
+    def _average_models(self, models: List[Any]) -> None:
+        """Calcule et applique la moyenne des poids des modèles.
+
+        Args:
+            models: Liste des modèles à moyenner
         """
-        Closes all environments and stops the config watcher.
+        if not models:
+            self.logger.warning("Aucun modèle à moyenner")
+            return
+
+        try:
+            # Vérifier que tous les modèles sont du même type
+            model_type = type(models[0])
+            if not all(isinstance(m, model_type) for m in models):
+                raise ValueError("Tous les modèles doivent être du même type")
+
+            # Calculer les poids moyens
+            avg_weights = {}
+            param_keys = models[0].policy.state_dict().keys()
+
+            for key in param_keys:
+                # Récupérer les poids de chaque modèle pour ce paramètre
+                weights = [model.policy.state_dict()[key].float() for model in models]
+
+                # Calculer la moyenne des poids
+                if weights:
+                    if isinstance(weights[0], torch.Tensor):
+                        avg_weights[key] = torch.stack(weights, dim=0).mean(dim=0)
+                    else:
+                        avg_weights[key] = np.mean(weights, axis=0)
+
+            # Appliquer les poids moyens à chaque modèle
+            for model in models:
+                model.policy.load_state_dict(avg_weights, strict=True)
+
+            self.logger.debug(
+                f"Moyenne des poids calculée et appliquée sur {len(models)} modèles"
+            )
+
+        except Exception as e:
+            self.logger.error(f"Erreur lors du calcul de la moyenne des modèles: {e}")
+            raise
+
+    def _should_sync_models(self) -> bool:
+        """Détermine si une synchronisation des modèles est nécessaire.
+
+        Returns:
+            bool: True si une synchronisation est nécessaire, False sinon
         """
-        if self.config_watcher:
-            self.config_watcher.stop()
-            logger.info("ConfigWatcher stopped.")
-            
-        if self.vec_env:
-            self.vec_env.close()
-            logger.info("Environments closed.")
+        steps_since_last_sync = self.global_step - self.last_sync_step
+        time_since_last_sync = time.time() - self.last_sync_time
 
+        # Synchroniser si on a atteint le nombre d'étapes défini
+        if steps_since_last_sync >= self.sync_frequency:
+            return True
 
-# Example Usage (for testing purposes, not part of the main script)
-if __name__ == "__main__":
-    from stable_baselines3 import PPO
-    from stable_baselines3.common.env_util import make_vec_env
-    from stable_baselines3.common.callbacks import EvalCallback
+        # Synchroniser si trop de temps s'est écoulé
+        if time_since_last_sync > 300:  # 5 minutes
+            return True
 
-    # Dummy config for testing
-    test_config = {
-        "num_environments": 2,
-        "curriculum_learning": False,
-        "shared_experience_buffer": False,
-        "replay_buffer_size": 10000,
-        "environment_config": {
-            "data": {
-                "data_dir": "./data/processed", # Adjust as needed
-                "chunk_size": 100,
-                "assets": ["BTC/USDT", "ETH/USDT"]
-            },
-            "environment": {"initial_capital": 10000},
-            "portfolio": {},
-            "trading": {},
-            "state": {"window_size": 10, "timeframes": ["1m"], "features_per_timeframe": {"1m": ["open", "high", "low", "close", "volume"]}}
-        }
-    }
+        return False
 
-    # Agent config
-    agent_config = {
-        "policy": "MlpPolicy",
-        "learning_rate": 0.0003,
-        "n_steps": 20,
-        "batch_size": 10,
-        "n_epochs": 4,
-        "gamma": 0.99,
-        "gae_lambda": 0.95,
-        "clip_range": 0.2,
-        "ent_coef": 0.01,
-        "verbose": 1,
-        "device": "cpu"
-    }
+    def _cleanup(self) -> None:
+        """Nettoie les ressources utilisées par l'orchestrateur."""
+        # Libérer les ressources des workers
+        for worker_id in list(self.worker_models.keys()):
+            self.unregister_worker(worker_id)
 
-    orchestrator = None
-    try:
-        orchestrator = TrainingOrchestrator(test_config, PPO, agent_config)
-        orchestrator.train_agent(total_timesteps=100)
-        orchestrator.evaluate_agent(num_episodes=2)
-    except Exception as e:
-        logger.error(f"An error occurred during orchestration: {e}")
-    finally:
-        if orchestrator:
-            orchestrator.close()
+        # Fermer les environnements
+        if hasattr(self, "env") and self.env is not None:
+            try:
+                self.env.close()
+            except Exception as e:
+                self.logger.error(
+                    f"Erreur lors de la fermeture de l'environnement: {e}"
+                )
 
+        self.logger.info("Nettoyage terminé")
+
+    def unregister_worker(self, worker_id: str) -> None:
+        """Désenregistre un worker de l'orchestrateur.
+
+        Args:
+            worker_id: Identifiant du worker à désenregistrer
+        """
+        with self.sync_lock:
+            if worker_id in self.worker_models:
+                del self.worker_models[worker_id]
+                self.logger.info(f"Worker {worker_id} désenregistré")
+
+    def train(
+        self,
+        total_timesteps: int,
+        callback: Optional[Callable] = None,
+    ) -> None:
+        """Lance la boucle d'entraînement principale.
+
+        Args:
+            total_timesteps: Nombre total d'étapes d'entraînement
+            callback: Fonction de rappel optionnelle à exécuter
+        """
+        self.logger.info(f"Début de l'entraînement pour {total_timesteps} pas")
+        start_time = time.time()
+
+        try:
+            while self.global_step < total_timesteps:
+                if self._should_stop_training():
+                    msg = "Signal d'arrêt détecté, arrêt de l'entraînement"
+                    self.logger.info(msg)
+                    break
+
+                self._train_step()
+                self._synchronize_models()
+                self._update_metrics()
+
+                if callback is not None:
+                    callback(locals(), globals())
+
+                self.global_step += 1
+
+        except KeyboardInterrupt:
+            self.logger.info("Entraînement interrompu par l'utilisateur")
+        except Exception as e:
+            self.logger.error(f"Erreur lors de l'entraînement: {e}", exc_info=True)
+        finally:
+            self._cleanup()
+            self._save_model("final_model")
+            training_duration = time.time() - start_time
+            self.logger.info(
+                f"Entraînement terminé après {self.global_step} étapes "
+                f"({training_duration:.2f} secondes)"
+            )
+
+    def _train_step(self) -> None:
+        """Exécute une seule étape d'entraînement."""
+        # Implémentation de l'étape d'entraînement
+        # À adapter selon votre algorithme d'apprentissage
+        pass
+
+    def _update_metrics(self) -> None:
+        """Met à jour les métriques de suivi."""
+        # Mettre à jour les statistiques du buffer périodiquement
+        self._log_buffer_stats()
+        
+        # Autres métriques à mettre à jour...
+        if hasattr(self, 'env') and hasattr(self.env, 'get_episode_rewards'):
+            episode_rewards = self.env.get_episode_rewards()
+            if episode_rewards:
+                self.metrics["episode_rewards"].append(episode_rewards[-1])
+                
+                # Mettre à jour la meilleure récompense moyenne
+                mean_reward = np.mean(episode_rewards[-100:])  # Derniers 100 épisodes
+                if mean_reward > self.metrics["best_mean_reward"]:
+                    self.metrics["best_mean_reward"] = mean_reward
+        
+        # Journaliser les métriques périodiquement
+        current_time = time.time()
+        if current_time - getattr(self, 'last_metric_log', 0) > 300:  # Toutes les 5 minutes
+            self.logger.info(
+                f"Métriques - Étape: {self.global_step}, "
+                f"Dernière récompense: {self.metrics['episode_rewards'][-1] if self.metrics['episode_rewards'] else 'N/A'}, "
+                f"Meilleure récompense moyenne: {self.metrics['best_mean_reward']:.2f}"
+            )
+            self.last_metric_log = current_time
+
+    def _log_metrics(self) -> None:
+        """Enregistre les métriques actuelles."""
+        if not self.metrics["episode_rewards"]:
+            return
+
+        latest = self.metrics["episode_rewards"][-1]
+        mean = np.mean(self.metrics["episode_rewards"][-100:])
+        std = np.std(self.metrics["episode_rewards"][-100:])
+
+        self.logger.info("=" * 50)
+        self.logger.info(f"Étape: {self.global_step}")
+        self.logger.info(f"Dernière récompense: {latest:.2f}")
+        self.logger.info(f"Moyenne (100): {mean:.2f} ± {std:.2f}")
+        self.logger.info("=" * 50)
+
+    def _should_stop_training(self) -> bool:
+        """Vérifie si l'entraînement doit s'arrêter.
+
+        Returns:
+            bool: True si l'entraînement doit s'arrêter, False sinon
+        """
+        # Vérifier la présence d'un fichier d'arrêt
+        stop_file = Path("stop_training")
+        if stop_file.exists():
+            stop_file.unlink()  # Supprimer le fichier pour les prochaines exécutions
+            return True
+        return False
+
+    def _save_model(self, model_name: str) -> None:
+        """Enregistre le modèle sur le disque.
+
+        Args:
+            model_name: Nom à utiliser pour l'enregistrement du modèle
+        """
+        if self.averaged_model is not None:
+            try:
+                # Adapter selon votre implémentation de sauvegarde de modèle
+                save_path = f"models/{model_name}"
+                self.averaged_model.save(save_path)
+                self.logger.info(f"Modèle enregistré sous {save_path}")
+            except Exception as e:
+                self.logger.error(f"Erreur lors de l'enregistrement du modèle: {e}")

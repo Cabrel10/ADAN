@@ -1,91 +1,76 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 """
-Script to validate all configuration files for the ADAN trading bot.
+Script to validate the consolidated configuration for the ADAN trading bot.
 
-This script checks that all configuration files are present and contain
-the required parameters according to the design specifications.
+This script checks that the main `config.yaml` is present and that the `workers`
+section is well-formed with all required parameters.
 """
 
 import sys
-import logging
+import yaml
 from pathlib import Path
 
-# Add the src directory to the Python path
-sys.path.insert(0, str(Path(__file__).parent.parent / 'src'))
 
-try:
-    from adan_trading_bot.common.config_validator import validate_config_directory
-except ImportError as e:
-    print(f"Import error: {e}")
-    print("Falling back to basic validation...")
-    
-    import yaml
-    
-    def basic_validate_config_directory(config_dir):
-        """Basic configuration validation without dependencies."""
-        config_dir = Path(config_dir)
-        
-        required_files = [
-            'main_config.yaml',
-            'data_config.yaml', 
-            'environment_config.yaml',
-            'train_config.yaml',
-            'dbe_config.yaml',
-            'memory_config.yaml',
-            'risk_config.yaml'
-        ]
-        
-        all_valid = True
-        errors = []
-        
-        for config_file in required_files:
-            config_path = config_dir / config_file
-            
-            if not config_path.exists():
-                errors.append(f"Missing required configuration file: {config_file}")
-                all_valid = False
-                continue
-            
-            try:
-                with open(config_path, 'r', encoding='utf-8') as f:
-                    config_data = yaml.safe_load(f)
-                    if not config_data:
-                        errors.append(f"Empty configuration file: {config_file}")
-                        all_valid = False
-                    else:
-                        print(f"✓ {config_file} - loaded successfully")
-            except Exception as e:
-                errors.append(f"Error loading {config_file}: {str(e)}")
-                all_valid = False
-        
-        if errors:
-            print("\nValidation errors:")
-            for error in errors:
-                print(f"  - {error}")
-        
-        return all_valid
-    
-    validate_config_directory = basic_validate_config_directory
+def validate_workers_config(config_path: Path) -> bool:
+    """Loads and validates the worker configuration from the main config file."""
+    print(f"--> Validating worker configurations in: {config_path}")
 
-def main():
+    if not config_path.exists():
+        print(f"[ERROR] Configuration file not found at {config_path}", file=sys.stderr)
+        return False
+
+    try:
+        with open(config_path, 'r', encoding='utf-8') as f:
+            config_data = yaml.safe_load(f)
+    except yaml.YAMLError as e:
+        print(f"[ERROR] Failed to parse YAML file: {e}", file=sys.stderr)
+        return False
+
+    if 'workers' not in config_data:
+        print("[ERROR] 'workers' section not found in the configuration.", file=sys.stderr)
+        return False
+
+    workers = config_data.get('workers', {})
+    if not isinstance(workers, dict) or not workers:
+        print("[ERROR] 'workers' section must be a non-empty dictionary.", file=sys.stderr)
+        return False
+
+    print(f"    Found {len(workers)} worker configurations. Validating each...")
+    all_valid = True
+    required_keys = ['name', 'timeframes', 'reward_config', 'dbe_config', 'agent_config']
+
+    for worker_id, worker_config in workers.items():
+        missing_keys = [key for key in required_keys if key not in worker_config]
+        if missing_keys:
+            print(f"  - [FAIL] Worker '{worker_id}': Missing required keys: {missing_keys}")
+            all_valid = False
+        else:
+            print(f"  - [PASS] Worker '{worker_id}': All required keys are present.")
+
+    return all_valid
+
+
+def main() -> int:
     """Main validation function."""
-    logging.basicConfig(level=logging.INFO, format='%(levelname)s: %(message)s')
-    
-    config_dir = Path(__file__).parent.parent / 'config'
-    
-    print(f"Validating configurations in: {config_dir}")
-    print("=" * 50)
-    
-    result = validate_config_directory(config_dir)
-    
-    print("=" * 50)
-    if result:
-        print("✅ All configuration files validated successfully!")
+    print("=====================================================")
+    print("         ADAN Configuration Validator         ")
+    print("=====================================================")
+
+    # Project root is two levels up from the script's directory (bot/scripts -> bot)
+    project_root = Path(__file__).parent.parent
+    config_file = project_root / 'config' / 'config.yaml'
+
+    is_valid = validate_workers_config(config_file)
+
+    print("-----------------------------------------------------")
+    if is_valid:
+        print("✅ Configuration validation successful!")
         return 0
     else:
-        print("❌ Configuration validation failed!")
+        print("❌ Configuration validation failed.")
         return 1
+
 
 if __name__ == "__main__":
     sys.exit(main())

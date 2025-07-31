@@ -9,8 +9,10 @@ logging.basicConfig(level=logging.DEBUG, format='%(levelname)s:%(name)s:%(messag
 class TestOrderManager(unittest.TestCase):
     def setUp(self):
         self.env_config = {
-            'assets': ['BTCUSDT', 'ETHUSDT'],
-            'initial_capital': 1000.0,
+            'environment': {
+                'assets': ['BTCUSDT', 'ETHUSDT'],
+                'initial_balance': 1000.0
+            },
             'trading_rules': {
                 'commission_pct': 0.001,
                 'futures_enabled': False,
@@ -24,8 +26,8 @@ class TestOrderManager(unittest.TestCase):
             },
             'risk_management': {
                 'capital_tiers': [
-                    {'threshold': 0, 'max_positions': 1, 'allocation_per_trade': 0.95},
-                    {'threshold': 1500, 'max_positions': 2, 'allocation_per_trade': 0.45}
+                    {'name': 'Micro Capital', 'min_capital': 0.0, 'max_position_size_pct': 90, 'risk_per_trade_pct': 1.0, 'max_drawdown_pct': 5.0, 'leverage': 1.0},
+                    {'name': 'Small Capital', 'min_capital': 1500.0, 'max_position_size_pct': 70, 'risk_per_trade_pct': 1.5, 'max_drawdown_pct': 4.0, 'leverage': 1.0}
                 ],
                 'position_sizing': {
                     'concentration_limits': {

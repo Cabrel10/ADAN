@@ -1,7 +1,5 @@
-"""
-Module implémentant l'environnement d'apprentissage par renforcement personnalisé pour le trading.
-"""
+"""Environment module for ADAN Trading Bot."""
 
-from .dynamic_behavior_engine import DynamicBehaviorEngine
+from .multi_asset_chunked_env import MultiAssetChunkedEnv
 
-__all__ = ['DynamicBehaviorEngine']
+__all__ = ['MultiAssetChunkedEnv']

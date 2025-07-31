@@ -73,7 +73,14 @@ class PortfolioManager:
             env_config: The environment configuration dictionary.
         """
         self.config = env_config
-        self.initial_equity = env_config.get('initial_equity', 10000.0)
+        # Initialize initial_equity from config
+        portfolio_config = self.config.get('portfolio', {})
+        environment_config = self.config.get('environment', {})
+        
+        self.initial_equity = portfolio_config.get(
+            'initial_balance', 
+            environment_config.get('initial_balance', 10000.0)
+        )
         self.current_equity = self.initial_equity
         self.positions: Dict[str, Position] = {}
         self.trade_history: List[Dict[str, Any]] = []
@@ -381,7 +388,7 @@ class PortfolioManager:
         self.unrealized_pnl = 0.0
         self.realized_pnl = 0.0
         
-        logger.info(f"Portfolio reset. Initial equity: {self.initial_equity:.2f}")
+        logger.info("Portfolio reset. Initial equity: %.2f", self.initial_equity)
         self.trade_count = 0
         self.portfolio_value = self.initial_equity
         self.current_equity = self.initial_equity  # Ensure current_equity is also reset
@@ -391,57 +398,132 @@ class PortfolioManager:
         self.cvar = 0.0
         self.trade_history = [self.initial_equity]  # Use initial_equity here as well
         self.trade_log = []
-        logger.info(f"Portfolio reset. Initial equity: {self.initial_equity:.2f}")
+        logger.info("Portfolio reset. Initial equity: %.2f", self.initial_equity)
 
     def get_portfolio_value(self) -> float:
         """Returns the current total portfolio value."""
         return self.portfolio_value
 
-    def update_market_price(self, current_prices: Dict[str, float]):
+    def get_available_capital(self) -> float:
         """
-        Updates the portfolio's total value based on the current market prices.
+        Returns the available capital for new trades.
+
+        Returns:
+            float: The amount of capital available for new trades.
         """
+        # Le capital disponible est simplement la trésorerie actuelle
+        # car nous ne voulons pas permettre un effet de levier supérieur à 1x
+        # pour les opérations sur marge
+        return self.cash
+
+    def update_market_price(self, current_prices: Dict[str, float]) -> None:
+        """
+        Met à jour la valeur du portefeuille en fonction des prix actuels.
+        
+        Args:
+            current_prices: Dictionnaire associant les symboles d'actifs à leurs prix actuels.
+        """
+        # Vérification du type du paramètre
+        if not isinstance(current_prices, dict):
+            logger.warning(
+                "current_prices doit être un dictionnaire. Reçu: %s",
+                type(current_prices)
+            )
+            current_prices = {}
+        
+        # Réinitialisation du PnL non réalisé
         self.unrealized_pnl = 0.0
+        assets_with_missing_prices = []
         
-        # Calculate unrealized PnL for all open positions
+        # Calcul du PnL non réalisé pour toutes les positions ouvertes
         for asset, position in self.positions.items():
-            if position.is_open and asset in current_prices:
-                position_pnl = position.size * (current_prices[asset] - position.entry_price)
-                self.unrealized_pnl += position_pnl
+            if not position.is_open:
+                continue
+
+            current_price = current_prices.get(asset)
+
+            # Ignorer les prix manquants ou invalides
+            if (
+                current_price is None
+                or not isinstance(current_price, (int, float))
+                or current_price <= 0
+            ):
+                assets_with_missing_prices.append(asset)
+                continue
+
+            # Calcul du PnL pour cette position
+            position_pnl = position.size * (current_price - position.entry_price)
+            self.unrealized_pnl += position_pnl
+
+            # Journalisation du statut de la position pour le débogage
+            logger.debug(
+                "Position %s: taille=%.8f, entrée=%.8f, actuel=%.8f, pnl=%.2f",
+                asset, position.size, position.entry_price, current_price, position_pnl
+            )
         
-        # Update portfolio value and equity (cash already includes realized PnL)
+        # Journalisation des actifs avec prix manquants
+        if assets_with_missing_prices:
+            logger.warning(
+                "Prix manquants ou invalides pour %d actifs: %s. "
+                "Ces positions seront ignorées.",
+                len(assets_with_missing_prices),
+                ", ".join(assets_with_missing_prices)
+            )
+        
+        # Mise à jour de la valeur du portefeuille et de l'equity
         self.current_equity = self.cash + self.unrealized_pnl
         self.portfolio_value = self.current_equity
         self.total_capital = self.current_equity
-        
-        # Append to trade history for metrics
+
+        # Mettre à jour l'historique des trades (limité pour éviter la surconsommation mémoire)
         if not hasattr(self, 'trade_history') or not self.trade_history:
             self.trade_history = [self.initial_equity]
+
+        # Conservation uniquement des 1000 dernières entrées
+        if len(self.trade_history) >= 1000:
+            self.trade_history.pop(0)
+
         self.trade_history.append(self.portfolio_value)
 
-        # Apply funding rates for futures if enabled
+        # Application des taux de financement pour les contrats à terme si activé
         if self.futures_enabled:
-            # Logic to apply funding rates based on open positions and funding rate data
+            # Logique d'application des taux de financement
             pass
 
-        # Update metrics
+        # Mise à jour des métriques
         self.update_metrics()
 
-        # Check protection orders
-        self.check_protection_orders(current_prices)
+        # Vérification des ordres de protection (uniquement pour les actifs avec prix valides)
+        valid_prices = {
+            k: v for k, v in current_prices.items()
+            if v is not None and isinstance(v, (int, float)) and v > 0
+        }
 
-        # Check for liquidation and update state if necessary
-        was_liquidated = self.check_liquidation(current_prices)
-        if was_liquidated:
-            # Reset metrics after liquidation
-            self.unrealized_pnl = 0.0
-            self.portfolio_value = self.cash
-            self.current_equity = self.cash
-            self.total_capital = self.cash
+        if valid_prices:
+            was_liquidated = self.check_liquidation(valid_prices)
+            if was_liquidated:
+                # Réinitialisation des métriques après liquidation
+                self.unrealized_pnl = 0.0
+                self.portfolio_value = self.cash
+                self.current_equity = self.cash
+                self.total_capital = self.cash
+
+                # Journalisation de l'événement de liquidation
+                logger.critical(
+                    "Portefeuille liquidé. Valeur finale: %.2f USDT "
+                    "(Initial: %.2f USDT)",
+                    self.portfolio_value, self.initial_equity
+                )
+        elif any(pos.is_open for pos in self.positions.values()):
+            logger.warning(
+                "Impossible de vérifier les ordres de protection: "
+                "aucun prix valide disponible"
+            )
 
     def check_liquidation(self, current_prices: Dict[str, float]) -> bool:
         """
         Vérifie si le portefeuille est à risque de liquidation et ferme les positions si nécessaire.
+{{ ... }}
         
         Args:
             current_prices: Dictionnaire des prix actuels par actif.
@@ -450,14 +532,17 @@ class PortfolioManager:
             bool: True si une liquidation a eu lieu, False sinon.
         """
         # Récupérer le palier de capital actuel
-        tier = self.get_current_tier()
+        tier = self.get_active_tier()
         max_drawdown_pct = tier.get('max_drawdown_pct', 20.0) / 100.0
         
         # Vérifier le drawdown maximum autorisé
         max_drawdown_value = self.initial_equity * max_drawdown_pct
         current_drawdown = self.initial_equity - self.portfolio_value
         current_drawdown_pct = (current_drawdown / self.initial_equity) * 100 if self.initial_equity > 0 else 0
-        logger.info(f"Vérification du drawdown: Actuel={current_drawdown:.2f} USDT ({current_drawdown_pct:.2f}%), Max autorisé={max_drawdown_value:.2f} USDT ({max_drawdown_pct * 100:.1f}%)")
+        logger.info(
+            "Vérification du drawdown: Actuel=%.2f USDT (%.2f%%), Max autorisé=%.2f USDT (%.1f%%)",
+            current_drawdown, current_drawdown_pct, max_drawdown_value, max_drawdown_pct * 100
+        )
         
         # Vérifier si le drawdown dépasse la limite du palier
         if current_drawdown > max_drawdown_value:
@@ -468,7 +553,7 @@ class PortfolioManager:
             )
             
             # Si pas de positions ouvertes et pas de futures, on retourne True car le drawdown est dépassé
-            if not self.futures_enabled and not self.positions:
+            if not self.futures_enabled and not any(p.is_open for p in self.positions.values()):
                 logger.warning("Drawdown critique atteint mais aucune position ouverte à fermer.")
                 return True
                 
@@ -555,11 +640,11 @@ class PortfolioManager:
 
                 # Check stop-loss
                 if position.stop_loss_pct > 0 and current_price <= position.entry_price * (1 - position.stop_loss_pct):
-                    logger.info(f"Stop-loss hit for {asset}. Closing position.")
+                    logger.info("Stop-loss hit for %s. Closing position.", asset)
                     self.close_position(asset, current_price)
                 # Check take-profit
                 elif position.take_profit_pct > 0 and current_price >= position.entry_price * (1 + position.take_profit_pct):
-                    logger.info(f"Take-profit hit for {asset}. Closing position.")
+                    logger.info("Take-profit hit for %s. Closing position.", asset)
                     self.close_position(asset, current_price)
 
     def open_position(self, asset: str, price: float, size: float) -> bool:
@@ -575,11 +660,20 @@ class PortfolioManager:
             True if the position was opened successfully, False otherwise.
         """
         if self.positions[asset].is_open:
-            logger.warning(f"Cannot open a new position for {asset} while one is already open.")
+            logger.warning("Cannot open a new position for %s while one is already open.", asset)
             return False
 
-        logger.debug(f"PortfolioManager open_position - self.config['trading_rules']: {self.config.get('trading_rules')}")
-        logger.debug(f"PortfolioManager open_position - self.config['trading_rules']['stop_loss']: {self.config.get('trading_rules', {}).get('stop_loss')}")
+        # Get trading parameters from worker config (default to w1 if not specified)
+        worker_config = self.config.get('workers', {}).get('w1', {})
+        trading_config = worker_config.get('trading_config', {})
+        
+        # Get stop loss and take profit with default values
+        stop_loss_pct = trading_config.get('stop_loss_pct', 0.05)  # Default 5%
+        take_profit_pct = trading_config.get('take_profit_pct', 0.15)  # Default 15%
+        
+        logger.debug("PortfolioManager open_position - trading_config: %s", trading_config)
+        logger.debug("PortfolioManager open_position - stop_loss_pct: %s, take_profit_pct: %s", 
+                   stop_loss_pct, take_profit_pct)
 
         notional_value = size * price
         commission = notional_value * self.commission_pct
@@ -593,7 +687,7 @@ class PortfolioManager:
             # For spot, we pay the full notional value plus commission
             self.cash -= notional_value + commission
 
-        self.positions[asset].open(price, size, stop_loss_pct=self.config['trading_rules']['stop_loss'], take_profit_pct=self.config['trading_rules']['take_profit'])
+        self.positions[asset].open(price, size, stop_loss_pct=stop_loss_pct, take_profit_pct=take_profit_pct)
         self.trade_count += 1
         trade_info = {
             'type': 'open',
@@ -606,7 +700,10 @@ class PortfolioManager:
             'portfolio_value': self.portfolio_value
         }
         self.trade_log.append(trade_info)
-        logger.info(f"Opened position for {asset}: {size:.4f} units at {price:.2f}. Details: {trade_info}")
+        logger.info(
+            "Opened position for %s: %.4f units at %.2f. Details: %s",
+            asset, size, price, trade_info
+        )
         return True
 
     def close_position(self, asset: str, price: float) -> float:
@@ -621,7 +718,7 @@ class PortfolioManager:
             The realized PnL from the trade after commissions.
         """
         if asset not in self.positions or not self.positions[asset].is_open:
-            logger.warning(f"Cannot close a position for {asset} when none is open.")
+            logger.warning("Cannot close a position for %s when none is open.", asset)
             return 0.0
 
         position = self.positions[asset]
@@ -799,7 +896,10 @@ class PortfolioManager:
         self.current_chunk_id += 1
         self.chunk_start_equity = self.total_capital
         self.trade_count = 0 # Reset trade count for the new chunk
-        logger.info(f"Started tracking new chunk {self.current_chunk_id} with starting equity: ${self.chunk_start_equity:.2f}")
+        logger.info(
+            "Started tracking new chunk %d with starting equity: $%.2f",
+            self.current_chunk_id, self.chunk_start_equity
+        )
     
     def _finalize_chunk_pnl(self) -> None:
         """Calculate and store the PnL for the current chunk."""
@@ -815,8 +915,10 @@ class PortfolioManager:
             'n_trades': self.trade_count # Use self.trade_count directly
         }
         
-        logger.info(f"Chunk {self.current_chunk_id} completed with PnL: {chunk_pnl_pct:.2f}% "
-                   f"(Equity: ${self.chunk_start_equity:.2f} -> ${self.total_capital:.2f})")
+        logger.info(
+            "Chunk %d completed with PnL: %.2f%% (Equity: $%.2f -> $%.2f)",
+            self.current_chunk_id, chunk_pnl_pct, self.chunk_start_equity, self.total_capital
+        )
     
     def get_chunk_performance_ratio(self, chunk_id: int, optimal_pnl: float) -> float:
         """
@@ -830,7 +932,7 @@ class PortfolioManager:
             float: The performance ratio (actual_pnl / optimal_pnl), clipped to [0, 1].
         """
         if chunk_id not in self.chunk_pnl:
-            logger.warning(f"No PnL data found for chunk {chunk_id}")
+            logger.warning("No PnL data found for chunk %d", chunk_id)
             return 0.0
             
         if optimal_pnl <= 0:
@@ -861,7 +963,7 @@ class PortfolioManager:
             if position.is_open:
                 current_price = current_prices.get(asset)
                 if current_price is None:
-                    logger.warning(f"Cannot rebalance {asset}: current price not available.")
+                    logger.warning("Cannot rebalance %s: current price not available.", asset)
                     continue
 
                 position_value = position.size * current_price
@@ -872,7 +974,11 @@ class PortfolioManager:
                     excess_value = position_value - (max_single_asset_limit * total_portfolio_value)
                     sell_size = excess_value / current_price
 
-                    logger.info(f"Rebalancing {asset}: current allocation {current_allocation:.2f} exceeds limit {max_single_asset_limit:.2f}. Selling {sell_size:.4f} units.")
+                    logger.info(
+                        "Rebalancing %s: current allocation %.2f exceeds limit %.2f. "
+                        "Selling %.4f units.",
+                        asset, current_allocation, max_single_asset_limit, sell_size
+                    )
                     # Simulate closing a portion of the position
                     # This is a simplified close; in a real scenario, you'd adjust the existing position object
                     # and potentially execute a partial sell order.
@@ -880,7 +986,7 @@ class PortfolioManager:
                     position.size -= sell_size
                     if position.size <= 0:
                         position.close() # Close if size becomes zero or negative
-                        logger.info(f"Position for {asset} fully closed during rebalancing.")
+                        logger.info("Position for %s fully closed during rebalancing.", asset)
 
         self.update_metrics()
         logger.info("Portfolio rebalancing completed.")
@@ -888,21 +994,30 @@ class PortfolioManager:
     def validate_position(self, asset: str, size: float, price: float) -> bool:
         """Validates a position before execution."""
         if size <= 0 or price <= 0:
-            logger.warning(f"Invalid size ({size}) or price ({price}) for position validation.")
+            logger.warning("Invalid size (%s) or price (%s) for position validation.", size, price)
             return False
 
         # Check against minimum trade size
         if size < self.min_trade_size:
-            logger.warning(f"Position size ({size:.8f}) is less than minimum trade size ({self.min_trade_size:.8f}).")
+            logger.warning(
+                "Position size (%.8f) is less than minimum trade size (%.8f).",
+                size, self.min_trade_size
+            )
             return False
 
         # Check against notional value limits
         notional_value = size * price
         if notional_value < self.min_notional_value:
-            logger.warning(f"Notional value ({notional_value:.2f}) is less than minimum notional value ({self.min_notional_value:.2f}).")
+            logger.warning(
+                "Notional value (%.2f) is less than minimum notional value (%.2f).",
+                notional_value, self.min_notional_value
+            )
             return False
         if notional_value > self.max_notional_value:
-            logger.warning(f"Notional value ({notional_value:.2f}) is greater than maximum notional value ({self.max_notional_value:.2f}).")
+            logger.warning(
+                "Notional value (%.2f) is greater than maximum notional value (%.2f).",
+                notional_value, self.max_notional_value
+            )
             return False
 
         # Check if there's enough cash to open the position (considering leverage for futures)
@@ -912,7 +1027,10 @@ class PortfolioManager:
         required_cash += required_cash * self.commission_pct # Add commission
 
         if self.cash < required_cash:
-            logger.warning(f"Insufficient cash ({self.cash:.2f}) to open position requiring ({required_cash:.2f}).")
+            logger.warning(
+                "Insufficient cash (%.2f) to open position requiring (%.2f).",
+                self.cash, required_cash
+            )
             return False
 
         return True

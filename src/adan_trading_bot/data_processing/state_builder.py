@@ -5,28 +5,19 @@ This module provides the StateBuilder class which transforms raw market data
 into a structured observation space suitable for reinforcement learning.
 """
 
-from sklearn.preprocessing import MinMaxScaler, StandardScaler, RobustScaler
+import gc
 import logging
-import numpy as np
-import pandas as pd
-from typing import Dict, List, Optional, Tuple
-import json
 import os
-from pathlib import Path
 import warnings
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Tuple, Union
 
-logger = logging.getLogger(__name__)
-
+import joblib
 import numpy as np
 import pandas as pd
-from typing import Dict, List, Optional, Tuple, Union, Any
-from pathlib import Path
-import logging
-from sklearn.preprocessing import StandardScaler, MinMaxScaler
-import joblib
+import psutil
+from sklearn.preprocessing import MinMaxScaler, RobustScaler, StandardScaler
 
-# Configure logging
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
 class TimeframeConfig:
@@ -45,7 +36,7 @@ class TimeframeConfig:
         Initialize timeframe configuration.
         
         Args:
-            timeframe: The timeframe identifier (e.g., '5m', '15m')
+            timeframe: The timeframe identifier (e.g., '5m', '1h')
             features: List of feature names for this timeframe
             window_size: Number of time steps to include
             normalize: Whether to normalize the data
@@ -73,6 +64,7 @@ class TimeframeConfig:
             window_size=config_dict.get('window_size', 100),
             normalize=config_dict.get('normalize', True)
         )
+
 class StateBuilder:
     """
     Builds state representations from multi-timeframe market data.
@@ -89,7 +81,8 @@ class StateBuilder:
                  scaler_path: Optional[str] = None,
                  adaptive_window: bool = True,
                  min_window_size: int = 10,  # 50% de la taille de fenêtre par défaut
-                 max_window_size: int = 30):  # 150% de la taille de fenêtre par défaut
+                 max_window_size: int = 30,  # 150% de la taille de fenêtre par défaut
+                 memory_config: Optional[Dict[str, Any]] = None):  # Configuration de mémoire
         """
         Initialize the StateBuilder according to design specifications.
         
@@ -102,6 +95,7 @@ class StateBuilder:
             adaptive_window: Whether to use adaptive window sizing based on volatility
             min_window_size: Minimum window size for adaptive mode
             max_window_size: Maximum window size for adaptive mode
+            memory_config: Configuration for memory optimizations
         """
         # Configuration initiale
         # Utiliser la configuration exacte de config.yaml
@@ -115,8 +109,38 @@ class StateBuilder:
                         "MFI_14", "EMA_50", "SMA_200", "ICHIMOKU_9_26_52", "SUPERTREND_14_3.0", "PSAR_0.02_0.2"]
             }
         self.features_config = features_config
-        self.timeframes = ["5m", "1h", "4h"]
-        self.nb_features_per_tf = {tf: len(features) for tf, features in self.features_config.items()}
+        # Ne garder que les timeframes qui ont des features définies
+        self.timeframes = [tf for tf in ["5m", "1h", "4h"] if tf in self.features_config]
+        if not self.timeframes:
+            raise ValueError("Aucun timeframe valide trouvé dans la configuration des fonctionnalités")
+            
+        self.nb_features_per_tf = {tf: len(features) for tf, features in self.features_config.items() 
+                                 if tf in self.timeframes}
+        
+        # Configuration de mémoire
+        self.memory_config = memory_config or {
+            'aggressive_cleanup': True,
+            'force_gc': True,
+            'memory_monitoring': True,
+            'memory_warning_threshold_mb': 5600,
+            'memory_critical_threshold_mb': 6300,
+            'disable_caching': True
+        }
+        
+        # Métriques de performance
+        self.performance_metrics = {
+            'gc_collections': 0,
+            'memory_peak_mb': 0,
+            'errors_count': 0,
+            'warnings_count': 0
+        }
+        
+        # Mémoire initiale
+        self.initial_memory_mb = 0
+        self.memory_peak_mb = 0
+        
+        # Initialiser les métriques après la configuration
+        self._initialize_memory_metrics()
         
         # Configuration de la taille de fenêtre
         self.base_window_size = window_size
@@ -124,12 +148,16 @@ class StateBuilder:
         self.include_portfolio_state = include_portfolio_state
         self.normalize = normalize
         
+        # Calculer le nombre maximum de features
+        self.max_features = max(self.nb_features_per_tf.values())
+        
         # Configuration adaptative
         self.adaptive_window = adaptive_window
         self.min_window_size = min_window_size
         self.max_window_size = max_window_size
         self.volatility_history = []
         self.volatility_window = 20
+        self.timeframe_weights = {tf: 1.0 for tf in self.timeframes} # Initialisation des poids
         
         # Configuration des scalers
         self.scaler_path = scaler_path
@@ -146,8 +174,7 @@ class StateBuilder:
         if self.include_portfolio_state:
             observation_channels += 1
             
-        max_features = max(self.nb_features_per_tf.values())
-        self.observation_shape = (observation_channels, self.base_window_size, max_features)
+        self.observation_shape = (observation_channels, self.base_window_size, self.max_features)
         
         logger.info(f"Observation shape configured as: {self.observation_shape}")
         
@@ -155,6 +182,117 @@ class StateBuilder:
                    f"adaptive_window={adaptive_window}, "
                    f"timeframes={self.timeframes}, "
                    f"features_per_timeframe={self.nb_features_per_tf}")
+
+    def _initialize_memory_metrics(self):
+        """
+        Initialize memory metrics after configuration.
+        """
+        try:
+            # Get initial memory usage
+            self.initial_memory_mb = self._get_memory_usage_mb()
+            self.memory_peak_mb = self.initial_memory_mb
+            
+            # Update performance metrics
+            self._update_performance_metrics('memory_peak_mb', self.initial_memory_mb)
+            
+        except Exception as e:
+            logger.error(f"Error initializing memory metrics: {str(e)}")
+            self._update_performance_metrics('errors_count', self.get_performance_metrics().get('errors_count', 0) + 1)
+
+    def _get_memory_usage_mb(self):
+        """
+        Get current memory usage in MB with monitoring.
+        """
+        try:
+            process = psutil.Process(os.getpid())
+            mem_info = process.memory_info()
+            memory_mb = mem_info.rss / (1024 * 1024)
+            
+            # Vérifier les seuils critiques
+            if memory_mb > self.memory_config['memory_critical_threshold_mb']:
+                logger.error(f"CRITICAL: Memory usage exceeds critical threshold: {memory_mb:.1f} MB")
+                metrics = self.get_performance_metrics()
+                warnings_count = metrics.get('warnings_count', 0)
+                self._update_performance_metrics('warnings_count', warnings_count + 1)
+            elif memory_mb > self.memory_config['memory_warning_threshold_mb']:
+                logger.warning(f"Memory usage warning: {memory_mb:.1f} MB")
+                metrics = self.get_performance_metrics()
+                warnings_count = metrics.get('warnings_count', 0)
+                self._update_performance_metrics('warnings_count', warnings_count + 1)
+            
+            return memory_mb
+            
+        except Exception as e:
+            logger.error(f"Error getting memory usage: {str(e)}")
+            self._update_performance_metrics('errors_count', self.get_performance_metrics().get('errors_count', 0) + 1)
+            return 0
+
+    def _cleanup_memory(self):
+        """
+        Helper method to clean up memory with aggressive cleanup.
+        """
+        try:
+            # Clear cached data
+            if hasattr(self, 'current_chunk_data'):
+                self.current_chunk_data = None
+            
+            # Clear scaler caches
+            for scaler in self.scalers.values():
+                if scaler is not None:
+                    if hasattr(scaler, 'clear_cache'):
+                        scaler.clear_cache()
+            
+            # Force garbage collection
+            if self.memory_config['force_gc']:
+                gc.collect()
+                
+            # Log memory usage
+            current_memory = self._get_memory_usage_mb()
+            if current_memory > self.memory_peak_mb:
+                self.memory_peak_mb = current_memory
+                self._update_performance_metrics('memory_peak_mb', self.memory_peak_mb)
+            
+            logger.info(f"Memory cleanup completed. Current usage: {current_memory:.1f} MB")
+            
+        except Exception as e:
+            logger.error(f"Error during memory cleanup: {str(e)}")
+            self._update_performance_metrics('errors_count', 1)
+
+    def _update_performance_metrics(self, metric: str, value: Any) -> None:
+        """
+        Update performance metrics safely.
+        
+        Args:
+            metric: The metric name to update
+            value: The new value for the metric
+        """
+        if not hasattr(self, '_performance_metrics'):
+            self._performance_metrics = {
+                'gc_collections': 0,
+                'memory_peak_mb': self.initial_memory_mb,
+                'errors_count': 0,
+                'warnings_count': 0
+            }
+        
+        self._performance_metrics[metric] = value
+
+    def get_performance_metrics(self) -> Dict[str, Any]:
+        """
+        Get the current performance metrics.
+        
+        Returns:
+            Dictionary of performance metrics
+        """
+        if not hasattr(self, '_performance_metrics'):
+            # Utiliser la mémoire initiale si elle est définie, sinon 0
+            initial_memory = getattr(self, 'initial_memory_mb', 0)
+            return {
+                'gc_collections': 0,
+                'memory_peak_mb': initial_memory,
+                'errors_count': 0,
+                'warnings_count': 0
+            }
+        return self._performance_metrics
 
     def _init_scalers(self):
         """
@@ -164,7 +302,35 @@ class StateBuilder:
         - 5m: MinMaxScaler with feature_range (-1, 1)
         - 1h: StandardScaler with mean=0, std=1
         - 4h: RobustScaler for outlier resistance
+        
+        Memory optimizations:
+        - Use float32 for scaler parameters
+        - Cache scaler parameters efficiently
         """
+        # Nettoyer les scalers existants
+        if self.scalers:
+            for scaler in self.scalers.values():
+                if scaler is not None:
+                    del scaler
+            self.scalers = {tf: None for tf in self.timeframes}
+            gc.collect()
+            
+        # Initialiser les nouveaux scalers
+        for tf in self.timeframes:
+            if tf == "5m":
+                self.scalers[tf] = MinMaxScaler(feature_range=(-1, 1), copy=False)
+            elif tf == "1h":
+                self.scalers[tf] = StandardScaler(copy=False)
+            elif tf == "4h":
+                self.scalers[tf] = RobustScaler(copy=False)
+            else:
+                self.scalers[tf] = StandardScaler(copy=False)
+            
+            # Optimiser la mémoire en utilisant float32
+            if hasattr(self.scalers[tf], 'dtype'):
+                self.scalers[tf].dtype = np.float32
+            
+        logger.info(f"Initialized scalers for timeframes: {list(self.scalers.keys())}")
         if not self.normalize:
             logger.info("Normalization disabled - no scalers initialized")
             return
@@ -190,459 +356,90 @@ class StateBuilder:
             self.scalers[tf] = scaler
             logger.info(f"Scaler initialized for timeframe {tf}: {config['scaler_type']} "
                         f"with params: {config}")
-    
-    def _get_extended_features_config(self) -> Dict[str, List[str]]:
-        """
-        Génère la configuration étendue des features incluant les 22+ indicateurs techniques.
-        
-        Returns:
-            Configuration des features par timeframe
-        
-        Note:
-            Cette configuration doit correspondre exactement à celle définie dans config.yaml
-        """
-        # Configuration des features par timeframe, conforme à config.yaml
-        return {
-            '5m': [
-                'OPEN', 'HIGH', 'LOW', 'CLOSE', 'VOLUME',
-                'RSI_14', 'STOCHk_14_3_3', 'STOCHd_14_3_3',
-                'CCI_20_0.015', 'ROC_9', 'MFI_14',
-                'EMA_5', 'EMA_20', 'SUPERTREND_14_2.0',
-                'PSAR_0.02_0.2'
-            ],
-            '1h': [
-                'OPEN', 'HIGH', 'LOW', 'CLOSE', 'VOLUME',
-                'RSI_14', 'MACD_12_26_9', 'MACD_HIST_12_26_9',
-                'CCI_20_0.015', 'MFI_14',
-                'EMA_50', 'EMA_100', 'SMA_200',
-                'ICHIMOKU_9_26_52', 'PSAR_0.02_0.2'
-            ],
-            '4h': [
-                'OPEN', 'HIGH', 'LOW', 'CLOSE', 'VOLUME',
-                'RSI_14', 'MACD_12_26_9', 'CCI_20_0.015',
-                'MFI_14', 'EMA_50', 'SMA_200',
-                'ICHIMOKU_9_26_52', 'SUPERTREND_14_3.0',
-                'PSAR_0.02_0.2'
-            ]
-        }
-        volume_indicators = [
-            'OBV', 'VWAP', 'MFI', 'Volume_SMA', 'Volume_Ratio'
-        ]
-        
-        # Combiner tous les indicateurs
-        all_indicators = (trend_indicators + momentum_indicators + 
-                         volatility_indicators + volume_indicators)
-        
-        # Configuration par timeframe
-        config = {}
-        for tf in self.timeframes:
-            # Features de base avec suffixe timeframe
-            tf_base_features = [f'{tf}_{feature}' for feature in base_features]
-            
-            # Indicateurs avec suffixe timeframe
-            tf_indicators = [f'{indicator}_{tf}' for indicator in all_indicators]
-            
-            # Combiner et limiter si nécessaire
-            all_features = tf_base_features + tf_indicators
-            
-            # Sélection dynamique des features si activée
-            if self.feature_selection_enabled and len(all_features) > self.max_features_per_timeframe:
-                # Prioriser les features les plus importantes
-                priority_features = (tf_base_features + 
-                                   [f'{ind}_{tf}' for ind in ['RSI', 'MACD', 'ATR', 'SMA_20', 'EMA_12']])
-                
-                # Ajouter d'autres features jusqu'à la limite
-                remaining_slots = self.max_features_per_timeframe - len(priority_features)
-                other_features = [f for f in tf_indicators if f not in priority_features]
-                
-                config[tf] = priority_features + other_features[:remaining_slots]
-            else:
-                config[tf] = all_features
-        
-        return config
-    
-    def auto_detect_features(self, data: Dict[str, pd.DataFrame]) -> Dict[str, List[str]]:
-        """
-        Détecte automatiquement les features disponibles dans les données.
-        
-        Args:
-            data: Dictionnaire des DataFrames par timeframe
-            
-        Returns:
-            Configuration des features détectées
-        """
-        detected_config = {}
-        
-        for tf in self.timeframes:
-            if tf not in data:
-                continue
-                
-            df = data[tf]
-            available_columns = df.columns.tolist()
-            
-            # Filtrer les colonnes qui correspondent au timeframe
-            tf_columns = [col for col in available_columns 
-                         if col.startswith(f'{tf}_') or col.endswith(f'_{tf}')]
-            
-            # Ajouter les colonnes de base si elles existent
-            base_columns = ['open', 'high', 'low', 'close', 'volume', 'minutes_since_update']
-            for base_col in base_columns:
-                if base_col in available_columns:
-                    tf_columns.append(base_col)
-            
-            # Limiter si nécessaire
-            if self.feature_selection_enabled and len(tf_columns) > self.max_features_per_timeframe:
-                tf_columns = tf_columns[:self.max_features_per_timeframe]
-            
-            detected_config[tf] = tf_columns
-            logger.info(f"Detected {len(tf_columns)} features for {tf}: {tf_columns[:5]}...")
-        
-        return detected_config
-    
-    def update_features_config(self, new_config: Dict[str, List[str]]) -> None:
-        """
-        Met à jour la configuration des features.
-        
-        Args:
-            new_config: Nouvelle configuration des features
-        """
-        self.features_config = new_config
-        self.nb_features_per_tf = {tf: len(features) for tf, features in self.features_config.items()}
-        
-        # Recalculer la shape des observations
-        max_features = max(self.nb_features_per_tf.values())
-        self.observation_shape = (len(self.timeframes), self.window_size, max_features)
-        
-        # Réinitialiser les scalers
-        self._init_scalers()
-        
-        logger.info(f"Updated features config. New observation shape: {self.observation_shape}")
-    
-    def build_observation(self, current_idx: int, data: Dict[str, pd.DataFrame]) -> Dict[str, np.ndarray]:
-        """
-        Construit une observation 3D à partir des données.
-        
-        Args:
-            current_idx: Index actuel dans les données
-            data: Dictionnaire des DataFrames par timeframe
-            
-        Returns:
-            Observation 3D de forme (timeframes, window_size, n_features)
-        
-        Raises:
-            ValueError: Si les données sont manquantes ou insuffisantes
-            KeyError: Si les features configurées ne sont pas présentes dans les données
-        """
-        observations = {}
-        
-        try:
-            # Vérifier la présence des timeframes requis
-            missing_timeframes = set(self.timeframes) - set(data.keys())
-            if missing_timeframes:
-                raise ValueError(f"Missing required timeframes: {missing_timeframes}")
-            
-            # Vérifier la présence des features pour chaque timeframe
-            for tf in self.timeframes:
-                missing_features = set(self.features_config[tf]) - set(data[tf].columns)
-                if missing_features:
-                    raise KeyError(f"Missing features for timeframe {tf}: {missing_features}")
-            
-            # Construire l'observation pour chaque timeframe
-            for tf in self.timeframes:
-                df = data[tf]
-                
-                # Vérifier que l'index est valide
-                if current_idx < self.base_window_size:
-                    raise ValueError(f"Current index {current_idx} is less than base window size {self.base_window_size}")
-            
-                # Extraire les valeurs pour la fenêtre
-                start_idx = current_idx - self.base_window_size
-                values = df.iloc[start_idx:current_idx][self.features_config[tf]].values
-                
-                # Vérifier la présence des données
-                if len(values) < self.window_size:
-                    padding = np.zeros((self.window_size - len(values), len(self.features_config[tf])))
-                    values = np.vstack([padding, values])
-                
-                # Normaliser si activé
-                if self.normalize:
-                    scaler = self.scalers.get(tf)
-                    if scaler is None:
-                        raise ValueError(f"Scaler not initialized for timeframe {tf}")
-                    try:
-                        values = scaler.transform(values)
-                    except Exception as e:
-                        logger.error(f"Error normalizing data for {tf}: {str(e)}")
-                        raise ValueError(f"Failed to normalize data for {tf}: {str(e)}")
-                
-                observations[tf] = values
-            
-            return observations
-            
-        except Exception as e:
-            logger.error(f"Error building observation: {str(e)}")
-            raise
-    
-    def get_feature_importance_analysis(self, data: Dict[str, pd.DataFrame]) -> Dict[str, Dict[str, float]]:
-        """
-        Analyse l'importance des features basée sur leur variance et corrélation.
-        
-        Args:
-            data: Dictionnaire des DataFrames par timeframe
-            
-        Returns:
-            Dictionnaire d'importance des features par timeframe
-        """
-        importance_analysis = {}
-        
-        for tf in self.timeframes:
-            if tf not in data:
-                continue
-                
-            df = data[tf]
-            expected_features = self.features_config.get(tf, [])
-            available_features = [col for col in expected_features if col in df.columns]
-            
-            if not available_features:
-                continue
-            
-            feature_data = df[available_features].select_dtypes(include=[np.number])
-            
-            if feature_data.empty:
-                continue
-            
-            # Calculer l'importance basée sur la variance (features avec plus de variance sont plus informatives)
-            variances = feature_data.var()
-            
-            # Normaliser les variances
-            max_var = variances.max()
-            if max_var > 0:
-                normalized_variances = variances / max_var
-            else:
-                normalized_variances = variances
-            
-            # Calculer la corrélation moyenne avec les autres features (diversité)
-            corr_matrix = feature_data.corr().abs()
-            avg_correlations = corr_matrix.mean()
-            
-            # Score d'importance combiné (variance élevée, corrélation modérée)
-            importance_scores = {}
-            for feature in available_features:
-                if feature in normalized_variances.index and feature in avg_correlations.index:
-                    variance_score = normalized_variances[feature]
-                    correlation_penalty = avg_correlations[feature] * 0.5  # Pénaliser forte corrélation
-                    importance_scores[feature] = variance_score - correlation_penalty
-                else:
-                    importance_scores[feature] = 0.0
-            
-            importance_analysis[tf] = importance_scores
-        
-        return importance_analysis
-    
-    def _init_scalers(self) -> None:
-        """Initialize scalers for each timeframe with advanced normalization."""
-        for tf in self.timeframes:
-            if self.normalize:
-                # Use RobustScaler for better outlier handling
-                from sklearn.preprocessing import RobustScaler
-                self.scalers[tf] = RobustScaler(quantile_range=(25.0, 75.0))
-            else:
-                self.scalers[tf] = None
-        
-        # Cross-timeframe normalization parameters
-        self.cross_tf_scaler = None
-        self.outlier_detection_enabled = True
-        self.outlier_threshold = 3.0  # Z-score threshold
-        self.outlier_stats = {}
-    
+
     def fit_scalers(self, data: Dict[str, pd.DataFrame]) -> None:
         """
-        Fit scalers on the provided data.
+        Fit scalers on the provided data with memory optimization.
         
         Args:
             data: Dictionary mapping timeframes to DataFrames
         """
         if not self.normalize:
             return
-            
+        
         logger.info("Fitting scalers on provided data...")
         
-        # Verify all timeframes have initialized scalers
-        for tf in self.timeframes:
-            if tf not in self.scalers:
-                raise ValueError(f"Scaler not initialized for timeframe {tf}")
-            if self.scalers[tf] is None:
-                # Choose the appropriate scaler based on timeframe
-                if tf == "5m":
-                    self.scalers[tf] = MinMaxScaler(feature_range=(-1, 1))
-                elif tf == "1h":
-                    self.scalers[tf] = StandardScaler()
-                elif tf == "4h":
-                    self.scalers[tf] = RobustScaler()
-                else:
-                    self.scalers[tf] = StandardScaler()
-                logger.info(f"Initializing scaler for timeframe {tf}")
+        # Vérifier la mémoire avant le fitting
+        current_memory = self._get_memory_usage_mb()
+        if current_memory > self.memory_config['memory_warning_threshold_mb']:
+            logger.warning(f"Memory usage high before fitting: {current_memory:.1f} MB")
         
-        # Fit scaler for each timeframe separately
-        for tf, df in data.items():
-            if tf not in self.timeframes:
-                logger.warning(f"Skipping unknown timeframe {tf}")
-                continue
-                
-            # Select only the feature columns that exist in the DataFrame
-            expected_features = self.features_config.get(tf, [])
-            columns = [col for col in expected_features if col in df.columns]
-            if not columns:
-                logger.warning(f"No matching feature columns found for timeframe {tf}")
-                continue
-                
-            # Get the data for this timeframe
-            timeframe_data = df[columns].values
-            
-            # Handle potential infinite or NaN values
-            if not np.isfinite(timeframe_data).all():
-                logger.warning(f"Non-finite values found in {tf} data. Replacing with zeros.")
-                timeframe_data = np.nan_to_num(timeframe_data, nan=0.0, posinf=0.0, neginf=0.0)
-            
-            # Validate we have a scaler and enough data
-            if self.scalers[tf] is None:
-                raise ValueError(f"Scaler not properly initialized for timeframe {tf}")
-            if len(timeframe_data) < 2:
-                raise ValueError(f"Not enough data samples ({len(timeframe_data)}) to fit scaler for {tf}")
-            
-            # Fit the scaler on this timeframe's data
-            self.scalers[tf].fit(timeframe_data)
-            logger.info(f"Fitted scaler for timeframe {tf} on {len(timeframe_data)} samples")
-        
-        # Save the scaler if a path is provided
-        if self.scaler_path:
-            self.save_scalers()
-    
-    def save_scalers(self) -> None:
-        """Save the fitted scalers to disk."""
-        if not self.scaler_path:
-            return
-            
-        scaler_dir = Path(self.scaler_path).parent
-        scaler_dir.mkdir(parents=True, exist_ok=True)
-        
-        for tf, scaler in self.scalers.items():
-            if scaler is not None:
-                scaler_file = scaler_dir / f"scaler_{tf}.joblib"
-                joblib.dump(scaler, scaler_file)
-                logger.info(f"Saved scaler for {tf} to {scaler_file}")
-    
-    def load_scalers(self) -> bool:
-        """
-        Load fitted scalers from disk.
-        
-        Returns:
-            bool: True if all scalers were loaded successfully, False otherwise
-        """
-        if not self.scaler_path:
-            return False
-            
-        all_loaded = True
-        scaler_dir = Path(self.scaler_path).parent
-        
-        for tf in self.timeframes:
-            scaler_file = scaler_dir / f"scaler_{tf}.joblib"
-            if scaler_file.exists():
-                try:
-                    self.scalers[tf] = joblib.load(scaler_file)
-                    logger.info(f"Loaded scaler for {tf} from {scaler_file}")
-                except Exception as e:
-                    logger.error(f"Error loading scaler for {tf}: {e}")
-                    all_loaded = False
-            else:
-                logger.warning(f"Scaler file not found for {tf}: {scaler_file}")
-                all_loaded = False
-        
-        return all_loaded
-    
-    def build_observation(self, 
-                         current_idx: int, 
-                         data: Dict[str, pd.DataFrame]) -> Dict[str, np.ndarray]:
-        """
-        Build a multi-timeframe observation with robust validation.
-        
-        Args:
-            current_idx: Current index in the data
-            data: Dictionary mapping timeframes to DataFrames
-            
-        Returns:
-            Dictionary mapping timeframes to observation arrays
-            
-        Raises:
-            ValueError: If data is missing or insufficient
-            KeyError: If required features are missing
-        """
         try:
-            observations = {}
+            for tf in self.timeframes:
+                if tf not in self.scalers:
+                    raise ValueError(f"Scaler not initialized for timeframe {tf}")
+                if self.scalers[tf] is None:
+                    if tf == "5m":
+                        self.scalers[tf] = MinMaxScaler(feature_range=(-1, 1), copy=False)
+                    elif tf == "1h":
+                        self.scalers[tf] = StandardScaler(copy=False)
+                    elif tf == "4h":
+                        self.scalers[tf] = RobustScaler(copy=False)
+                    else:
+                        self.scalers[tf] = StandardScaler(copy=False)
+                    logger.info(f"Initializing scaler for timeframe {tf}")
             
             for tf, df in data.items():
                 if tf not in self.timeframes:
+                    logger.warning(f"Skipping unknown timeframe {tf}")
                     continue
                 
-                # Validate data availability
-                if df is None or df.empty:
-                    raise ValueError(f"No data available for timeframe {tf}")
-                    
-                # Validate current index
-                if current_idx >= len(df):
-                    raise ValueError(f"Current index {current_idx} exceeds data length {len(df)} for {tf}")
-                    
-                # Get the window of data
-                start_idx = max(0, current_idx - self.window_size + 1)
-                df_window = df.iloc[start_idx:current_idx+1].copy()
+                columns = [col for col in self.features_config.get(tf, []) if col in df.columns]
+                if not columns:
+                    logger.warning(f"No matching feature columns found for timeframe {tf}")
+                    continue
                 
-                # Validate feature availability
-                expected_features = self.features_config.get(tf, [])
-                missing_features = [f for f in expected_features if f not in df_window.columns]
-                if missing_features:
-                    raise KeyError(f"Missing features for {tf}: {missing_features}")
-                    
-                # Get the feature values
-                values = df_window[expected_features].values
+                # Utiliser float32 pour optimiser la mémoire
+                timeframe_data = df[columns].values.astype(np.float32)
                 
-                # Validate data shape
-                if len(values) < self.base_window_size:
-                    padding = np.zeros((self.base_window_size - len(values), len(expected_features)))
-                    values = np.vstack([padding, values])
-                    logger.warning(f"Insufficient history for {tf}, padding with zeros")
+                if not np.isfinite(timeframe_data).all():
+                    logger.warning(f"Non-finite values found in {tf} data. Replacing with zeros.")
+                    timeframe_data = np.nan_to_num(timeframe_data, nan=0.0, posinf=0.0, neginf=0.0)
                 
-                # Apply normalization if enabled
-                if self.normalize and self.scalers.get(tf) is not None:
-                    try:
-                        values = self.scalers[tf].transform(values)
-                    except Exception as e:
-                        logger.error(f"Error normalizing data for {tf}: {e}")
-                        raise
+                if self.scalers[tf] is None:
+                    raise ValueError(f"Scaler not properly initialized for timeframe {tf}")
                 
-                # Validate final shape
-                expected_shape = (self.base_window_size, len(expected_features))
-                if values.shape != expected_shape:
-                    raise ValueError(f"Shape mismatch for {tf}: expected {expected_shape}, got {values.shape}")
-                    
-                # Add to observations
-                observations[tf] = values
+                if len(timeframe_data) < 2:
+                    raise ValueError(f"Not enough data samples ({len(timeframe_data)}) to fit scaler for {tf}")
                 
-            # Validate that we have observations for all configured timeframes
-            missing_tfs = set(self.timeframes) - set(observations.keys())
-            if missing_tfs:
-                raise ValueError(f"Missing observations for timeframes: {missing_tfs}")
-                
-            return observations
+                # Fit le scaler avec optimisation de mémoire
+                self.scalers[tf].fit(timeframe_data)
+                logger.info(f"Fitted scaler for timeframe {tf} on {len(timeframe_data)} samples")
             
+            # Sauvegarder les scalers si nécessaire
+            if self.scaler_path:
+                self.save_scalers()
+            
+            # Nettoyer la mémoire après le fitting
+            if self.memory_config['aggressive_cleanup']:
+                self._cleanup_memory()
+                
         except Exception as e:
-            logger.error(f"Error building observation: {str(e)}")
+            logger.error(f"Error fitting scalers: {str(e)}")
+            self._update_performance_metrics('errors_count', self.get_performance_metrics().get('errors_count', 0) + 1)
             raise
-    
+        
+        # Mettre à jour les métriques de mémoire
+        current_memory = self._get_memory_usage_mb()
+        # Utiliser 0 comme valeur par défaut si memory_peak_mb n'est pas défini
+        self.memory_peak_mb = max(getattr(self, 'memory_peak_mb', 0), current_memory)
+        self._update_performance_metrics('memory_peak_mb', self.memory_peak_mb)
+
     def build_multi_channel_observation(self, 
-                                      current_idx: int, 
-                                      data: Dict[str, pd.DataFrame]) -> np.ndarray:
+                                        current_idx: int, 
+                                        data: Dict[str, pd.DataFrame]) -> np.ndarray:
         """
-        Build a multi-channel observation with all timeframes.
+        Build a multi-channel observation with all timeframes and memory optimization.
         
         Args:
             current_idx: Current index in the data
@@ -657,24 +454,23 @@ class StateBuilder:
             RuntimeError: If observation shape mismatch occurs
         """
         try:
+            # Vérifier la mémoire avant le traitement
+            current_memory = self._get_memory_usage_mb()
+            if current_memory > self.memory_config['memory_warning_threshold_mb']:
+                logger.warning(f"Memory usage high before building observation: {current_memory:.1f} MB")
+            
             # Build observations for each timeframe
             observations = self.build_observation(current_idx, data)
-            if not observations:
-                raise ValueError("No observations built")
-                
-            # Validate observation shapes
-            for tf, obs in observations.items():
-                expected_shape = (self.window_size, len(self.features_config[tf]))
-                if obs.shape != expected_shape:
-                    raise ValueError(f"Shape mismatch for {tf}: expected {expected_shape}, got {obs.shape}")
-                    
-            # Find the maximum number of features across all timeframes
-            max_features = max(obs.shape[1] for obs in observations.values())
             
-            # Initialize the output array with the correct window size
-            n_timeframes = len(self.timeframes)
-            output = np.zeros((n_timeframes, self.base_window_size, max_features))
+            # Check if portfolio state should be included
+            if self.include_portfolio_state:
+                portfolio_state = self.build_portfolio_state(None)  # None car pas de portfolio_manager en test
+                observations['portfolio'] = portfolio_state
             
+            # Convert to 3D array avec optimisation de mémoire
+            obs_array = np.zeros(self.observation_shape, dtype=np.float32)
+            
+            # Fill in the data
             # Fill the output array
             for i, tf in enumerate(self.timeframes):
                 if tf not in observations:
@@ -683,26 +479,32 @@ class StateBuilder:
                 obs = observations[tf]
                 
                 # Center the features if they have fewer columns than max_features
-                padding = max_features - obs.shape[1]
+                padding = self.max_features - obs.shape[1]
                 if padding > 0:
                     left_pad = padding // 2
                     right_pad = padding - left_pad
                     obs = np.pad(obs, ((0, 0), (left_pad, right_pad)), 
                                mode='constant', constant_values=0)
+                logger.debug(f"Observation for {tf} after feature padding. Shape: {obs.shape}, Dtype: {obs.dtype}, Content: {obs.flatten()[:5]}...")
                 
                 # Validate final placement
-                if output[i, :, :].shape != obs.shape:
+                if obs_array[i, :, :].shape != obs.shape:
                     raise RuntimeError(f"Shape mismatch after padding for {tf}: "
-                                     f"expected {output[i, :, :].shape}, got {obs.shape}")
+                                     f"expected {obs_array[i, :, :].shape}, got {obs.shape}")
                     
-                output[i, :, :] = obs
+                obs_array[i, :, :] = obs
             
             # Validate final output shape
-            if output.shape != self.observation_shape:
+            if obs_array.shape != self.observation_shape:
                 raise RuntimeError(f"Final observation shape mismatch: "
-                                 f"expected {self.observation_shape}, got {output.shape}")
-            
-            return output
+                                 f"expected {self.observation_shape}, got {obs_array.shape}")
+        
+            # Mettre à jour les métriques de mémoire
+            current_memory = self._get_memory_usage_mb()
+            self.memory_peak_mb = max(getattr(self, 'memory_peak_mb', 0), current_memory)
+            self._update_performance_metrics('memory_peak_mb', self.memory_peak_mb)
+        
+            return obs_array
             
         except Exception as e:
             logger.error(f"Error building multi-channel observation: {str(e)}")
@@ -1120,6 +922,62 @@ class StateBuilder:
             'timeframe_weights': self.timeframe_weights.copy()
         }
     
+    def build_observation(self, current_idx: int, data: Dict[str, pd.DataFrame]) -> Dict[str, np.ndarray]:
+        """
+        Build observations for each timeframe.
+        
+        Args:
+            current_idx: Current index in the data
+            data: Dictionary mapping timeframes to DataFrames
+            
+        Returns:
+            Dictionary mapping timeframes to their observations
+        """
+        observations = {}
+        
+        for tf in self.timeframes:
+            if tf not in data:
+                raise KeyError(f"Missing data for timeframe {tf}")
+                
+            df = data[tf]
+            features = self.features_config.get(tf, [])
+            
+            if not features:
+                raise ValueError(f"No features configured for timeframe {tf}")
+                
+            if current_idx < self.window_size:
+                # Retourner un tableau de zéros de la forme attendue si pas assez de données
+                logger.warning(f"Current index {current_idx} is less than window_size {self.window_size} for timeframe {tf}. Returning zero-padded observation for {tf}.")
+                observations[tf] = np.zeros((self.window_size, len(features)), dtype=np.float32)
+                continue
+                
+            # Get the window of data
+            window_data = df[features].iloc[current_idx - self.window_size:current_idx]
+            
+            if window_data.empty:
+                logger.warning(f"Window data is empty for timeframe {tf} at index {current_idx}. Returning zero-padded observation for {tf}.")
+                observations[tf] = np.zeros((self.window_size, len(features)), dtype=np.float32)
+                logger.debug(f"Empty window_data for {tf}. Shape: {window_data.shape}, Dtypes: {window_data.dtypes.to_dict()}")
+                continue
+
+            if window_data.isnull().values.any():
+                logger.warning(f"NaN values found in {tf} data, replacing with zeros")
+                window_data = window_data.fillna(0)
+                
+            # Convert to numpy array with float32 for memory optimization
+            obs = window_data.values.astype(np.float32)
+            logger.debug(f"Observation for {tf} before normalization. Shape: {obs.shape}, Dtype: {obs.dtype}, Content: {obs.flatten()[:5]}...")
+            
+            # Normalize if required
+            if self.normalize and tf in self.scalers and self.scalers[tf] is not None:
+                obs = self.scalers[tf].transform(obs)
+                logger.debug(f"Observation for {tf} after normalization. Shape: {obs.shape}, Dtype: {obs.dtype}, Content: {obs.flatten()[:5]}...")
+                
+            observations[tf] = obs
+            
+        logger.debug(f"build_observation returning: type={type(observations)}, content={observations}")
+        return observations
+
     def build_adaptive_observation(self, 
                                  current_idx: int, 
                                  data: Dict[str, pd.DataFrame]) -> np.ndarray:
@@ -1139,8 +997,11 @@ class StateBuilder:
         # Build standard observations
         observations = self.build_observation(current_idx, data)
         
-        if not observations:
-            return None
+        logger.debug(f"build_adaptive_observation received: type={type(observations)}, content={observations}")
+        if not observations or any(not isinstance(obs, np.ndarray) or obs.size == 0 for obs in observations.values()):
+            logger.warning("Observations dictionary is empty or contains empty arrays. Returning zero-padded observation.")
+            logger.debug(f"Observations before weighting: {observations}")
+            return np.zeros(self.observation_space.shape, dtype=np.float32)
         
         # Apply timeframe weighting
         weighted_observations = self.apply_timeframe_weighting(observations)
@@ -1151,6 +1012,7 @@ class StateBuilder:
         
         # Use current adaptive window size
         output = np.zeros((n_timeframes, self.window_size, max_features))
+        logger.debug(f"Output array initialized. Shape: {output.shape}, Dtype: {output.dtype}")
         
         # Fill the output array
         for i, tf in enumerate(self.timeframes):
@@ -1165,6 +1027,7 @@ class StateBuilder:
                     # Pad with zeros at the beginning
                     padding = np.zeros((self.window_size - obs.shape[0], obs.shape[1]))
                     obs = np.vstack([padding, obs])
+                logger.debug(f"Observation for {tf} after window size adjustment. Shape: {obs.shape}, Dtype: {obs.dtype}, Content: {obs.flatten()[:5]}...")
                 
                 # Handle feature dimension padding
                 if obs.shape[1] < max_features:
@@ -1173,6 +1036,7 @@ class StateBuilder:
                     right_pad = padding - left_pad
                     obs = np.pad(obs, ((0, 0), (left_pad, right_pad)), 
                                mode='constant', constant_values=0)
+                logger.debug(f"Observation for {tf} after feature padding. Shape: {obs.shape}, Dtype: {obs.dtype}, Content: {obs.flatten()[:5]}...")
                 
                 output[i, :, :] = obs
         

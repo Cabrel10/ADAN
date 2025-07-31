@@ -86,6 +86,12 @@ class TestStateBuilder(unittest.TestCase):
         self.assertEqual(len(custom_state_builder.timeframes), 3)
         self.assertEqual(custom_state_builder.base_window_size, 3)
         self.assertTrue(custom_state_builder.include_portfolio_state)
+        
+        # Vérifier les métriques de performance initiales
+        metrics = custom_state_builder.get_performance_metrics()
+        self.assertEqual(metrics['gc_collections'], 0)
+        self.assertEqual(metrics['errors_count'], 0)
+        self.assertEqual(metrics['warnings_count'], 0)
 
     def test_observation_shape(self):
         """Teste la forme de l'observation"""
@@ -100,7 +106,7 @@ class TestStateBuilder(unittest.TestCase):
         self.assertEqual(len(shape), 3)
         self.assertEqual(shape[0], 3)  # 3 timeframes
         self.assertEqual(shape[1], 20)  # window_size par défaut
-        self.assertEqual(shape[2], 15)  # nombre maximum de features
+        self.assertEqual(shape[2], state_builder.max_features)  # nombre maximum de features
 
     def test_build_observation(self):
         """Teste la construction d'une observation"""
@@ -120,10 +126,17 @@ class TestStateBuilder(unittest.TestCase):
         )
         
         # Vérifier la forme de l'observation
-        self.assertEqual(observation.shape, (3, 3, 15))  # 3 timeframes, window_size=3, 15 features
+        expected_shape = (3, 3, state_builder.max_features)  # 3 timeframes, window_size=3, max_features
+        self.assertEqual(observation.shape, expected_shape)
         
         # Vérifier que les valeurs ne sont pas NaN
         self.assertFalse(np.isnan(observation).any())
+        
+        # Vérifier les métriques de performance après la construction de l'observation
+        metrics = state_builder.get_performance_metrics()
+        self.assertGreaterEqual(metrics['gc_collections'], 0)
+        self.assertEqual(metrics['errors_count'], 0)
+        self.assertGreaterEqual(metrics['warnings_count'], 0)
 
 if __name__ == '__main__':
     unittest.main()
