@@ -10,15 +10,27 @@ __pycache__/
 !.env.example
 
 # Données et modèles
+/data/**/*.parquet
+/data/**/*.csv
+/data/**/*.json
 /data/raw/
 /data/processed/
 /models/
 !/data/raw/.gitkeep
 !/data/processed/.gitkeep
 
+# Exclure les fichiers de données volumineux
+*.parquet
+!**/test/**/*.parquet  # Inclure les fichiers de test si nécessaire
+*.csv
+!**/test/**/*.csv     # Inclure les fichiers de test si nécessaire
+*.json
+!**/test/**/*.json    # Inclure les fichiers de test si nécessaire
+
 # Logs et sorties
 /logs/*
 !/logs/.gitkeep
+/logs/*.json
 /outputs/
 
 # Fichiers de configuration IDE
