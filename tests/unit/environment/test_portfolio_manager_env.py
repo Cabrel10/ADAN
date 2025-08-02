@@ -19,8 +19,8 @@ class TestPortfolioManager(unittest.TestCase):
                 'min_trade_size': 0.0001,
                 'min_notional_value': 10.0,
                 'max_notional_value': 100000.0,
-                'stop_loss': 0.02,
-                'take_profit': 0.04,
+                'stop_loss_pct': 0.02,
+                'take_profit_pct': 0.04,
                 'liquidation_threshold': 0.05
             },
             'risk_management': {

@@ -73,7 +73,7 @@ class StateBuilder:
     observation space that can be used by reinforcement learning agents.
     """
     
-    def __init__(self, 
+    def __init__(self,
                  features_config: Dict[str, List[str]] = None,
                  window_size: int = 20,  # Correspond à la configuration dans config.yaml
                  include_portfolio_state: bool = True,
@@ -82,7 +82,8 @@ class StateBuilder:
                  adaptive_window: bool = True,
                  min_window_size: int = 10,  # 50% de la taille de fenêtre par défaut
                  max_window_size: int = 30,  # 150% de la taille de fenêtre par défaut
-                 memory_config: Optional[Dict[str, Any]] = None):  # Configuration de mémoire
+                 memory_config: Optional[Dict[str, Any]] = None,  # Configuration de mémoire
+                 target_observation_size: Optional[int] = None):
         """
         Initialize the StateBuilder according to design specifications.
         
@@ -144,12 +145,17 @@ class StateBuilder:
         
         # Configuration de la taille de fenêtre
         self.base_window_size = window_size
-        self.window_size = window_size
+        # Configuration de la fenêtre fixe
+        self.window_size = 100  # Taille fixe de la fenêtre
         self.include_portfolio_state = include_portfolio_state
         self.normalize = normalize
         
-        # Calculer le nombre maximum de features
-        self.max_features = max(self.nb_features_per_tf.values())
+        # Maximum de features défini dans la config
+        # Déterminer le nombre maximum de features parmi tous les timeframes
+        self.max_features = max(len(features) for features in self.features_config.values()) if self.features_config else 0
+        
+        # Forme dynamique : (nombre de timeframes, fenêtre, max_features)
+        self.observation_shape = (len(self.timeframes), self.window_size, self.max_features)  
         
         # Configuration adaptative
         self.adaptive_window = adaptive_window
@@ -158,26 +164,22 @@ class StateBuilder:
         self.volatility_history = []
         self.volatility_window = 20
         self.timeframe_weights = {tf: 1.0 for tf in self.timeframes} # Initialisation des poids
-        
+
         # Configuration des scalers
         self.scaler_path = scaler_path
         self.scalers = {tf: None for tf in self.timeframes}
         self.feature_indices = {}
-        
-        # Initialisation des scalers et calcul de la forme d'observation
+
+        # Initialisation des scalers
         self._init_scalers()
-        
-        # Calcul de la forme d'observation
-        # Structure 3D: (timeframes, window_size, features)
-        # Ajout d'un canal pour le portfolio si activé
-        observation_channels = len(self.timeframes)
+
+        # The observation_shape for StateBuilder will be the 3D shape
+        self.total_flattened_observation_size = self.observation_shape[0] * self.observation_shape[1] * self.observation_shape[2]
         if self.include_portfolio_state:
-            observation_channels += 1
-            
-        self.observation_shape = (observation_channels, self.base_window_size, self.max_features)
-        
-        logger.info(f"Observation shape configured as: {self.observation_shape}")
-        
+            self.total_flattened_observation_size += 17
+
+        logger.info(f"StateBuilder initialized. Target flattened observation size: {self.total_flattened_observation_size}")
+        logger.info(f"Features per timeframe: {self.nb_features_per_tf}")
         logger.info(f"StateBuilder initialized with base_window_size={window_size}, "
                    f"adaptive_window={adaptive_window}, "
                    f"timeframes={self.timeframes}, "
@@ -462,62 +464,52 @@ class StateBuilder:
             # Build observations for each timeframe
             observations = self.build_observation(current_idx, data)
             
-            # Check if portfolio state should be included
-            if self.include_portfolio_state:
-                portfolio_state = self.build_portfolio_state(None)  # None car pas de portfolio_manager en test
-                observations['portfolio'] = portfolio_state
+            # Initialize output array with fixed shape
+            output = np.zeros(self.observation_shape, dtype=np.float32)
             
-            # Convert to 3D array avec optimisation de mémoire
-            obs_array = np.zeros(self.observation_shape, dtype=np.float32)
-            
-            # Fill in the data
-            # Fill the output array
-            for i, tf in enumerate(self.timeframes):
-                if tf not in observations:
-                    raise KeyError(f"Missing observation for timeframe {tf}")
+            # Fill the output array with observations
+            for i, (tf, obs) in enumerate(observations.items()):
+                if obs is not None and len(obs) > 0:
+                    # Take the most recent window_size observations
+                    obs = obs[-self.window_size:]
                     
-                obs = observations[tf]
-                
-                # Center the features if they have fewer columns than max_features
-                padding = self.max_features - obs.shape[1]
-                if padding > 0:
-                    left_pad = padding // 2
-                    right_pad = padding - left_pad
-                    obs = np.pad(obs, ((0, 0), (left_pad, right_pad)), 
-                               mode='constant', constant_values=0)
-                logger.debug(f"Observation for {tf} after feature padding. Shape: {obs.shape}, Dtype: {obs.dtype}, Content: {obs.flatten()[:5]}...")
-                
-                # Validate final placement
-                if obs_array[i, :, :].shape != obs.shape:
-                    raise RuntimeError(f"Shape mismatch after padding for {tf}: "
-                                     f"expected {obs_array[i, :, :].shape}, got {obs.shape}")
+                    # Ensure correct number of features
+                    if obs.shape[1] > self.max_features:
+                        obs = obs[:, :self.max_features]
+                    elif obs.shape[1] < self.max_features:
+                        # Pad with zeros if needed
+                        pad_width = ((0, 0), (0, self.max_features - obs.shape[1]))
+                        obs = np.pad(obs, pad_width, mode='constant')
                     
-                obs_array[i, :, :] = obs
-            
-            # Validate final output shape
-            if obs_array.shape != self.observation_shape:
-                raise RuntimeError(f"Final observation shape mismatch: "
-                                 f"expected {self.observation_shape}, got {obs_array.shape}")
+                    # Handle window size
+                    if obs.shape[0] < self.window_size:
+                        # Pad with zeros at the beginning
+                        pad_width = ((self.window_size - obs.shape[0], 0), (0, 0))
+                        obs = np.pad(obs, pad_width, mode='constant')
+                    elif obs.shape[0] > self.window_size:
+                        # Take the most recent observations
+                        obs = obs[-self.window_size:]
+                    
+                    # Store in output array
+                    output[i] = obs
         
             # Mettre à jour les métriques de mémoire
             current_memory = self._get_memory_usage_mb()
             self.memory_peak_mb = max(getattr(self, 'memory_peak_mb', 0), current_memory)
             self._update_performance_metrics('memory_peak_mb', self.memory_peak_mb)
         
-            return obs_array
+            return output
             
         except Exception as e:
             logger.error(f"Error building multi-channel observation: {str(e)}")
             raise
     
-    def get_observation_shape(self) -> Tuple[int, int, int]:
+    def get_observation_shape(self) -> Tuple[int, ...]:
         """
-        Get the shape of observations according to design specifications.
-        
-        Returns:
-            Tuple representing (n_timeframes, window_size, n_features)
+        Retourne la forme de l'observation.
+        Forme fixe : (3, 100, 36) pour (timeframes, fenêtre, features)
         """
-        return self.observation_shape
+        return len(self.timeframes), self.window_size, self.max_features
 
     def calculate_expected_flat_dimension(self, portfolio_included: bool = False) -> int:
         """
@@ -609,7 +601,7 @@ class StateBuilder:
             }
         }
     
-    def build_portfolio_state(self, portfolio_manager) -> Dict[str, float]:
+    def build_portfolio_state(self, portfolio_manager: Any) -> np.ndarray:
         """
         Build portfolio state information to include in observations.
         
@@ -617,43 +609,41 @@ class StateBuilder:
             portfolio_manager: Portfolio manager instance
             
         Returns:
-            Dictionary containing portfolio state information
+            Numpy array containing portfolio state information
         """
-        if not self.include_portfolio_state:
-            return {}
+        if not self.include_portfolio_state or portfolio_manager is None:
+            return np.zeros(17, dtype=np.float32)  # Return zero-padded portfolio state
         
         try:
-            portfolio_state = {
-                'cash': portfolio_manager.cash,
-                'total_value': portfolio_manager.total_value,
-                'returns': portfolio_manager.returns,
-                'sharpe_ratio': getattr(portfolio_manager, 'sharpe_ratio', 0.0),
-                'max_drawdown': getattr(portfolio_manager, 'max_drawdown', 0.0),
-                'num_positions': len(portfolio_manager.positions),
-                'position_value_ratio': (
-                    (portfolio_manager.total_value - portfolio_manager.cash) / 
-                    portfolio_manager.total_value if portfolio_manager.total_value > 0 else 0.0
-                )
-            }
+            metrics = portfolio_manager.get_metrics()
+            portfolio_state = [
+                metrics.get('cash', 0.0),
+                metrics.get('total_capital', 0.0),
+                metrics.get('total_pnl_pct', 0.0),  # Using total_pnl_pct as returns
+                metrics.get('sharpe_ratio', 0.0),
+                metrics.get('drawdown', 0.0),
+                len(metrics.get('positions', {})),
+                ((metrics.get('total_capital', 0.0) - metrics.get('cash', 0.0)) /
+                 metrics.get('total_capital', 0.0) if metrics.get('total_capital', 0.0) > 0 else 0.0)
+            ]
             
             # Add individual position information (up to 5 largest positions)
-            positions = getattr(portfolio_manager, 'positions', {})
-            sorted_positions = sorted(positions.items(), key=lambda x: abs(x[1]), reverse=True)[:5]
+            sorted_positions = sorted(metrics.get('positions', {}).items(), key=lambda x: abs(x[1].get('size', 0.0)), reverse=True)[:5]
             
-            for i, (asset, size) in enumerate(sorted_positions):
-                portfolio_state[f'position_{i}_size'] = size
-                portfolio_state[f'position_{i}_asset'] = hash(asset) % 1000  # Simple asset encoding
+            for i, (asset, position_obj) in enumerate(sorted_positions):
+                portfolio_state.append(position_obj.get('size', 0.0))
+                portfolio_state.append(hash(asset) % 1000)  # Simple asset encoding
             
             # Pad remaining position slots with zeros
             for i in range(len(sorted_positions), 5):
-                portfolio_state[f'position_{i}_size'] = 0.0
-                portfolio_state[f'position_{i}_asset'] = 0.0
+                portfolio_state.append(0.0)
+                portfolio_state.append(0.0)
             
-            return portfolio_state
-            
+            return np.array(portfolio_state, dtype=np.float32)
+        
         except Exception as e:
             logger.error(f"Error building portfolio state: {e}")
-            return {}
+            return np.zeros(17, dtype=np.float32)  # Return zero-padded portfolio state
     
     def validate_observation(self, observation: np.ndarray) -> bool:
         """
@@ -951,8 +941,32 @@ class StateBuilder:
                 observations[tf] = np.zeros((self.window_size, len(features)), dtype=np.float32)
                 continue
                 
-            # Get the window of data
-            window_data = df[features].iloc[current_idx - self.window_size:current_idx]
+            # Create a case-insensitive column mapping
+            column_mapping = {col.upper(): col for col in df.columns}
+            
+            # Log available and requested features for debugging
+            logger.debug(f"Available columns in {tf} data: {df.columns.tolist()}")
+            logger.debug(f"Requested features for {tf}: {features}")
+            
+            # Map features to actual column names (case-insensitive)
+            mapped_features = []
+            for f in features:
+                upper_f = f.upper()
+                if upper_f in column_mapping:
+                    mapped_features.append(column_mapping[upper_f])
+                    logger.debug(f"Mapped feature: '{f}' -> '{column_mapping[upper_f]}'")
+                else:
+                    logger.warning(f"Feature '{f}' not found in DataFrame columns")
+                    mapped_features.append(f)  # Will raise KeyError if not found
+            
+            # Get the window of data with mapped column names
+            try:
+                window_data = df[mapped_features].iloc[current_idx - self.window_size:current_idx]
+            except KeyError as e:
+                logger.error(f"Error accessing columns for {tf}: {e}")
+                logger.error(f"Available columns: {df.columns.tolist()}")
+                logger.error(f"Requested columns: {mapped_features}")
+                raise
             
             if window_data.empty:
                 logger.warning(f"Window data is empty for timeframe {tf} at index {current_idx}. Returning zero-padded observation for {tf}.")
@@ -980,7 +994,8 @@ class StateBuilder:
 
     def build_adaptive_observation(self, 
                                  current_idx: int, 
-                                 data: Dict[str, pd.DataFrame]) -> np.ndarray:
+                                 data: Dict[str, pd.DataFrame],
+                                 portfolio_manager: Any = None) -> np.ndarray:
         """
         Build observation with adaptive window sizing and timeframe weighting.
         
@@ -1001,18 +1016,19 @@ class StateBuilder:
         if not observations or any(not isinstance(obs, np.ndarray) or obs.size == 0 for obs in observations.values()):
             logger.warning("Observations dictionary is empty or contains empty arrays. Returning zero-padded observation.")
             logger.debug(f"Observations before weighting: {observations}")
-            return np.zeros(self.observation_space.shape, dtype=np.float32)
+            return np.zeros(self.observation_shape, dtype=np.float32)
         
         # Apply timeframe weighting
         weighted_observations = self.apply_timeframe_weighting(observations)
         
         # Build multi-channel observation with current window size
-        max_features = max(obs.shape[1] for obs in weighted_observations.values())
+        # Use self.max_features which is determined during initialization
+        max_features = self.max_features
         n_timeframes = len(self.timeframes)
         
-        # Use current adaptive window size
-        output = np.zeros((n_timeframes, self.window_size, max_features))
-        logger.debug(f"Output array initialized. Shape: {output.shape}, Dtype: {output.dtype}")
+        # Initialize a 1D array for the flattened observation
+        flattened_output = np.zeros(self.total_flattened_observation_size, dtype=np.float32)
+        current_offset = 0
         
         # Fill the output array
         for i, tf in enumerate(self.timeframes):
@@ -1025,9 +1041,11 @@ class StateBuilder:
                     obs = obs[-self.window_size:]
                 elif obs.shape[0] < self.window_size:
                     # Pad with zeros at the beginning
-                    padding = np.zeros((self.window_size - obs.shape[0], obs.shape[1]))
+                    padding = np.zeros((self.window_size - obs.shape[0], obs.shape[1]), dtype=np.float32)
                     obs = np.vstack([padding, obs])
-                logger.debug(f"Observation for {tf} after window size adjustment. Shape: {obs.shape}, Dtype: {obs.dtype}, Content: {obs.flatten()[:5]}...")
+                
+                # Debug log the observation shape
+                logger.debug(f"Observation for {tf}: shape={obs.shape}, features={obs.shape[1]}, max_features={max_features}")
                 
                 # Handle feature dimension padding
                 if obs.shape[1] < max_features:
@@ -1036,8 +1054,52 @@ class StateBuilder:
                     right_pad = padding - left_pad
                     obs = np.pad(obs, ((0, 0), (left_pad, right_pad)), 
                                mode='constant', constant_values=0)
-                logger.debug(f"Observation for {tf} after feature padding. Shape: {obs.shape}, Dtype: {obs.dtype}, Content: {obs.flatten()[:5]}...")
+                    logger.debug(f"Padded {tf} observation from {obs.shape[1]-padding} to {obs.shape[1]} features")
                 
-                output[i, :, :] = obs
-        
-        return output
+                # Make sure the observation has the correct number of features
+                if obs.shape[1] != max_features:
+                    logger.warning(f"Observation for {tf} has {obs.shape[1]} features, expected {max_features}. Adjusting...")
+                    obs = obs[:, :max_features]  # Truncate if too many features
+                    
+                # Flatten the current timeframe's observation and place it into the main flattened_output
+                tf_flattened_obs = obs.flatten()
+                expected_tf_size = self.window_size * max_features
+                
+                if tf_flattened_obs.size != expected_tf_size:
+                    logger.warning(f"Timeframe {tf} flattened size mismatch: {tf_flattened_obs.size} vs expected {expected_tf_size}. Adjusting.")
+                    if tf_flattened_obs.size < expected_tf_size:
+                        tf_padding = np.zeros(expected_tf_size - tf_flattened_obs.size, dtype=tf_flattened_obs.dtype)
+                        tf_flattened_obs = np.concatenate([tf_flattened_obs, tf_padding])
+                    else:
+                        tf_flattened_obs = tf_flattened_obs[:expected_tf_size]
+                
+                current_offset += expected_tf_size
+
+        # Add portfolio state to the end of the flattened output
+        if self.include_portfolio_state:
+            portfolio_state_array = self.build_portfolio_state(portfolio_manager)
+            
+            # Ensure portfolio state array has the expected size (17 features)
+            expected_portfolio_size = 17
+            if portfolio_state_array.size != expected_portfolio_size:
+                logger.warning(f"Portfolio state size mismatch. Expected {expected_portfolio_size}, got {portfolio_state_array.size}. Adjusting.")
+                if portfolio_state_array.size < expected_portfolio_size:
+                    portfolio_padding = np.zeros(expected_portfolio_size - portfolio_state_array.size, dtype=np.float32)
+                    portfolio_state_array = np.concatenate([portfolio_state_array, portfolio_padding])
+                else:
+                    portfolio_state_array = portfolio_state_array[:expected_portfolio_size]
+
+            # Append portfolio state to the flattened output
+            flattened_output[current_offset : current_offset + expected_portfolio_size] = portfolio_state_array
+            current_offset += expected_portfolio_size
+
+        # Final check on the total size of the flattened output
+        if flattened_output.size != self.total_flattened_observation_size:
+            logger.error(f"Final flattened output size mismatch. Expected {self.total_flattened_observation_size}, got {flattened_output.size}. Adjusting.")
+            if flattened_output.size < self.total_flattened_observation_size:
+                final_padding = np.zeros(self.total_flattened_observation_size - flattened_output.size, dtype=np.float32)
+                flattened_output = np.concatenate([flattened_output, final_padding])
+            else:
+                flattened_output = flattened_output[:self.total_flattened_observation_size]
+
+        return flattened_output

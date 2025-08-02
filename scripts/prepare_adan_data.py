@@ -12,7 +12,7 @@ import time # Added import for time.sleep
 warnings.filterwarnings('ignore')
 
 # Configuration
-PAIRS = ['BTC/USDT', 'ETH/USDT', 'SOL/USDT', 'XRP/USDT', 'ADA/USDT'] # Changed to CCXT format
+PAIRS = ['BTC/USDT', 'ETH/USDT', 'SOL/USDT', 'XRP/USDT', 'ADA/USDT']
 TIMEFRAMES = ['5m', '1h', '4h']
 # PERIOD = '2y'  # Période de données à télécharger - will be replaced by start_date
 START_DATE = datetime.datetime(2020, 1, 1) # Fetch data from Jan 1, 2020 for 4-5 years
@@ -122,26 +122,98 @@ def download_data(pair: str, interval: str) -> pd.DataFrame: # Removed 'period' 
         return None
 
 
+def standardize_column_names(df: pd.DataFrame) -> pd.DataFrame:
+    """Standardise les noms de colonnes pour correspondre à la configuration."""
+    # Sauvegarder les noms de colonnes originaux
+    original_columns = df.columns.tolist()
+    
+    # Convertir tous les noms de colonnes en majuscules pour la correspondance
+    df.columns = [col.upper() for col in df.columns]
+    
+    # Mappage des noms d'indicateurs vers les noms standardisés
+    column_mapping = {
+        'MACDH_12_26_9': 'MACD_HIST_12_26_9',
+        'MACDS_12_26_9': 'MACD_SIGNAL_12_26_9',
+        'BB_UPPER': 'BB_UPPER_20_2.0',
+        'BB_MIDDLE': 'BB_MIDDLE_20_2.0',
+        'BB_LOWER': 'BB_LOWER_20_2.0',
+        'SUPERTRENDD_14_3.0': 'SUPERTREND_14_3.0',
+        'SUPERTRENDD_14_2.0': 'SUPERTREND_14_2.0',
+        'SUPERTRENDL_14_3.0': 'SUPERTREND_LB_14_3.0',
+        'SUPERTRENDL_14_2.0': 'SUPERTREND_LB_14_2.0',
+        'SUPERTREND_14_3.0': 'SUPERTREND_14_3.0',
+        'SUPERTREND_14_2.0': 'SUPERTREND_14_2.0',
+        'ISA_9': 'ISA_9',
+        'ISB_26': 'ISB_26',
+        'ITS_9': 'ITS_9',
+        'IKS_26': 'IKS_26',
+        'ICS_26': 'ICS_26',
+        'PSARL_0.02_0.2': 'PSAR_LONG_0.02_0.2',
+        'PSARS_0.02_0.2': 'PSAR_SHORT_0.02_0.2',
+        'PSAR_0.02_0.2': 'PSAR_0.02_0.2',
+        'VWAP_D': 'VWAP_D',
+        'VWAP_W': 'VWAP_W',
+        # Ajout des mappings pour STOCH avec différentes variations de casse
+        'STOCHK_14_3_3': 'STOCHk_14_3_3',
+        'STOCHD_14_3_3': 'STOCHd_14_3_3',
+        'STOCHK_14_3': 'STOCHk_14_3_3',
+        'STOCHD_14_3': 'STOCHd_14_3_3',
+        'STOCH_K_14_3_3': 'STOCHk_14_3_3',
+        'STOCH_D_14_3_3': 'STOCHd_14_3_3',
+    }
+    
+    # Appliquer le mapping
+    rename_dict = {k: v for k, v in column_mapping.items() if k in df.columns}
+    if rename_dict:
+        print(f"  Renommage des colonnes: {rename_dict}")
+        df = df.rename(columns=rename_dict)
+    
+    # Afficher les colonnes avant et après le renommage
+    print(f"  Colonnes avant standardisation: {original_columns}")
+    print(f"  Colonnes après standardisation: {df.columns.tolist()}")
+    
+    return df
+
 def calculate_indicators(df: pd.DataFrame, interval: str) -> pd.DataFrame:
     """Calcule les indicateurs techniques en fonction du timeframe"""
     if df is None or df.empty:
         print(f"  calculate_indicators: Input DataFrame is empty for interval {interval}.")
         return None
 
-    initial_cols = df.columns.tolist()
-    print(f"  calculate_indicators: Initial DataFrame shape: {df.shape}, columns: {initial_cols}")
+    # Standardiser les noms de colonnes d'entrée
+    df.columns = [col.upper() for col in df.columns]
+    
+    # S'assurer que les colonnes nécessaires sont présentes
+    required_columns = ['OPEN', 'HIGH', 'LOW', 'CLOSE', 'VOLUME']
+    missing_cols = [col for col in required_columns if col not in df.columns]
+    if missing_cols:
+        print(f"  Erreur: Colonnes manquantes dans les données: {missing_cols}")
+        return None
+
+    print(f"  calculate_indicators: Initial DataFrame shape: {df.shape}, columns: {df.columns.tolist()}")
     print(f"  calculate_indicators: Initial NaN count: {df.isnull().sum().sum()}")
 
     # Copie pour éviter les modifications sur place
     df = df.copy()
+    
+    # S'assurer que l'index est un DateTimeIndex
+    if not isinstance(df.index, pd.DatetimeIndex):
+        if 'DATE' in df.columns:
+            df['DATE'] = pd.to_datetime(df['DATE'])
+            df.set_index('DATE', inplace=True)
+        else:
+            df.index = pd.to_datetime(df.index)
+    
+    # Trier par date pour s'assurer de l'ordre chronologique
+    df.sort_index(inplace=True)
 
-    # Store columns before adding indicators to check NaNs only for new columns
+    # Stocker les colonnes avant d'ajouter des indicateurs
     original_columns = df.columns.tolist()
 
-    # Calcul des indicateurs communs
-    df['returns'] = df['Close'].pct_change()
+    # Calculer les indicateurs communs
+    df['RETURNS'] = df['CLOSE'].pct_change()
 
-    # Indicateurs spécifiques au timeframe
+    # Calculer les indicateurs spécifiques au timeframe
     if interval == '5m':
         # Indicateurs pour le scalping
         df.ta.rsi(length=14, append=True)
@@ -158,59 +230,132 @@ def calculate_indicators(df: pd.DataFrame, interval: str) -> pd.DataFrame:
         # Indicateurs pour le swing trading
         df.ta.rsi(length=14, append=True)
         df.ta.macd(fast=12, slow=26, signal=9, append=True)
+        # Ajouter manuellement l'histogramme MACD s'il n'est pas généré automatiquement
+        if 'MACD_12_26_9' in df.columns and 'MACDs_12_26_9' in df.columns:
+            df['MACD_HIST_12_26_9'] = df['MACD_12_26_9'] - df['MACDs_12_26_9']
         df.ta.cci(length=20, append=True)
         df.ta.mfi(length=14, append=True)
         df.ta.ema(length=50, append=True)
         df.ta.ema(length=100, append=True)
         df.ta.sma(length=200, append=True)
         df.ta.ichimoku(tenkan=9, kijun=26, senkou=52, append=True)
+        # Renommer les colonnes Ichimoku pour correspondre à la configuration
+        ichimoku_columns = {
+            'ISA_9': 'ISA_9',
+            'ISB_26': 'ISB_26',
+            'ITS_9': 'ITS_9',
+            'IKS_26': 'IKS_26',
+            'ICS_26': 'ICS_26',
+            'PSARl_0.02_0.2': 'PSAR_LONG_0.02_0.2',
+            'PSARs_0.02_0.2': 'PSAR_SHORT_0.02_0.2'
+        }
         df.ta.psar(af0=0.02, af=0.2, max_af=0.2, append=True)
 
     elif interval == '4h':
         # Indicateurs pour le position trading
         df.ta.rsi(length=14, append=True)
         df.ta.macd(fast=12, slow=26, signal=9, append=True)
+        # Ajouter manuellement l'histogramme MACD s'il n'est pas généré automatiquement
+        if 'MACD_12_26_9' in df.columns and 'MACDs_12_26_9' in df.columns:
+            df['MACD_HIST_12_26_9'] = df['MACD_12_26_9'] - df['MACDs_12_26_9']
         df.ta.cci(length=20, append=True)
         df.ta.mfi(length=14, append=True)
         df.ta.sma(length=200, append=True)
         df.ta.ema(length=50, append=True)
         df.ta.ichimoku(tenkan=9, kijun=26, senkou=52, append=True)
         df.ta.supertrend(length=14, multiplier=3.0, append=True)
+        # Renommer les colonnes Supertrend pour correspondre à la configuration
+        if 'SUPERTd_14_3.0' in df.columns:
+            df.rename(columns={'SUPERTd_14_3.0': 'SUPERTREND_14_3.0'}, inplace=True)
         df.ta.psar(af0=0.02, af=0.2, max_af=0.2, append=True)
 
-    # Indicateurs communs à all timeframes
+    # Indicateurs communs à tous les timeframes
     df.ta.atr(length=14, append=True)
     df.ta.bbands(length=20, std=2.0, append=True)
     df.ta.obv(append=True)
 
+    # Ajouter les indicateurs conditionnels
     if interval in ['1h', '4h']:
         df.ta.vwap(anchor='D', append=True)  # VWAP journalier
+        # Renommer la colonne VWAP pour correspondre à la configuration
+        if 'VWAP_D' in df.columns:
+            df.rename(columns={'VWAP_D': 'VWAP_D'}, inplace=True)
+    
     if interval == '4h':
         df.ta.vwap(anchor='W', append=True)  # VWAP hebdomadaire
+        # Renommer la colonne VWAP pour correspondre à la configuration
+        if 'VWAP_W' in df.columns:
+            df.rename(columns={'VWAP_W': 'VWAP_W'}, inplace=True)
 
+    # Standardisation des noms de colonnes
+    df = standardize_column_names(df)
+    
+    # Correction des noms de colonnes pour correspondre à la configuration
+    df = df.rename(columns={
+        'STOCHK_14_3_3': 'STOCHk_14_3_3',
+        'STOCHD_14_3_3': 'STOCHd_14_3_3'
+    })
+    
+    # Calcul des indicateurs et remplir les valeurs manquantes
     print(f"  calculate_indicators: DataFrame shape after indicator calculation: {df.shape}")
     
-    # Check NaN count for newly added indicator columns
+    # Vérifier les valeurs manquantes dans les nouvelles colonnes
     new_columns = [col for col in df.columns if col not in original_columns]
     print(f"  calculate_indicators: NaN count per new indicator column:")
-    for col in new_columns:
-        nan_count = df[col].isnull().sum()
-        if nan_count > 0:
-            print(f"    {col}: {nan_count} NaNs")
+    nan_counts = df[new_columns].isnull().sum()
+    for col, count in nan_counts.items():
+        if count > 0:
+            print(f"    {col}: {count} NaNs")
 
-    print(f"  calculate_indicators: Total NaN count after indicator calculation: {df.isnull().sum().sum()}")
+    total_nans = nan_counts.sum()
+    print(f"  calculate_indicators: Total NaN count after indicator calculation: {total_nans}")
 
-    # Fill NaN values
-    df.fillna(method='ffill', inplace=True) # Forward-fill NaNs
-    df.fillna(0, inplace=True) # Fill any remaining NaNs (e.g., at the very beginning) with 0
-    print(f"  calculate_indicators: Total NaN count after filling: {df.isnull().sum().sum()}")
-
+    # Remplir les valeurs manquantes
+    df.fillna(method='ffill', inplace=True)  # Remplir avec la dernière valeur valide
+    df.fillna(0, inplace=True)  # Remplir les valeurs restantes avec 0
+    
+    total_nans_after = df.isnull().sum().sum()
+    print(f"  calculate_indicators: Total NaN count after filling: {total_nans_after}")
+    
+    # Supprimer les colonnes en double tout en conservant l'ordre
+    df = df.loc[:, ~df.columns.duplicated()]
+    
+    # Sélectionner uniquement les colonnes nécessaires selon la configuration
+    # Note: Les noms de colonnes doivent correspondre exactement à la configuration, y compris la casse
+    expected_columns = {
+        '5m': ['OPEN', 'HIGH', 'LOW', 'CLOSE', 'VOLUME', 'RSI_14', 'STOCHk_14_3_3', 'STOCHd_14_3_3', 
+               'CCI_20_0.015', 'ROC_9', 'MFI_14', 'EMA_5', 'EMA_20', 'SUPERTREND_14_2.0', 'PSAR_0.02_0.2'],
+        '1h': ['OPEN', 'HIGH', 'LOW', 'CLOSE', 'VOLUME', 'RSI_14', 'MACD_12_26_9', 'MACD_HIST_12_26_9', 
+               'CCI_20_0.015', 'MFI_14', 'EMA_50', 'EMA_100', 'SMA_200', 'ISA_9', 'ISB_26', 
+               'ITS_9', 'IKS_26', 'ICS_26', 'PSAR_0.02_0.2'],
+        '4h': ['OPEN', 'HIGH', 'LOW', 'CLOSE', 'VOLUME', 'RSI_14', 'MACD_12_26_9', 'CCI_20_0.015', 
+               'MFI_14', 'EMA_50', 'SMA_200', 'ISA_9', 'ISB_26', 'ITS_9', 'IKS_26', 'ICS_26', 
+               'SUPERTREND_14_3.0', 'PSAR_0.02_0.2']
+    }
+    
+    # S'assurer que toutes les colonnes attendues sont présentes
+    available_columns = df.columns.tolist()
+    missing_columns = [col for col in expected_columns.get(interval, []) if col not in available_columns]
+    
+    if missing_columns:
+        print(f"  Attention: Colonnes manquantes dans les données générées: {missing_columns}")
+        # Ajouter des colonnes vides pour les indicateurs manquants
+        for col in missing_columns:
+            df[col] = 0.0
+    
+    # Sélectionner uniquement les colonnes attendues
+    selected_columns = [col for col in expected_columns.get(interval, []) if col in df.columns]
+    df = df[selected_columns]
+    
+    print(f"  calculate_indicators: Final DataFrame shape: {df.shape}")
+    print(f"  calculate_indicators: Final columns: {df.columns.tolist()}")
+    
     return df
 
 
 def process_pair(pair: str):
     """Traite une paire de trading pour tous les timeframes"""
-    pair_dir = INDICATORS_DIR / pair.replace('/', '')  # Adjusted for CCXT pair format
+    pair_dir = INDICATORS_DIR / pair.replace('/', '')
     pair_dir.mkdir(exist_ok=True)
 
     for tf in TIMEFRAMES:
@@ -253,8 +398,9 @@ def process_pair(pair: str):
             if split_df.empty:
                 print(f"  Warning: {split} DataFrame is empty for {pair} - {tf}. Not saving.")
                 continue
-            save_dir = INDICATORS_DIR / split / pair.replace('/', '') / f'{tf}.parquet'  # Adjusted for CCXT pair format
+            save_dir = INDICATORS_DIR / split / pair.replace('/', '') / f'{tf}.parquet'
             save_dir.parent.mkdir(parents=True, exist_ok=True)
+            print(f"  Sauvegarde dans: {save_dir.absolute()}")
             split_df.to_parquet(save_dir)
 
         print(f"  ✓ Données sauvegardées pour {pair} - {tf}")

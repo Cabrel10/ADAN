@@ -22,7 +22,7 @@ paths:
   data_dir: "/home/morningstar/Documents/trading/data"  # Chemin absolu vers les données
   raw_data_dir: "${paths.data_dir}/raw"
   processed_data_dir: "${paths.data_dir}/processed"
-  indicators_data_dir: "${paths.data_dir}/processed/indicators"
+  indicators_data_dir: "/home/morningstar/Documents/trading/bot/data/processed/indicators"
   final_data_dir: "${paths.data_dir}/final"
   models_dir: "${paths.base_dir}/models"
   trained_models_dir: "${paths.models_dir}/rl_agents"
@@ -39,12 +39,12 @@ data:
   # Structure des fichiers de données
   file_structure:
     pattern: "{asset}/{timeframe}.parquet"
-    assets: ["BTC", "ETH", "SOL", "XRP", "ADA"]
+    assets: ["BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT", "ADAUSDT"]
     timeframes: ["5m", "1h", "4h"]
   features_per_timeframe:
     "5m": ["OPEN", "HIGH", "LOW", "CLOSE", "VOLUME", "RSI_14", "STOCHk_14_3_3", "STOCHd_14_3_3", "CCI_20_0.015", "ROC_9", "MFI_14", "EMA_5", "EMA_20", "SUPERTREND_14_2.0", "PSAR_0.02_0.2"]
-    "1h": ["OPEN", "HIGH", "LOW", "CLOSE", "VOLUME", "RSI_14", "MACD_12_26_9", "MACD_HIST_12_26_9", "CCI_20_0.015", "MFI_14", "EMA_50", "EMA_100", "SMA_200", "ISA_9", "ISB_26", "ITS_9", "IKS_26", "ICS_26", "PSAR_0.02_0.2"]
-    "4h": ["OPEN", "HIGH", "LOW", "CLOSE", "VOLUME", "RSI_14", "MACD_12_26_9", "CCI_20_0.015", "MFI_14", "EMA_50", "SMA_200", "ISA_9", "ISB_26", "ITS_9", "IKS_26", "ICS_26", "SUPERTREND_14_3.0", "PSAR_0.02_0.2"]
+    "1h": ["OPEN", "HIGH", "LOW", "CLOSE", "VOLUME", "RSI_14", "CCI_20_0.015", "MFI_14", "EMA_50", "EMA_100", "SMA_200"]
+    "4h": ["OPEN", "HIGH", "LOW", "CLOSE", "VOLUME", "RSI_14", "CCI_20_0.015", "MFI_14", "EMA_50", "SMA_200"]
 
 portfolio:
   initial_balance: 20.0
@@ -57,7 +57,7 @@ workers:
   w1: # Worker 1 - Tendance long terme
     name: "Temporal Precision"
     description: "Scalping optimisé sur micro-régimes de marché."
-    assets: ["BTC", "ETH"]
+    assets: ["BTCUSDT", "ETHUSDT"]
     timeframes: ["5m"]
     data_split: "train"
     trading_mode: "spot"
@@ -80,7 +80,7 @@ workers:
   w2: # Worker 2 - Macro-Regime Explorer
     name: "Low-Frequency Sentinel"
     description: "Apprentissage des tendances de fond (bull/bear/range)."
-    assets: ["BTC", "ETH", "SOL"]
+    assets: ["BTCUSDT", "ETHUSDT", "SOLUSDT"]
     timeframes: ["1h", "4h"]
     data_split: "train"
     trading_mode: "spot"
@@ -103,7 +103,7 @@ workers:
   w3: # Worker 3 - Stress Testeur
     name: "Rug-Pull Resistant"
     description: "Entraînement sur des conditions de marché extrêmes."
-    assets: ["BTC", "ETH", "XRP", "ADA"]
+    assets: ["BTCUSDT", "ETHUSDT", "XRPUSDT", "ADAUSDT"]
     timeframes: ["5m", "1h"]
     data_split: "train"
     trading_mode: "spot"
@@ -131,7 +131,7 @@ workers:
   w4: # Worker 4 - Cross-Market Arbitrageur
     name: "Multi-Asset Optimizer"
     description: "Optimisation de l'allocation entre plusieurs actifs."
-    assets: ["BTC", "ETH", "SOL", "XRP", "ADA"]
+    assets: ["BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT", "ADAUSDT"]
     timeframes: ["5m", "4h"]
     data_split: "train"
     trading_mode: "spot"
@@ -281,16 +281,39 @@ environment:
   max_steps: 100
   assets: ["BTC", "ETH", "SOL", "XRP", "ADA"]
   observation:
-    shape: [3, 50, 15]  # 3 timeframes, 50 timesteps, 15 features
-    window_size: 50
-    warmup_steps: 49  # window_size - 1
-    timeframes: ["5m", "1h", "4h"]
+    shape: [3, 100, 36]  # 3 timeframes, 100 timesteps, max 36 features
+    window_size: 100     # Taille fixe de la fenêtre d'observation
+    warmup_steps: 99     # window_size - 1
+    timeframes: ["5m", "1h", "4h"]  # Les 3 timeframes utilisés
     features:
-      base: ["open", "high", "low", "close", "volume", "minutes_since_update"]
+      base: ["OPEN", "HIGH", "LOW", "CLOSE", "VOLUME", "returns"]
       indicators:
-        "5m": ["RSI_14", "STOCH_14_3", "CCI_20", "ROC_9", "MFI_14", "EMA_5", "EMA_20", "SUPERTREND_14_2.0", "PSAR_0.02_0.2"]
-        "1h": ["RSI_14", "MACD_12_26_9", "MACD_HIST_12_26_9", "CCI_20", "MFI_14", "EMA_50", "EMA_100", "SMA_200", "ICHIMOKU_9_26_52", "PSAR_0.02_0.2"]
-        "4h": ["RSI_14", "MACD_12_26_9", "CCI_20", "MFI_14", "EMA_50", "SMA_200", "ICHIMOKU_9_26_52", "SUPERTREND_14_3.0", "PSAR_0.02_0.2"]
+        "5m": 
+          - "RSI_14"
+          - "STOCHk_14_3_3"
+          - "STOCHd_14_3_3"
+          - "CCI_20_0.015"
+          - "ROC_9"
+          - "MFI_14"
+          - "EMA_5"
+          - "EMA_20"
+          - "SUPERTREND_14_2.0"
+          - "PSAR_0.02_0.2"
+        "1h":
+          - "RSI_14"
+          - "CCI_20_0.015"
+          - "MFI_14"
+          - "EMA_50"
+          - "EMA_100"
+          - "SMA_200"
+        "4h":
+          - "RSI_14"
+          - "CCI_20_0.015"
+          - "MFI_14"
+          - "SMA_200"
+          - "EMA_50"
+          - "VWAP_D"
+          - "VWAP_W"
   mode: "backtest"
   base_currency: "USDT"
   memory:
@@ -313,11 +336,11 @@ environment:
       max_risk_per_trade_pct: 1.0
       max_asset_allocation_pct: 20.0
       concentration_limits:
-        BTC: 30.0
-        ETH: 25.0
-        SOL: 20.0
-        XRP: 15.0
-        ADA: 10.0
+        BTCUSDT: 30.0
+        ETHUSDT: 25.0
+        SOLUSDT: 20.0
+        XRPUSDT: 15.0
+        ADAUSDT: 10.0
       take_profit:
         enabled: true
         risk_reward_ratio: 2.0

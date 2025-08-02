@@ -19,7 +19,7 @@ import yaml
 # Ajouter le répertoire parent au PYTHONPATH pour pouvoir importer les modules du package
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 
-from adan_trading_bot.common.custom_logger import setup_logging
+from adan_trading_bot.common.custom_logger import setup_logging as setup_logger
 
 
 def parse_arguments():
@@ -78,7 +78,11 @@ def main():
         sys.exit(1)
     
     # Configuration du logger
-    logger = setup_logger("main", log_level=["ERROR", "WARNING", "INFO", "DEBUG"][args.verbose])
+    log_levels = [logging.ERROR, logging.WARNING, logging.INFO, logging.DEBUG]
+    logger = setup_logger(
+        config_path=os.path.join(os.path.dirname(__file__), "..", "config", "logging_config.yaml"),
+        default_level=log_levels[args.verbose]
+    )
     
     logger.info(f"Démarrage d'ADAN en mode {args.mode}")
     

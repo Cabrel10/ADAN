@@ -142,51 +142,25 @@ class ChunkedDataLoader:
         Raises:
             FileNotFoundError: Si le fichier n'est trouvé dans aucun des emplacements
         """
-        try:
-            # Liste des emplacements à essayer
-            possible_paths = []
-            
-            # 1. Chemin de base depuis la configuration
-            if "paths" in self.config and "base_dir" in self.config["paths"]:
-                base_dir = Path(self.config["paths"]["base_dir"]).expanduser().resolve()
-                possible_paths.append(base_dir / "data" / "processed" / "indicators" / asset / f"{timeframe}.parquet")
-                
-            # 2. Chemin depuis indicators_data_dir
-            if "paths" in self.config and "indicators_data_dir" in self.config["paths"]:
-                indicators_dir = Path(self.config["paths"]["indicators_data_dir"]).expanduser().resolve()
-                possible_paths.append(indicators_dir / asset / f"{timeframe}.parquet")
-            
-            # 3. Chemin relatif au répertoire courant
-            possible_paths.append(Path.cwd() / "data" / "processed" / "indicators" / asset / f"{timeframe}.parquet")
-            
-            # 4. Chemin relatif pour compatibilité ascendante
-            possible_paths.append(Path.cwd() / "indicators" / asset / f"{timeframe}.parquet")
-            
-            # Essayer chaque chemin jusqu'à en trouver un qui existe
-            for file_path in possible_paths:
-                file_path = file_path.resolve()
-                if file_path.exists():
-                    logger.info(f"Fichier trouvé à l'emplacement: {file_path}")
-                    return file_path
-                else:
-                    logger.debug(f"Fichier non trouvé à l'emplacement: {file_path}")
-                    logger.debug(f"Attempting to load file: {file_path}")
-                    logger.debug(f"Attempting to load file: {file_path}")
-            
-            # Si aucun chemin n'a fonctionné, essayer de créer le répertoire
-            last_path = possible_paths[0]
-            try:
-                last_path.parent.mkdir(parents=True, exist_ok=True)
-                logger.warning(f"Aucun fichier trouvé, création du répertoire: {last_path.parent}")
-                return last_path
-            except Exception as e:
-                logger.error(f"Impossible de créer le répertoire {last_path.parent}: {e}")
-                raise FileNotFoundError(f"Impossible de trouver ou créer le fichier pour {asset} {timeframe} dans aucun des emplacements: {[str(p) for p in possible_paths]}")
+        # Mapping for asset names to file system names (e.g., BTC -> BTCUSDT)
+        asset_mapping = {
+            "BTC": "BTCUSDT",
+            "ETH": "ETHUSDT",
+            "SOL": "SOLUSDT",
+            "XRP": "XRPUSDT",
+            "ADA": "ADAUSDT",
+        }
+        # Use the mapped asset name for file path construction
+        file_system_asset = asset_mapping.get(asset, asset)
 
-        except Exception as e:
-            error_msg = f"Erreur lors de la construction du chemin des données pour {asset} {timeframe}: {str(e)}"
-            logger.error(error_msg)
-            raise FileNotFoundError(error_msg) from e
+        indicators_dir = Path(self.config["paths"]["indicators_data_dir"]).expanduser().resolve()
+        file_path = indicators_dir / self.data_split / file_system_asset / f"{timeframe}.parquet"
+
+        if file_path.exists():
+            logger.info(f"Fichier trouvé à l'emplacement: {file_path}")
+            return file_path
+        else:
+            raise FileNotFoundError(f"Fichier introuvable: {file_path}")
 
     def load_chunk(self, chunk_index: int = 0) -> Dict[str, Dict[str, pd.DataFrame]]:
         """

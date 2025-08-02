@@ -12,8 +12,8 @@ class TestDynamicSizingIntegration(unittest.TestCase):
                 'min_trade_size': 0.001,
                 'min_notional_value': 10.0,
                 'max_notional_value': 100000.0,
-                'stop_loss': 5.0,
-                'take_profit': 10.0,
+                'stop_loss_pct': 5.0,
+                'take_profit_pct': 10.0,
                 'futures_enabled': False,
                 'commission_pct': 0.1
             },

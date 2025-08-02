@@ -98,19 +98,16 @@ class SharedExperienceBuffer:
             exp_copy = {k: self._make_serializable(v) for k, v in experience.items()}
 
             if len(self.buffer) < self.buffer_size:
+                idx = len(self.buffer)
                 self.buffer.append(exp_copy)
-                self.priorities.append(0.0)  # Initialisé à 0, mis à jour ci-dessous
+                self.priorities.append(priority)  # Initialisé à 0, mis à jour ci-dessous
             else:
-                pos = self._shared_state['pos']
-                self.buffer[pos] = exp_copy
-                self.priorities[pos] = 0.0
+                idx = self._shared_state['pos']
+                self.buffer[idx] = exp_copy
+                self.priorities[idx] = priority
 
                 # Mettre à jour la position pour le prochain ajout
-                self._shared_state['pos'] = (pos + 1) % self.buffer_size
-            
-            # Mettre à jour la priorité
-            idx = len(self.buffer) - 1 if len(self.buffer) < self.buffer_size else pos
-            self.priorities[idx] = priority
+                self._shared_state['pos'] = (idx + 1) % self.buffer_size
             self._shared_state['max_priority'] = max(self._shared_state['max_priority'], priority)
             
             # Mettre à jour les compteurs et horodatages

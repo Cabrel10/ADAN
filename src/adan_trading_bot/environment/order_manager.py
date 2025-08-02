@@ -72,7 +72,7 @@ class OrderManager:
         Returns:
             The realized PnL from closing the position.
         """
-        if not portfolio.positions[asset].is_open:
+        if asset not in portfolio.positions or not portfolio.positions[asset].is_open:
             logger.warning(f"Cannot close a position for {asset}, none is open.")
             return 0.0
 

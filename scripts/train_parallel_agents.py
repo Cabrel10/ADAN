@@ -54,17 +54,26 @@ def setup_logging() -> logging.Logger:
     # Configurer le format des logs
     log_format = "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
     logging.basicConfig(
-        level=logging.INFO,
+        level=logging.DEBUG,  # Set to DEBUG to capture all messages
         format=log_format,
         handlers=[
-            logging.FileHandler(log_file),
+            logging.FileHandler(log_file, mode='w'),  # Overwrite log file
             logging.StreamHandler(),
         ],
     )
 
     # Configurer le logger pour ce module
     logger = logging.getLogger(__name__)
-    logger.setLevel(logging.DEBUG)
+    
+    # Set specific log levels for verbose modules
+    logging.getLogger('adan_trading_bot').setLevel(logging.DEBUG)
+    logging.getLogger('adan_trading_bot.environment.multi_asset_chunked_env').setLevel(logging.DEBUG)
+    logging.getLogger('adan_trading_bot.data_processing.state_builder').setLevel(logging.DEBUG)
+    
+    # Disable excessive logging from libraries
+    logging.getLogger('matplotlib').setLevel(logging.WARNING)
+    logging.getLogger('tensorflow').setLevel(logging.WARNING)
+    logging.getLogger('stable_baselines3').setLevel(logging.INFO)
 
     return logger
 
@@ -85,44 +94,41 @@ def load_base_config(
         config = yaml.safe_load(f)
 
     # Résoudre les variables de chemin
-    def resolve_paths(node):
+    def resolve_paths(node, config_root):
         if isinstance(node, dict):
             for key, value in node.items():
-                node[key] = resolve_paths(value)
+                node[key] = resolve_paths(value, config_root)
         elif isinstance(node, list):
             for i, item in enumerate(node):
-                node[i] = resolve_paths(item)
+                node[i] = resolve_paths(item, config_root)
         elif isinstance(node, str):
-            # Regex pour trouver les variables comme ${section.key}
             import re
-
-            match = re.search(r"\$\{(.+?)\}", node)
-            if match:
+            # Loop to handle multiple and nested variables
+            # We limit to 10 iterations to prevent infinite loops
+            for _ in range(10):
+                match = re.search(r'\$\{(.+?)\}', node)
+                if not match:
+                    break
+                
                 path_variable = match.group(1)
-                keys = path_variable.split(".")
-                value = config
+                keys = path_variable.split('.')
+                resolved_value = config_root
                 try:
                     for k in keys:
-                        value = value[k]
-                    # Remplacer la variable par sa valeur résolue
-                    if path_variable.startswith("paths.") or path_variable.startswith(
-                        "data.data_dir"
-                    ):
-                        # Pour tous les chemins, utiliser le chemin absolu du projet
-                        # Supprimer le préfixe ADAN/ si présent
-                        if isinstance(value, str) and value.startswith("ADAN/"):
-                            value = value[5:]  # Remove 'ADAN/' prefix
-                        # Si c'est un chemin relatif, le rendre absolu
-                        if isinstance(value, str) and not os.path.isabs(value):
-                            value = os.path.join(PROJECT_ROOT, value)
-                        return value
-                    return node.replace(match.group(0), value)
-                except KeyError:
-                    # Laisser la variable telle quelle si non trouvée
-                    return node
+                        resolved_value = resolved_value[k]
+                    
+                    # If the resolved value is a path and not absolute, make it absolute
+                    if isinstance(resolved_value, str) and path_variable.startswith('paths.') and not os.path.isabs(resolved_value):
+                        resolved_value = os.path.join(PROJECT_ROOT, resolved_value)
+
+                    # Replace the variable with its resolved value
+                    node = node.replace(match.group(0), str(resolved_value))
+                except (KeyError, TypeError):
+                    # If the key is not found, leave the variable as is and break the loop
+                    break
         return node
 
-    config = resolve_paths(config)
+    config = resolve_paths(config, config)
 
     # Appliquer les paramètres de l'override si fournis
     if config_override:

@@ -39,8 +39,8 @@ class TestConfigLoading(unittest.TestCase):
             self.assertIn('trading', config)
             self.assertIn('workers', config['trading'])
             trading_config = config['trading']['workers'][worker_key]
-            self.assertIn('stop_loss', trading_config)
-            self.assertIn('take_profit', trading_config)
+            self.assertIn('stop_loss_pct', trading_config)
+            self.assertIn('take_profit_pct', trading_config)
             self.assertIn('position_size_pct', trading_config)
 
 if __name__ == '__main__':

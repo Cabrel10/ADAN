@@ -65,7 +65,7 @@ class PortfolioManager:
     in the environment configuration. Also tracks performance per data chunk
     for reward shaping and learning purposes.
     """
-    def __init__(self, env_config: Dict[str, Any]) -> None:
+    def __init__(self, env_config: Dict[str, Any], assets: List[str]) -> None:
         """
         Initializes the PortfolioManager.
 
@@ -79,10 +79,10 @@ class PortfolioManager:
         
         self.initial_equity = portfolio_config.get(
             'initial_balance', 
-            environment_config.get('initial_balance', 10000.0)
+            environment_config.get('initial_balance', 20.0)
         )
         self.current_equity = self.initial_equity
-        self.positions: Dict[str, Position] = {}
+        self.positions: Dict[str, Position] = {asset: Position() for asset in assets}
         self.trade_history: List[Dict[str, Any]] = []
         self.chunk_pnl: Dict[int, Dict[str, float]] = {}
         self.current_chunk_id = 0
@@ -318,6 +318,9 @@ class PortfolioManager:
             risk_amount = self.portfolio_value * risk_per_trade_pct
             risk_per_share = current_price * (stop_loss_pct / 100.0)
             
+            logger.debug(f"Debug: portfolio_value={self.portfolio_value}, risk_per_trade_pct={risk_per_trade_pct}, risk_amount={risk_amount}")
+            logger.debug(f"Debug: current_price={current_price}, stop_loss_pct={stop_loss_pct}, risk_per_share={risk_per_share}")
+
             # Éviter la division par zéro
             if risk_per_share > 0:
                 position_size = risk_amount / risk_per_share
@@ -325,12 +328,14 @@ class PortfolioManager:
             # Fallback: utiliser un pourcentage fixe du capital si pas de stop-loss
             position_size = (self.portfolio_value * max_position_size_pct) / current_price
         
+        logger.debug(f"Debug: position_size before confidence={position_size}")
+
         # Appliquer le levier si activé
         if self.futures_enabled and 'leverage' in tier:
             position_size *= tier['leverage']
         
         # Appliquer l'échelle de confiance (0.5 = confiance minimale, 1.0 = confiance maximale)
-        confidence = max(0.5, min(1.0, confidence))  # Borné entre 0.5 et 1.0
+        confidence = max(0.0, min(1.0, confidence))  # Borné entre 0.0 et 1.0
         position_size *= confidence
         
         # Vérifier les limites de taille de position
@@ -377,8 +382,10 @@ class PortfolioManager:
         self.initial_equity = env_config.get('initial_balance', 10000.0)
         
         # 2. Initialiser les positions pour tous les actifs
-        assets = env_config.get('assets', [])
-        self.positions = {asset: Position() for asset in assets}
+        # The positions are now initialized in the __init__ method of PortfolioManager
+        # and should not be re-initialized here. We only need to reset their state.
+        for asset in self.positions:
+            self.positions[asset].close()
         
         # 3. Initialiser les autres variables d'état
         self.cash = self.initial_equity
@@ -768,9 +775,8 @@ class PortfolioManager:
             f"PnL: {net_pnl:.2f} (Gross: {trade_pnl:.2f}, Commission: {commission:.2f})"
         )
         
-        # Close and remove the position
+        # Close the position
         position.close()
-        del self.positions[asset]
         
         # Return gross PnL (without commission) as expected by the tests
         return trade_pnl

@@ -17,8 +17,8 @@ class TestRiskPortfolioIntegration(unittest.TestCase):
                 "var_horizon": 1,
             },
             "trading_rules": {
-                "stop_loss": 0.05,
-                "take_profit": 0.10,
+                "stop_loss_pct": 0.05,
+                "take_profit_pct": 0.10,
                 "max_leverage": 10,
             },
             "assets": ["BTC", "ETH"],

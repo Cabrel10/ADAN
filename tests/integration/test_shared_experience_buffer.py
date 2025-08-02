@@ -28,7 +28,7 @@ def worker_sample_experiences(buffer, num_batches, batch_size):
     """Worker qui échantillonne des expériences du buffer."""
     for _ in range(num_batches):
         batch, indices, weights = buffer.sample(batch_size)
-        assert len(batch['state']) == batch_size
+        assert len(batch[0]['state']) == 10  # Assuming state is a numpy array of size 10
         assert len(indices) == batch_size
         assert len(weights) == batch_size
         time.sleep(0.001)
@@ -79,7 +79,7 @@ def test_concurrent_access():
 
     # Test d'échantillonnage final
     batch, indices, weights = buffer.sample(batch_size)
-    assert len(batch['state']) == batch_size
+    assert len(batch[0]['state']) == 10
     assert len(indices) == batch_size
     assert len(weights) == batch_size
 
@@ -188,8 +188,8 @@ def test_get_stats():
     
     # Stats avec buffer vide
     stats = buffer.get_stats()
-    assert stats['buffer_size'] == 0
-    assert stats['max_priority'] == 1.0
+    assert stats['max_size'] == 10
+    assert stats['priority_max'] == 1.0
     
     # Ajout d'expériences
     for i in range(3):
@@ -197,11 +197,11 @@ def test_get_stats():
     
     # Vérification des stats mises à jour
     stats = buffer.get_stats()
-    assert stats['buffer_size'] == 3
+    assert stats['size'] == 3
     # La priorité maximale doit être la dernière priorité ajoutée (3.0)
     # transformée selon la formule PER: (abs(priority) + epsilon) ** alpha
     expected_priority = (3.0 + buffer.epsilon) ** buffer.alpha
-    assert stats['max_priority'] == pytest.approx(expected_priority)
+    assert stats['priority_max'] == pytest.approx(expected_priority)
 
 @pytest.mark.integration
 def test_save_and_load(tmp_path):

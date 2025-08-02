@@ -75,18 +75,22 @@ class MultiAssetChunkedEnv(gym.Env):
         self.data_loader_instance = data_loader_instance
         self.shared_buffer = shared_buffer
 
+        # Initialize self.assets from worker_config
+        self.assets = worker_config.get("assets", [])
+        if not self.assets:
+            raise ValueError("No assets specified in worker_config.")
+
         # Ajout d'un cache d'observations avec une taille maximale
-        self._observation_cache = {}
+        self._observation_cache = {}  # Cache for observations
         self._max_cache_size = 1000  # Nombre maximum d'observations en cache
         self._cache_hits = 0
         self._cache_misses = 0
-        self._cache_access = {} # Pour suivre la dernière utilisation
+        self._cache_access = {}  # Pour suivre la dernière utilisation
 
         # Initialisation des composants critiques
         self._initialized = False
         try:
             self._initialize_components()
-            self._setup_spaces()
             self._initialized = True
         except Exception as e:
             logger.error(f"Erreur lors de l'initialisation: {str(e)}")
@@ -95,11 +99,10 @@ class MultiAssetChunkedEnv(gym.Env):
     def _initialize_components(self) -> None:
         """Initialize all environment components in the correct order."""
         # 1. Initialize data loader FIRST to know the data structure
-        if not hasattr(self, 'data_loader') or self.data_loader is None:
-            if self.data_loader_instance is not None:
-                self.data_loader = self.data_loader_instance
-            else:
-                self._init_data_loader()
+        if self.data_loader_instance is not None:
+            self.data_loader = self.data_loader_instance
+        else:
+            self._init_data_loader(self.assets)
 
         # 2. Dynamically create TimeframeConfig from the loaded data
         timeframe_configs = []
@@ -117,8 +120,22 @@ class MultiAssetChunkedEnv(gym.Env):
         portfolio_config["trading_rules"] = self.config.get("trading_rules", {})
         portfolio_config["capital_tiers"] = self.config.get("capital_tiers", [])
         portfolio_config["initial_capital"] = env_config.get("initial_balance", 10000.0)
-        portfolio_config["assets"] = self.assets
-        self.portfolio = PortfolioManager(env_config=portfolio_config)
+        
+        # Map asset names to full names (e.g., BTC -> BTCUSDT)
+        asset_mapping = {
+            "BTC": "BTCUSDT",
+            "ETH": "ETHUSDT",
+            "SOL": "SOLUSDT",
+            "XRP": "XRPUSDT",
+            "ADA": "ADAUSDT",
+        }
+        mapped_assets = [asset_mapping.get(asset, asset) for asset in self.assets]
+        
+        # Initialize portfolio with mapped asset names
+        self.portfolio = PortfolioManager(env_config=portfolio_config, assets=mapped_assets)
+        
+        # Update self.assets to use mapped names
+        self.assets = mapped_assets
 
         # Convert list of TimeframeConfig objects to dictionary
         timeframe_configs_dict = {
@@ -126,18 +143,22 @@ class MultiAssetChunkedEnv(gym.Env):
         }
 
         # 4. Initialize StateBuilder with the dynamic config
-        # Convert timeframe_configs_dict to features_config format expected by StateBuilder
         features_config = {
             tf: config.features
             for tf, config in timeframe_configs_dict.items()
         }
 
+        # Initialize with default target size first
+        window_size = self.config.get("state", {}).get("max_window_size", 50)
         self.state_builder = StateBuilder(
             features_config=features_config,
-            window_size=self.config.get("state", {}).get("window_size", 50),
+            window_size=window_size,
             include_portfolio_state=True,
             normalize=True
         )
+
+        # 5. Setup action and observation spaces (requires state_builder)
+        self._setup_spaces()
 
         # 5. Initialize other components using worker_config where available
         trading_rules = self.config.get("trading_rules", {})
@@ -160,7 +181,7 @@ class MultiAssetChunkedEnv(gym.Env):
             finance_manager=getattr(self.portfolio, "finance_manager", None),
         )
 
-    def _init_data_loader(self) -> Any:
+    def _init_data_loader(self, assets: List[str]) -> Any:
         """Initialize the chunked data loader using worker-specific config.
 
         Returns:
@@ -175,10 +196,20 @@ class MultiAssetChunkedEnv(gym.Env):
         # Ensure paths are resolved
         if not hasattr(self, 'config') or not self.config:
             raise ValueError("Configuration not properly initialized")
-        # Get assets from worker config or environment
-        self.assets = self.worker_config.get("assets", self.config.get("environment", {}).get("assets", []))
+        # Mapping for asset names to file system names (e.g., BTC -> BTCUSDT)
+        asset_mapping = {
+            "BTC": "BTCUSDT",
+            "ETH": "ETHUSDT",
+            "SOL": "SOLUSDT",
+            "XRP": "XRPUSDT",
+            "ADA": "ADAUSDT",
+        }
+        # Create a mapped assets list for the data loader
+        mapped_assets = [
+            asset_mapping.get(asset, asset) for asset in assets
+        ]
 
-        if not self.assets:
+        if not mapped_assets:
             raise ValueError("No assets specified in worker or environment config")
 
         # Nouveau code plus permissif
@@ -197,37 +228,33 @@ class MultiAssetChunkedEnv(gym.Env):
                 f"No timeframes defined: global={global_data_timeframes}, worker={worker_timeframes}"
             )
 
-        # Ensure we have features configured for each timeframe
-        features_config = self.config.get("data", {}).get("features_per_timeframe", {})
-        for tf in self.timeframes:
-            if tf not in features_config:
-                logger.warning(f"No features configured for timeframe {tf}, using default features")
-                features_config[tf] = ["open", "high", "low", "close", "volume"]
-
         # Create a copy of the config with resolved paths
         loader_config = {
             **self.config,
             "data": {
                 **self.config.get("data", {}),
-                "features_per_timeframe": features_config,
-                "assets": self.assets
+                "features_per_timeframe": self.config.get("data", {}).get("features_per_timeframe", {}),
+                "assets": mapped_assets # Use mapped_assets here
             }
         }
+        # Ensure we have features configured for each timeframe
+        features_config = loader_config["data"]["features_per_timeframe"]
+        for tf in self.timeframes:
+            if tf not in features_config:
+                logger.warning(f"No features configured for timeframe {tf}, using default features")
+                features_config[tf] = ["open", "high", "low", "close", "volume"]
 
         # Initialize the data loader
         self.data_loader = ChunkedDataLoader(
             config=loader_config,
             worker_config={
                 **self.worker_config,
-                "assets": self.assets,
+                "assets": mapped_assets, # Use mapped_assets here
                 "timeframes": self.timeframes
             }
         )
 
-        # Store assets list for easy access
-        self.assets = self.data_loader.assets_list
-        if not self.assets:
-            raise ValueError("No assets available for trading after data loader initialization")
+        
 
         # Get total chunks from the data loader
         self.total_chunks = self.data_loader.total_chunks
@@ -256,33 +283,23 @@ class MultiAssetChunkedEnv(gym.Env):
         )
 
         try:
-            # Get the 3D shape from StateBuilder
-            shape_3d = self.state_builder.get_observation_shape()
-            if len(shape_3d) != 3:
-                raise ValueError(f"Expected 3D shape from StateBuilder, got {shape_3d}")
+            # Get the 3D observation shape from StateBuilder
+            n_timeframes, window_size, n_features = self.state_builder.get_observation_shape()
+            # Store the shape for later use
+            self.observation_shape = (n_timeframes, window_size, n_features)
+            # Use the total flattened size calculated by StateBuilder
+            flattened_size = self.state_builder.total_flattened_observation_size
 
-            n_timeframes, window_size, n_features = shape_3d
+            logger.info(f"Observation space shape: {self.observation_shape} (flattened: {flattened_size})")
 
-            # Validate dimensions
-            if n_timeframes <= 0 or window_size <= 0 or n_features <= 0:
-                raise ValueError(f"Invalid dimensions in observation shape: {shape_3d}")
-
-            # Calculate total flattened dimension
-            total_obs_size = n_timeframes * window_size * n_features
-
-            logger.info(
-                f"Observation space shape: {n_timeframes} timeframes * "
-                f"{window_size} steps * {n_features} features = "
-                f"{total_obs_size} total features"
-            )
-
-            # Create a flat Box space that matches _get_observation() output
+            # Create a flat Box space that matches the actual flattened observation size
             self.observation_space = gym.spaces.Box(
                 low=-np.inf,
                 high=np.inf,
-                shape=(total_obs_size,),
+                shape=(flattened_size,),  # Flattened shape for compatibility
                 dtype=np.float32,
             )
+            logger.info(f"Observation space configured with flattened shape: {flattened_size}")
 
         except Exception as e:
             logger.error(f"Failed to set up observation space: {str(e)}")
@@ -423,24 +440,7 @@ class MultiAssetChunkedEnv(gym.Env):
         observation = self._get_observation()
         info = self._get_info()
         
-        # Aplatir l'observation si nécessaire
-        if len(observation.shape) > 1:
-            observation = observation.flatten()
-            
-        # Vérifier que la forme est correcte
-        if observation.shape != self.observation_space.shape:
-            try:
-                # Essayer de redimensionner pour correspondre à l'espace d'observation
-                observation = np.resize(observation, self.observation_space.shape)
-                logger.warning(
-                    f"Observation shape {observation.shape} resized to match "
-                    f"observation space shape {self.observation_space.shape}"
-                )
-            except Exception as e:
-                raise ValueError(
-                    f"Failed to reshape observation from {observation.shape} to "
-                    f"{self.observation_space.shape}: {str(e)}"
-                )
+        
 
         return observation, info
 
@@ -472,7 +472,11 @@ class MultiAssetChunkedEnv(gym.Env):
 
             self._update_dbe_state()
             dbe_modulation = self.dbe.compute_dynamic_modulation()
+            
+            trade_start_time = time.time()
             self._execute_trades(action, dbe_modulation)
+            trade_end_time = time.time()
+            logger.debug(f"_execute_trades took {trade_end_time - trade_start_time:.4f} seconds")
 
             self.step_in_chunk += 1
             self.current_step += 1
@@ -494,24 +498,7 @@ class MultiAssetChunkedEnv(gym.Env):
 
             next_observation = self._get_observation()
             
-            # Aplatir l'observation si nécessaire
-            if len(next_observation.shape) > 1:
-                next_observation = next_observation.flatten()
-                
-            # Vérifier que la forme est correcte
-            if next_observation.shape != self.observation_space.shape:
-                try:
-                    # Essayer de redimensionner pour correspondre à l'espace d'observation
-                    next_observation = np.resize(next_observation, self.observation_space.shape)
-                    logger.warning(
-                        f"Observation shape {next_observation.shape} resized to match "
-                        f"observation space shape {self.observation_space.shape}"
-                    )
-                except Exception as e:
-                    raise ValueError(
-                        f"Failed to reshape observation from {next_observation.shape} to "
-                        f"{self.observation_space.shape}: {str(e)}"
-                    )
+            
 
             reward = self._calculate_reward(action)
             terminated = self.done
@@ -610,21 +597,6 @@ class MultiAssetChunkedEnv(gym.Env):
             zip(self.assets, action, strict=True)
         ):
             action_value = np.clip(float(action_value), -1.0, 1.0)
-            current_position = portfolio_metrics["positions"].get(
-                asset, {"quantity": 0.0}
-            )
-            current_qty = current_position.get("quantity", 0.0)
-            current_value = current_qty * current_prices[asset]
-
-            if action_value >= 0:
-                if action_value == 0:
-                    target_value = current_value
-                else:
-                    max_buy_value = cash * action_value
-                    target_value = current_value + max_buy_value
-            else:
-                sell_pct = abs(action_value)
-                target_value = current_value * (1 - sell_pct)
 
             if action_value > 0.1:
                 discrete_action = 1
@@ -633,17 +605,23 @@ class MultiAssetChunkedEnv(gym.Env):
             else:
                 discrete_action = 0
 
-            if discrete_action == 1: # BUY
-                self.order_manager.open_position(self.portfolio, asset, current_prices[asset])
-            elif discrete_action == 2: # SELL
-                self.order_manager.close_position(self.portfolio, asset, current_prices[asset])
-            cash -= target_value - current_value
+            if discrete_action == 1:  # BUY
+                if not self.portfolio.positions[asset].is_open:
+                    self.order_manager.open_position(self.portfolio, asset, current_prices[asset], confidence=action_value)
+                else:
+                    logger.debug(f"Attempted to BUY {asset} but position is already open. Holding.")
+            elif discrete_action == 2:  # SELL
+                if self.portfolio.positions[asset].is_open:
+                    self.order_manager.close_position(self.portfolio, asset, current_prices[asset])
+                else:
+                    logger.debug(f"Attempted to SELL {asset} but no position is open. Holding.")
 
         self.portfolio.update_market_price(current_prices)
         self.portfolio.rebalance(current_prices)
 
     def _get_current_prices(self) -> Dict[str, float]:
         """Get current prices for all assets."""
+        start_time = time.time()
         prices = {}
         for _asset, timeframe_data in self.current_data.items():
             if not timeframe_data:
@@ -658,6 +636,8 @@ class MultiAssetChunkedEnv(gym.Env):
                     if len(numeric_cols) > 0:
                         current_row = df.iloc[self.current_step]
                         prices[_asset] = current_row[numeric_cols[0]]
+        end_time = time.time()
+        logger.debug(f"_get_current_prices took {end_time - start_time:.4f} seconds")
         return prices
 
     def _get_current_timestamp(self) -> pd.Timestamp:
@@ -717,11 +697,152 @@ class MultiAssetChunkedEnv(gym.Env):
             'hit_ratio': hit_ratio
         }
 
+    def _process_assets(self, feature_config: Dict[str, List[str]]) -> Dict[str, pd.DataFrame]:
+        """Process asset data for the current step.
+        
+        Args:
+            feature_config: Dictionary mapping timeframes to lists of feature names
+            
+        Returns:
+            Dictionary mapping timeframes to DataFrames of processed data
+        """
+        processed_data = {}
+        
+        for timeframe in self.timeframes:
+            if timeframe not in feature_config:
+                logger.warning(f"No feature configuration for timeframe {timeframe}")
+                continue
+                
+            features = feature_config[timeframe]
+            if not features:
+                logger.warning(f"No features specified for timeframe {timeframe}")
+                continue
+                
+            # Initialize DataFrame to store processed data for this timeframe
+            processed_dfs = []
+            
+            for asset in self.assets:
+                # Get data for this asset and timeframe
+                asset_data = self.current_data.get(asset, {}).get(timeframe)
+                if asset_data is None or asset_data.empty:
+                    logger.debug(f"No data for {asset} {timeframe}")
+                    continue
+                
+                # Log all available columns for debugging
+                logger.debug(f"Available columns in {asset} {timeframe} data: {asset_data.columns.tolist()}")
+                logger.debug(f"Requested features for {timeframe}: {features}")
+                
+                # Log the exact column names in the DataFrame
+                actual_columns = asset_data.columns.tolist()
+                logger.debug(f"=== Processing {asset} {timeframe} ===")
+                logger.debug(f"Actual columns in DataFrame: {actual_columns}")
+                logger.debug(f"Requested features: {features}")
+                
+                # Create a mapping of uppercase column names to actual column names
+                column_mapping = {col.upper(): col for col in asset_data.columns}
+                logger.debug(f"Column mapping (uppercase -> original): {column_mapping}")
+                
+                # Find available features in the asset data (case-insensitive)
+                available_features = []
+                missing_features = []
+                for f in features:
+                    upper_f = f.upper()
+                    if upper_f in column_mapping:
+                        available_features.append(column_mapping[upper_f])
+                        logger.debug(f"Found feature: '{f}' -> '{column_mapping[upper_f]}'")
+                    else:
+                        missing_features.append(f)
+                        logger.debug(f"Missing feature: '{f}' (not in DataFrame columns)")
+                
+                if missing_features:
+                    logger.warning(f"Missing {len(missing_features)} features for {asset} {timeframe}: {missing_features}")
+                    logger.debug(f"Available columns in {asset} {timeframe}: {actual_columns}")
+                    logger.debug(f"Column mapping (uppercase -> original): {column_mapping}")
+                    logger.debug(f"Available features: {available_features}")
+                    logger.debug(f"Missing features: {missing_features}")
+                
+                if not available_features:
+                    logger.warning(f"None of the requested features found for {asset} {timeframe}")
+                    logger.debug(f"Available columns: {asset_data.columns.tolist()}")
+                    logger.debug(f"Requested features: {features}")
+                    continue
+                    
+                try:
+                    # Select only the requested features using their original case
+                    asset_df = asset_data[available_features].copy()
+                    
+                    # Ensure column names are in uppercase for consistency
+                    asset_df.columns = [col.upper() for col in asset_df.columns]
+                    
+                    # Store the asset name as a column for reference
+                    asset_df["ASSET"] = asset
+                    
+                    # Add to list of processed dataframes
+                    processed_dfs.append(asset_df)
+                    
+                except Exception as e:
+                    logger.error(f"Error processing {asset} {timeframe}: {str(e)}")
+                    logger.debug(f"Available columns: {asset_data.columns.tolist()}")
+                    logger.debug(f"Requested features: {features}")
+                    logger.debug(f"Available features: {available_features}")
+                    continue
+            
+            if not processed_dfs:
+                logger.warning(f"No valid data for any asset in timeframe {timeframe}")
+                continue
+                
+            try:
+                # Concatenate all asset DataFrames
+                if len(processed_dfs) == 1:
+                    processed_df = processed_dfs[0]
+                else:
+                    # Use outer join to handle different indices
+                    processed_df = pd.concat(processed_dfs, axis=1, join='outer')
+                
+                # Remove any duplicate columns that might have been created
+                processed_df = processed_df.loc[:, ~processed_df.columns.duplicated()]
+                
+                # Fill NaN values with zeros or another appropriate value
+                processed_df = processed_df.fillna(0)
+                
+                # Ensure all column names are strings (not objects)
+                processed_df.columns = [col.upper() for col in processed_df.columns]
+                
+                # Verify that we have all required features
+                missing_features = [f for f in features if f.upper() not in [col.upper() for col in processed_df.columns]]
+                if missing_features:
+                    logger.warning(f"Missing features in final DataFrame for {timeframe}: {missing_features}")
+                    
+                    # Add missing columns with default values
+                    for f in missing_features:
+                        processed_df[f.upper()] = 0.0
+                
+                # Keep only the requested features in the correct order
+                # Convert all column names to uppercase for consistency
+                processed_df.columns = [col.upper() for col in processed_df.columns]
+                
+                # Select only the requested features and ensure they're in the correct order
+                available_features = [f.upper() for f in features if f.upper() in processed_df.columns]
+                processed_df = processed_df[available_features]
+                
+                processed_data[timeframe] = processed_df
+                
+                logger.debug(f"Processed DataFrame for {timeframe} with columns: {processed_df.columns.tolist()}")
+                
+            except Exception as e:
+                logger.error(f"Error concatenating DataFrames for {timeframe}: {str(e)}")
+                continue
+        
+        return processed_data
+
     def _get_observation(self) -> np.ndarray:
         """Get the current observation from the environment."""
+        start_time = time.time()
         cache_key = f"{self.current_chunk_idx}_{self.step_in_chunk}_{self.current_step}"
         cached_obs = self._manage_cache(cache_key)
         if cached_obs is not None:
+            end_time = time.time()
+            logger.debug(f"_get_observation (cached) took {end_time - start_time:.4f} seconds")
             return cached_obs
 
         try:
@@ -732,137 +853,33 @@ class MultiAssetChunkedEnv(gym.Env):
             if not feature_config:
                 raise ValueError("Empty feature configuration from StateBuilder")
 
-            all_assets_features = self._process_assets(feature_config)
+            processed_data_by_timeframe = self._process_assets(feature_config)
             
-            if not all_assets_features:
+            if not processed_data_by_timeframe:
                 logger.error("No market data available to build observation.")
-                return np.full(self.observation_space.shape, np.nan, dtype=np.float32)
-
-            combined_data = pd.concat(all_assets_features, axis=0)
-
-            if combined_data.empty:
-                logger.error("Combined data is empty after processing.")
-                return np.full(self.observation_space.shape, np.nan, dtype=np.float32)
-
-            observation = self._build_observation(combined_data, cache_key)
-            if not isinstance(observation, np.ndarray):
-                logger.error(f"Observation from _build_observation is not a numpy array: {type(observation)}")
                 return np.zeros(self.observation_space.shape, dtype=np.float32)
-            return observation
 
-        except Exception as e:
-            logger.error("Error building observation: %s", str(e), exc_info=True)
-            return np.zeros(self.observation_space.shape, dtype=np.float32)
+            build_obs_start_time = time.time()
+            observation = self.state_builder.build_adaptive_observation(
+                self.current_step,
+                processed_data_by_timeframe,
+                self.portfolio
+            )
+            build_obs_end_time = time.time()
+            logger.debug(f"state_builder.build_adaptive_observation took {build_obs_end_time - build_obs_start_time:.4f} seconds")
 
-    def _process_assets(self, feature_config: Dict[str, List[str]]) -> List[pd.DataFrame]:
-        """Traite les actifs pour extraire les caractéristiques nécessaires."""
-        all_assets_features = []
-        
-        for asset in self.assets:
-            if asset not in self.current_data:
-                logger.warning("No data for asset %s, skipping.", asset)
-                continue
-                
-            asset_timeframe_data = self.current_data[asset]
-            asset_features = {}
+            if not isinstance(observation, np.ndarray):
+                logger.error(
+                    f"Observation from build_adaptive_observation is not a numpy array: "
+                    f"{type(observation)}"
+                )
+                return np.zeros(self.observation_space.shape, dtype=np.float32)
             
-            for tf_name, required_features in feature_config.items():
-                if tf_name not in asset_timeframe_data:
-                    logger.warning(
-                        "Timeframe %s not found for asset %s. Available: %s",
-                        tf_name, asset, list(asset_timeframe_data.keys())
-                    )
-                    continue
-                    
-                df = asset_timeframe_data[tf_name]
-                if df is None or df.empty:
-                    logger.warning("DataFrame is empty for %s %s", asset, tf_name)
-                    continue
-                    
-                if self.step_in_chunk >= len(df):
-                    logger.warning(
-                        "Step %s is out of bounds for %s %s (length: %s)",
-                        self.step_in_chunk, asset, tf_name, len(df)
-                    )
-                    continue
-
-                current_row = df.iloc[self.step_in_chunk]
-                available_features = [
-                    f for f in required_features if f in current_row.index
-                ]
-                
-                if not available_features:
-                    logger.warning("No available features for %s in %s", asset, tf_name)
-                    continue
-
-                for feature in available_features:
-                    asset_features[f"{tf_name}_{feature}"] = current_row[feature]
-
-            if asset_features:
-                asset_df = pd.Series(asset_features, name=asset).to_frame().T
-                all_assets_features.append(asset_df)
-            else:
-                logger.warning("No features available for asset %s", asset)
-                
-        return all_assets_features
-
-    def _build_observation(self, combined_data: pd.DataFrame, cache_key: str) -> np.ndarray:
-        """Construit l'observation à partir des données combinées."""
-        timeframe_data = {}
-        for tf in self.timeframes:
-            tf_columns = [
-                col for col in combined_data.columns
-                if col.startswith(f"{tf}_")
-            ]
-            if tf_columns:
-                tf_data = combined_data[tf_columns].copy()
-                tf_data.columns = [
-                    col.replace(f"{tf}_", "")
-                    for col in tf_data.columns
-                ]
-                timeframe_data[tf] = tf_data
-
-        current_idx = max(self.current_step, self.window_size)
-        
-        # Récupérer l'observation adaptative 3D
-        observation = self.state_builder.build_adaptive_observation(
-            current_idx, timeframe_data
-        )
-        
-        if observation is None:
-            logger.error("Échec de la construction de l'observation adaptative")
+            return observation
+        except Exception as e:
+            logger.error(f"Error in _get_observation: {str(e)}", exc_info=True)
             return np.zeros(self.observation_space.shape, dtype=np.float32)
-
-        self._manage_cache(cache_key, observation)
-
-        # Aplatir l'observation 3D en 1D pour correspondre à l'espace d'observation
-        observation = observation.reshape(-1)  # Aplatir en 1D
-        
-        # Vérifier la taille de l'observation
-        expected_size = np.prod(self.observation_space.shape)
-        if observation.size != expected_size:
-            logger.warning(
-                f"Taille d'observation incorrecte : {observation.size} vs attendu {expected_size}. "
-                "Redimensionnement en cours..."
-            )
-            # Créer un nouveau tableau de la taille attendue
-            resized_obs = np.zeros(expected_size, dtype=observation.dtype)
-            # Copier les données disponibles
-            min_size = min(observation.size, expected_size)
-            resized_obs[:min_size] = observation.flat[:min_size]
-            observation = resized_obs
-
-        # Gérer les valeurs manquantes ou infinies
-        if np.any(np.isnan(observation)) or np.any(np.isinf(observation)):
-            logger.warning(
-                "NaN/Inf détectés dans l'observation: %s NaN, %s Inf. Remplacement par des zéros.",
-                np.isnan(observation).sum(),
-                np.isinf(observation).sum()
-            )
-            observation = np.nan_to_num(observation, nan=0.0, posinf=0.0, neginf=0.0)
-
-        return observation
-
+            
     def _calculate_reward(self, action: np.ndarray) -> float:
         """Calcule la récompense pour l'étape actuelle."""
         portfolio_metrics = self.portfolio.get_metrics()
@@ -1005,3 +1022,4 @@ class MultiAssetChunkedEnv(gym.Env):
     def close(self) -> None:
         """Nettoie les ressources de l'environnement."""
         pass
+
