@@ -3,6 +3,7 @@
 [![Python 3.8+](https://img.shields.io/badge/python-3.8+-blue.svg)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Code style: black](https://img.shields.io/badge/code%20style-black-000000.svg)](https://github.com/psf/black)
+[![GitHub last commit](https://img.shields.io/github/last-commit/votre-utilisateur/adan-trading-bot)](https://github.com/votre-utilisateur/adan-trading-bot/commits/main)
 
 ## 📝 Aperçu
 
@@ -15,12 +16,14 @@ ADAN (Adaptive Deep Algorithmic Network) est un système de trading algorithmiqu
 - **Traitement parallèle** : Exécution multi-processus pour une meilleure performance
 - **Gestion du risque** : Mécanismes intégrés de gestion des risques
 - **Support multi-actifs** : Trading sur plusieurs paires de cryptomonnaies
-- **Multi-timeframes** : Analyse sur différentes échelles de temps
+- **Multi-timeframes** : Support natif pour plusieurs échelles de temps (5m, 1h, 4h) avec gestion robuste des données manquantes
 
 ### ⚙️ Composants clés
+- **StateBuilder** : Construction robuste d'observations multi-actifs et multi-timeframes
+- **DataLoader** : Chargement efficace des données avec gestion de la mémoire
 - **SharedExperienceBuffer** : Mémoire de rejeu d'expériences priorisées
 - **TrainingOrchestrator** : Orchestrateur de l'entraînement distribué
-- **Environnements de trading** : Simulation de marché pour le backtesting
+- **Environnements de trading** : Simulation de marché pour le backtesting avec gestion automatique des réinitialisations
 - **API d'échange** : Connecteurs pour différentes plateformes de trading
 
 ## 🛠 Installation
@@ -76,6 +79,33 @@ La configuration s'effectue via le fichier `config/config.yaml`. Consultez le [G
 └── tests/               # Tests automatisés
     ├── unit/           # Tests unitaires
     └── integration/    # Tests d'intégration
+```
+
+## 🚀 Démarrer
+
+### Configuration minimale requise
+- Python 3.8+
+- 16GB de RAM recommandés
+- 10GB d'espace disque pour les données
+
+### Exemple de configuration
+```yaml
+# config/config.yaml
+data:
+  assets:
+    - BTCUSDT
+    - ETHUSDT
+    - SOLUSDT
+    - XRPUSDT
+    - ADAUSDT
+  timeframes:
+    - 5m
+    - 1h
+    - 4h
+  features:
+    5m: [close, volume, rsi, bb_upper, bb_middle, bb_lower]
+    1h: [close, volume, rsi, ema_20, ema_50]
+    4h: [close, volume, atr, adx]
 ```
 
 ## 🧪 Exécution des tests
