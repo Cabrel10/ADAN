@@ -86,6 +86,10 @@ class MultiAssetChunkedEnv(gym.Env):
         self._cache_hits = 0
         self._cache_misses = 0
         self._cache_access = {}  # Pour suivre la dernière utilisation
+        
+        # Cache pour les données pré-calculées
+        self._precomputed_data = None  # Stocke les données pré-calculées
+        self._column_mappings = {}  # Cache pour les mappings de colonnes
 
         # Initialisation des composants critiques
         self._initialized = False
@@ -350,7 +354,27 @@ class MultiAssetChunkedEnv(gym.Env):
         # Load the first chunk of data
         self.current_chunk_idx = 0
         self.current_data = self.data_loader.load_chunk(self.current_chunk_idx)
-        
+
+        # --- Feature Alignment Check ---
+        all_configured_features = set()
+        for feats in self.config.get("data", {}).get("features_per_timeframe", {}).values():
+            all_configured_features.update(feats)
+
+        any_asset = next(iter(self.assets), None)
+        if any_asset and any_asset in self.current_data:
+            for tf, feats in self.config.get("data", {}).get("features_per_timeframe", {}).items():
+                if tf in self.current_data[any_asset]:
+                    df = self.current_data[any_asset][tf]
+                    df_columns = set(df.columns)
+                    configured_feats = set(feats)
+
+                    missing = configured_feats - df_columns
+                    extra = df_columns & all_configured_features - configured_feats
+
+                    assert not missing, f"Timeframe {tf} is missing features: {missing}"
+                    # Optional: assert not extra, f"Timeframe {tf} has extra features: {extra}"
+        # --- End of Check ---
+
         # Fit scalers on the first chunk of data
         if hasattr(self.state_builder, 'fit_scalers'):
             if callable(self.state_builder.fit_scalers):
@@ -692,112 +716,85 @@ class MultiAssetChunkedEnv(gym.Env):
             'cache_enabled': True,
             'hits': self._cache_hits,
             'misses': self._cache_misses,
+            'hit_ratio': hit_ratio,
             'size': len(self._observation_cache),
-            'max_size': self._max_cache_size,
-            'hit_ratio': hit_ratio
+            'max_size': self._max_cache_size
         }
-
-    def _process_assets(self, feature_config: Dict[str, List[str]]) -> Dict[str, pd.DataFrame]:
-        """Process asset data for the current step.
+        
+    def _process_assets(self, feature_config: Dict[str, List[str]]) -> Dict[str, np.ndarray]:
+        """
+        Process assets data for the current timestep using pre-computed data.
         
         Args:
             feature_config: Dictionary mapping timeframes to lists of feature names
             
         Returns:
-            Dictionary mapping timeframes to DataFrames of processed data
+            Dictionary mapping timeframes to numpy arrays of processed data
         """
         processed_data = {}
         
-        for timeframe in self.timeframes:
-            if timeframe not in feature_config:
-                logger.warning(f"No feature configuration for timeframe {timeframe}")
+        # Ensure data is precomputed
+        self._precompute_data()
+        
+        for tf in self.timeframes:
+            if tf not in feature_config:
+                logger.warning(f"No feature configuration for timeframe {tf}")
                 continue
                 
-            features = feature_config[timeframe]
+            features = feature_config[tf]
             if not features:
-                logger.warning(f"No features specified for timeframe {timeframe}")
+                logger.warning(f"No features specified for timeframe {tf}")
                 continue
                 
-            # Initialize DataFrame to store processed data for this timeframe
-            processed_dfs = []
+            # Initialize list to store processed data for each asset
+            tf_data = []
             
             for asset in self.assets:
-                # Get data for this asset and timeframe
-                asset_data = self.current_data.get(asset, {}).get(timeframe)
-                if asset_data is None or asset_data.empty:
-                    logger.debug(f"No data for {asset} {timeframe}")
-                    continue
-                
-                # Log all available columns for debugging
-                logger.debug(f"Available columns in {asset} {timeframe} data: {asset_data.columns.tolist()}")
-                logger.debug(f"Requested features for {timeframe}: {features}")
-                
-                # Log the exact column names in the DataFrame
-                actual_columns = asset_data.columns.tolist()
-                logger.debug(f"=== Processing {asset} {timeframe} ===")
-                logger.debug(f"Actual columns in DataFrame: {actual_columns}")
-                logger.debug(f"Requested features: {features}")
-                
-                # Create a mapping of uppercase column names to actual column names
-                column_mapping = {col.upper(): col for col in asset_data.columns}
-                logger.debug(f"Column mapping (uppercase -> original): {column_mapping}")
-                
-                # Find available features in the asset data (case-insensitive)
-                available_features = []
-                missing_features = []
-                for f in features:
-                    upper_f = f.upper()
-                    if upper_f in column_mapping:
-                        available_features.append(column_mapping[upper_f])
-                        logger.debug(f"Found feature: '{f}' -> '{column_mapping[upper_f]}'")
-                    else:
-                        missing_features.append(f)
-                        logger.debug(f"Missing feature: '{f}' (not in DataFrame columns)")
-                
-                if missing_features:
-                    logger.warning(f"Missing {len(missing_features)} features for {asset} {timeframe}: {missing_features}")
-                    logger.debug(f"Available columns in {asset} {timeframe}: {actual_columns}")
-                    logger.debug(f"Column mapping (uppercase -> original): {column_mapping}")
-                    logger.debug(f"Available features: {available_features}")
-                    logger.debug(f"Missing features: {missing_features}")
-                
-                if not available_features:
-                    logger.warning(f"None of the requested features found for {asset} {timeframe}")
-                    logger.debug(f"Available columns: {asset_data.columns.tolist()}")
-                    logger.debug(f"Requested features: {features}")
+                # Get precomputed data for this asset and timeframe
+                if tf not in self._precomputed_data or asset not in self._precomputed_data[tf]:
+                    logger.error(f"No precomputed data found for {asset} {tf}")
                     continue
                     
+                asset_data = self._precomputed_data[tf][asset]
+                data_array = asset_data['data']
+                columns = asset_data['columns']
+                
+                # Get the current timestep data
+                if self.current_step >= len(data_array):
+                    logger.warning(f"Current step {self.current_step} is out of bounds for {asset} {tf} data (length: {len(data_array)}). Using last available data.")
+                    current_data = data_array[-1:]
+                else:
+                    current_data = data_array[self.current_step:self.current_step+1]
+                
+                # Create a DataFrame for the current timestep
+                current_df = pd.DataFrame(current_data, columns=columns)
+                
+                # Process the data through the state builder
                 try:
-                    # Select only the requested features using their original case
-                    asset_df = asset_data[available_features].copy()
-                    
-                    # Ensure column names are in uppercase for consistency
-                    asset_df.columns = [col.upper() for col in asset_df.columns]
-                    
-                    # Store the asset name as a column for reference
-                    asset_df["ASSET"] = asset
-                    
-                    # Add to list of processed dataframes
-                    processed_dfs.append(asset_df)
-                    
+                    obs = self.state_builder.build_observation(
+                        df=current_df,
+                        timeframe=tf,
+                        features=features
+                    )
+                    tf_data.append(obs)
                 except Exception as e:
-                    logger.error(f"Error processing {asset} {timeframe}: {str(e)}")
-                    logger.debug(f"Available columns: {asset_data.columns.tolist()}")
-                    logger.debug(f"Requested features: {features}")
-                    logger.debug(f"Available features: {available_features}")
-                    continue
+                    logger.error(f"Error processing {asset} {tf} at step {self.current_step}: {str(e)}")
+                    # Return empty observation with correct shape if there's an error
+                    obs = np.zeros((1, len(features)))
+                    tf_data.append(obs)
             
-            if not processed_dfs:
-                logger.warning(f"No valid data for any asset in timeframe {timeframe}")
+            # Stack all assets for this timeframe
+            if not tf_data:
+                logger.warning(f"No data processed for timeframe {tf}")
+                processed_data[tf] = np.array([])
                 continue
                 
             try:
-                # Concatenate all asset DataFrames
-                if len(processed_dfs) == 1:
-                    processed_df = processed_dfs[0]
-                else:
-                    # Use outer join to handle different indices
-                    processed_df = pd.concat(processed_dfs, axis=1, join='outer')
+                # Stack all observations for this timeframe
+                stacked_obs = np.vstack(tf_data)
+                
+                # Convert to DataFrame for easier handling
+                processed_df = pd.DataFrame(stacked_obs)
                 
                 # Remove any duplicate columns that might have been created
                 processed_df = processed_df.loc[:, ~processed_df.columns.duplicated()]
@@ -806,46 +803,117 @@ class MultiAssetChunkedEnv(gym.Env):
                 processed_df = processed_df.fillna(0)
                 
                 # Ensure all column names are strings (not objects)
-                processed_df.columns = [col.upper() for col in processed_df.columns]
+                processed_df.columns = [str(col).upper() for col in processed_df.columns]
                 
                 # Verify that we have all required features
-                missing_features = [f for f in features if f.upper() not in [col.upper() for col in processed_df.columns]]
+                missing_features = [f for f in features if f.upper() not in [str(col).upper() for col in processed_df.columns]]
                 if missing_features:
-                    logger.warning(f"Missing features in final DataFrame for {timeframe}: {missing_features}")
+                    logger.warning(f"Missing features in final DataFrame for {tf}: {missing_features}")
                     
                     # Add missing columns with default values
                     for f in missing_features:
                         processed_df[f.upper()] = 0.0
                 
-                # Keep only the requested features in the correct order
-                # Convert all column names to uppercase for consistency
-                processed_df.columns = [col.upper() for col in processed_df.columns]
-                
                 # Select only the requested features and ensure they're in the correct order
                 available_features = [f.upper() for f in features if f.upper() in processed_df.columns]
                 processed_df = processed_df[available_features]
                 
-                processed_data[timeframe] = processed_df
+                # Store the processed data
+                processed_data[tf] = processed_df.values
                 
-                logger.debug(f"Processed DataFrame for {timeframe} with columns: {processed_df.columns.tolist()}")
+                logger.debug(f"Processed DataFrame for {tf} with columns: {processed_df.columns.tolist()}")
                 
             except Exception as e:
-                logger.error(f"Error concatenating DataFrames for {timeframe}: {str(e)}")
-                continue
+                logger.error(f"Error processing data for timeframe {tf}: {str(e)}")
+                processed_data[tf] = np.array([])
         
         return processed_data
 
+    def _precompute_data(self) -> None:
+        """
+        Pre-compute and cache all necessary data for faster access during steps.
+        This is called once during reset() to optimize performance.
+        """
+        if self._precomputed_data is not None:
+            return
+            
+        logger.info("Pre-computing data for optimization...")
+        start_time = time.time()
+        self._precomputed_data = {}
+        
+        # Get the list of timeframes and assets to process
+        timeframes = self.timeframes
+        assets = self.assets
+        
+        try:
+            # Load all data at once using the data_loader's load_chunk method
+            # This returns a dictionary: {asset: {timeframe: df}}
+            all_data = self.data_loader.load_chunk()
+            
+            # Process the loaded data
+            for asset in assets:
+                for tf in timeframes:
+                    try:
+                        # Get the DataFrame for this asset and timeframe
+                        if asset not in all_data or tf not in all_data[asset]:
+                            logger.warning(f"No data found for {asset} {tf} in loaded chunk")
+                            continue
+                            
+                        df = all_data[asset][tf]
+                        
+                        if df is None or df.empty:
+                            logger.warning(f"Empty DataFrame for {asset} {tf}")
+                            continue
+                            
+                        # Initialize the timeframe dictionary if needed
+                        if tf not in self._precomputed_data:
+                            self._precomputed_data[tf] = {}
+                            
+                        # Store the numpy array for faster access
+                        self._precomputed_data[tf][asset] = {
+                            'data': df.values,  # Convert to numpy array for faster slicing
+                            'columns': list(df.columns),
+                            'index': df.index
+                        }
+                        
+                        # Pre-compute the column mappings for this timeframe and asset
+                        self._column_mappings[(tf, asset)] = {
+                            col.lower(): idx for idx, col in enumerate(df.columns)
+                        }
+                        
+                        logger.debug(f"Precomputed data for {asset} {tf} with shape {df.shape}")
+                        
+                    except Exception as e:
+                        logger.error(f"Error processing data for {asset} {tf}: {str(e)}")
+                        continue
+                        
+        except Exception as e:
+            logger.error(f"Error loading data chunk: {str(e)}")
+            raise
+        
+        logger.info(f"Data pre-computation completed in {time.time() - start_time:.2f} seconds")
+    
     def _get_observation(self) -> np.ndarray:
         """Get the current observation from the environment."""
         start_time = time.time()
-        cache_key = f"{self.current_chunk_idx}_{self.step_in_chunk}_{self.current_step}"
-        cached_obs = self._manage_cache(cache_key)
-        if cached_obs is not None:
+        
+        # Vérifier si l'observation est dans le cache
+        cache_key = self.current_step
+        if cache_key in self._observation_cache:
+            self._cache_hits += 1
+            self._cache_access[cache_key] = time.time()
+            cached_obs = self._observation_cache[cache_key]
             end_time = time.time()
             logger.debug(f"_get_observation (cached) took {end_time - start_time:.4f} seconds")
             return cached_obs
-
+        
+        self._cache_misses += 1
+        
         try:
+            # S'assurer que les données sont pré-calculées
+            self._precompute_data()
+            
+            # Construire l'observation pour chaque timeframe
             feature_config = {
                 tf: self.state_builder.get_feature_names(tf)
                 for tf in self.timeframes
@@ -853,21 +921,25 @@ class MultiAssetChunkedEnv(gym.Env):
             if not feature_config:
                 raise ValueError("Empty feature configuration from StateBuilder")
 
+            # Récupérer les données traitées
             processed_data_by_timeframe = self._process_assets(feature_config)
             
             if not processed_data_by_timeframe:
                 logger.error("No market data available to build observation.")
                 return np.zeros(self.observation_space.shape, dtype=np.float32)
 
+            # Construire l'observation avec le StateBuilder
             build_obs_start_time = time.time()
             observation = self.state_builder.build_adaptive_observation(
                 self.current_step,
-                processed_data_by_timeframe,
+                self.current_data,
                 self.portfolio
             )
             build_obs_end_time = time.time()
+            
             logger.debug(f"state_builder.build_adaptive_observation took {build_obs_end_time - build_obs_start_time:.4f} seconds")
 
+            # Vérifier le type de l'observation
             if not isinstance(observation, np.ndarray):
                 logger.error(
                     f"Observation from build_adaptive_observation is not a numpy array: "
@@ -875,7 +947,14 @@ class MultiAssetChunkedEnv(gym.Env):
                 )
                 return np.zeros(self.observation_space.shape, dtype=np.float32)
             
+            # Mettre en cache l'observation
+            self._manage_cache(cache_key, observation)
+            
+            end_time = time.time()
+            logger.debug(f"_get_observation took {end_time - start_time:.4f} seconds")
+            
             return observation
+            
         except Exception as e:
             logger.error(f"Error in _get_observation: {str(e)}", exc_info=True)
             return np.zeros(self.observation_space.shape, dtype=np.float32)

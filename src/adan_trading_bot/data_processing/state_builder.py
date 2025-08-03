@@ -169,6 +169,7 @@ class StateBuilder:
         self.scaler_path = scaler_path
         self.scalers = {tf: None for tf in self.timeframes}
         self.feature_indices = {}
+        self._col_mappings: Dict[str, Dict[str,str]] = {}
 
         # Initialisation des scalers
         self._init_scalers()
@@ -320,7 +321,7 @@ class StateBuilder:
         # Initialiser les nouveaux scalers
         for tf in self.timeframes:
             if tf == "5m":
-                self.scalers[tf] = MinMaxScaler(feature_range=(-1, 1), copy=False)
+                self.scalers[tf] = MinMaxScaler(feature_range=(0, 1), copy=False)
             elif tf == "1h":
                 self.scalers[tf] = StandardScaler(copy=False)
             elif tf == "4h":
@@ -338,7 +339,7 @@ class StateBuilder:
             return
             
         scaler_configs = {
-            '5m': {'scaler_type': 'minmax', 'feature_range': (-1, 1)},
+            '5m': {'scaler_type': 'minmax', 'feature_range': (0, 1)},
             '1h': {'scaler_type': 'standard'},
             '4h': {'scaler_type': 'robust'}
         }
@@ -347,7 +348,7 @@ class StateBuilder:
             config = scaler_configs.get(tf, {'scaler_type': 'standard'})
             
             if config['scaler_type'] == 'minmax':
-                scaler = MinMaxScaler(feature_range=config.get('feature_range', (-1, 1)))
+                scaler = MinMaxScaler(feature_range=config.get('feature_range', (0, 1)))
             elif config['scaler_type'] == 'standard':
                 scaler = StandardScaler()
             elif config['scaler_type'] == 'robust':
@@ -912,13 +913,20 @@ class StateBuilder:
             'timeframe_weights': self.timeframe_weights.copy()
         }
     
-    def build_observation(self, current_idx: int, data: Dict[str, pd.DataFrame]) -> Dict[str, np.ndarray]:
+    def _get_column_mapping(self, df: pd.DataFrame, tf: str):
+        if tf not in self._col_mappings:
+            # build once
+            m = {col.upper(): col for col in df.columns}
+            self._col_mappings[tf] = m
+        return self._col_mappings[tf]
+    
+    def build_observation(self, current_idx: int, data: Dict[str, Dict[str, pd.DataFrame]]) -> Dict[str, np.ndarray]:
         """
         Build observations for each timeframe.
         
         Args:
             current_idx: Current index in the data
-            data: Dictionary mapping timeframes to DataFrames
+            data: Dictionary mapping assets to their timeframe data
             
         Returns:
             Dictionary mapping timeframes to their observations
@@ -926,10 +934,17 @@ class StateBuilder:
         observations = {}
         
         for tf in self.timeframes:
-            if tf not in data:
+            # Combine data from all assets for the current timeframe
+            asset_dfs = []
+            for asset in data.keys():
+                if tf in data[asset]:
+                    asset_dfs.append(data[asset][tf])
+            
+            if not asset_dfs:
                 raise KeyError(f"Missing data for timeframe {tf}")
-                
-            df = data[tf]
+            
+            df = pd.concat(asset_dfs, axis=0)
+
             features = self.features_config.get(tf, [])
             
             if not features:
@@ -942,7 +957,7 @@ class StateBuilder:
                 continue
                 
             # Create a case-insensitive column mapping
-            column_mapping = {col.upper(): col for col in df.columns}
+            column_mapping = self._get_column_mapping(df, tf)
             
             # Log available and requested features for debugging
             logger.debug(f"Available columns in {tf} data: {df.columns.tolist()}")
@@ -994,20 +1009,23 @@ class StateBuilder:
 
     def build_adaptive_observation(self, 
                                  current_idx: int, 
-                                 data: Dict[str, pd.DataFrame],
+                                 data: Dict[str, Dict[str, pd.DataFrame]],
                                  portfolio_manager: Any = None) -> np.ndarray:
         """
         Build observation with adaptive window sizing and timeframe weighting.
         
         Args:
             current_idx: Current index in the data
-            data: Dictionary mapping timeframes to DataFrames
+            data: Dictionary mapping assets to their timeframe data
             
         Returns:
             3D numpy array with adaptive sizing and weighting applied
         """
         # Update adaptive window based on current market conditions
-        self.update_adaptive_window(data, current_idx)
+        # Note: This part needs to be adapted to handle the new data structure
+        # For now, we'll just use the first asset for volatility calculation
+        first_asset = next(iter(data.keys()))
+        self.update_adaptive_window(data[first_asset], current_idx)
         
         # Build standard observations
         observations = self.build_observation(current_idx, data)
