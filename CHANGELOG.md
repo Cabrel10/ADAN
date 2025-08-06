@@ -1,5 +1,13 @@
 # Journal des modifications (Changelog)
 
+## [1.0.1] - 2025-08-06
+
+### Corrigé
+- **Gestion des positions** : Correction de la méthode `calculate_position_size` dans `PortfolioManager`
+- **Gestion des ordres** : Mise à jour de la méthode `open_position` dans `OrderManager` pour accepter les paramètres `size`, `stop_loss` et `take_profit`
+- **Exécution des trades** : Correction des erreurs d'appel de méthode dans `multi_asset_chunked_env.py`
+- **Gestion des risques** : Amélioration de la gestion des limites de drawdown et de la taille des positions
+
 ## [1.0.0] - 2025-07-27
 
 ### Ajouté
