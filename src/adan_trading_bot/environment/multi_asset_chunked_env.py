@@ -8,44 +8,42 @@ avec chargement efficace des données par lots.
 """
 import logging
 import time
-from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import Any, Dict, List, Optional, Tuple
 
 import gymnasium as gym
 import numpy as np
 import pandas as pd
-from gymnasium import spaces
-from omegaconf import OmegaConf, DictConfig
 
 from adan_trading_bot.data_processing.data_loader import ChunkedDataLoader
-from adan_trading_bot.data_processing.state_builder import StateBuilder
-from adan_trading_bot.data_processing.observation_validator import ObservationValidator
 from adan_trading_bot.portfolio.portfolio_manager import PortfolioManager
-from adan_trading_bot.environment.dynamic_behavior_engine import DynamicBehaviorEngine
+from adan_trading_bot.data_processing.state_builder import (
+    StateBuilder,
+    TimeframeConfig
+)
+from adan_trading_bot.environment.dynamic_behavior_engine import (
+    DynamicBehaviorEngine
+)
 from adan_trading_bot.environment.order_manager import OrderManager
 from adan_trading_bot.environment.reward_calculator import RewardCalculator
 
-# Import TimeframeConfig depuis le bon module
-try:
-    from adan_trading_bot.data_processing.state_builder import TimeframeConfig
-except ImportError:
-    # Fallback si l'import échoue
-    @dataclass
-    class TimeframeConfig:
-        """Configuration pour un timeframe spécifique."""
-        timeframe: str
-        features: List[str]
-        window_size: int = 100
 
 # Configuration du logger
 logger = logging.getLogger(__name__)
 
 
 class MultiAssetChunkedEnv(gym.Env):
+    """Environnement de trading multi-actifs avec chargement par morceaux.
+
+    Cet environnement gère plusieurs actifs et intervalles de temps, avec
+    support pour des espaces d'actions discrets et continus. Il utilise un
+    constructeur d'état pour créer l'espace d'observation et un gestionnaire
+    de portefeuille pour suivre les positions et le PnL.
     """
-    Environnement de trading multi-actifs avec chargement par morceaux (chunks).
-    """
-    metadata = {'render_modes': ['human', 'rgb_array'], 'render_fps': 30}
+
+    metadata = {
+        'render_modes': ['human', 'rgb_array'],
+        'render_fps': 30
+    }
 
     # Constantes pour les actions
     HOLD = 0
@@ -70,6 +68,8 @@ class MultiAssetChunkedEnv(gym.Env):
         """
         super().__init__()
 
+        # Initialize logger
+        self.logger = logging.getLogger(__name__)
         self.config = config
         self.worker_config = worker_config
         self.data_loader_instance = data_loader_instance
@@ -80,25 +80,30 @@ class MultiAssetChunkedEnv(gym.Env):
         if not self.assets:
             raise ValueError("No assets specified in worker_config.")
 
-        # Ajout d'un cache d'observations avec une taille maximale
-        self._observation_cache = {}  # Cache for observations
-        self._max_cache_size = 1000  # Nombre maximum d'observations en cache
-        self._cache_hits = 0
-        self._cache_misses = 0
-        self._cache_access = {}  # Pour suivre la dernière utilisation
+        # Configuration du cache d'observations
+        self._observation_cache = {}  # Cache des observations
+        self._max_cache_size = 1000  # Taille maximale du cache
+        self._cache_hits = 0  # Succès du cache
+        self._cache_misses = 0  # Échecs du cache
+        self._current_observation = None  # Observation courante
+        self._cache_access = {}  # Suivi de l'utilisation
 
         # Initialisation des compteurs et états
         self.current_chunk = 0
         self.current_chunk_idx = 0
-        self.done = False  # Ajout de l'état done
+        self.done = False  # État done
+        self.global_step = 0  # Compteur global d'étapes
         
         # Initialisation des composants critiques
-        self._initialized = False
+        self._is_initialized = False  # Standardisation sur _is_initialized
         try:
             self._initialize_components()
-            self._initialized = True
+            self._is_initialized = True
         except Exception as e:
-            logger.error(f"Erreur lors de l'initialisation: {str(e)}")
+            self.logger.error(
+                "Erreur lors de l'initialisation: %s", 
+                str(e)
+            )
             raise
 
     def _initialize_components(self) -> None:
@@ -109,23 +114,36 @@ class MultiAssetChunkedEnv(gym.Env):
         else:
             self._init_data_loader(self.assets)
 
-        # 2. Dynamically create TimeframeConfig from the loaded data
+        # 2. Create TimeframeConfig from loaded data
         timeframe_configs = []
         if self.data_loader.features_by_timeframe:
-            for tf_name, features in self.data_loader.features_by_timeframe.items():
-                timeframe_configs.append(
-                    TimeframeConfig(timeframe=tf_name, features=features, window_size=100)
+            for tf_name, features in (
+                self.data_loader.features_by_timeframe.items()
+            ):
+                config = TimeframeConfig(
+                    timeframe=tf_name,
+                    features=features,
+                    window_size=100
                 )
+                timeframe_configs.append(config)
         else:
-            raise ValueError("No feature configuration found in data loader.")
+            raise ValueError("No feature configuration in data loader.")
 
         # 3. Initialize portfolio manager
         portfolio_config = self.config.copy()
         env_config = self.config.get("environment", {})
-        portfolio_config["trading_rules"] = self.config.get("trading_rules", {})
-        portfolio_config["capital_tiers"] = self.config.get("capital_tiers", [])
-        portfolio_config["initial_capital"] = env_config.get("initial_balance", 10000.0)
-        
+        portfolio_config["trading_rules"] = self.config.get(
+            "trading_rules", {})
+        portfolio_config["capital_tiers"] = self.config.get(
+            "capital_tiers", [])
+        # Utiliser portfolio.initial_balance en priorité, puis environment.initial_balance
+        # avec une valeur par défaut de 20.0
+        portfolio_balance = self.config.get("portfolio", {}).get(
+            "initial_balance",
+            env_config.get("initial_balance", 20.0)
+        )
+        portfolio_config["initial_capital"] = portfolio_balance
+
         # Map asset names to full names (e.g., BTC -> BTCUSDT)
         asset_mapping = {
             "BTC": "BTCUSDT",
@@ -134,27 +152,37 @@ class MultiAssetChunkedEnv(gym.Env):
             "XRP": "XRPUSDT",
             "ADA": "ADAUSDT",
         }
-        mapped_assets = [asset_mapping.get(asset, asset) for asset in self.assets]
-        
+        # Create a mapped assets list for the data loader
+        mapped_assets = [
+            asset_mapping.get(asset, asset) for asset in self.assets
+        ]
+
         # Initialize portfolio with mapped asset names
-        self.portfolio = PortfolioManager(env_config=portfolio_config, assets=mapped_assets)
-        
-        # Update self.assets to use mapped names
-        self.assets = mapped_assets
+        self.portfolio = PortfolioManager(
+            env_config=portfolio_config,
+            assets=mapped_assets
+        )
+        # Create alias for backward compatibility
+        self.portfolio_manager = self.portfolio
+        self.assets = mapped_assets  # Update self.assets
 
         # Convert list of TimeframeConfig objects to dictionary
         timeframe_configs_dict = {
-            tf_config.timeframe: tf_config for tf_config in timeframe_configs
+            tf_config.timeframe: tf_config 
+            for tf_config in timeframe_configs
         }
 
-        # 4. Initialize StateBuilder with the dynamic config
+        # 4. Initialize StateBuilder with dynamic config
         features_config = {
             tf: config.features
             for tf, config in timeframe_configs_dict.items()
         }
 
         # Initialize with default target size first
-        window_size = self.config.get("state", {}).get("max_window_size", 50)
+        window_size = self.config.get(
+            "state", {}
+        ).get("max_window_size", 50)
+        
         self.state_builder = StateBuilder(
             features_config=features_config,
             window_size=window_size,
@@ -165,25 +193,42 @@ class MultiAssetChunkedEnv(gym.Env):
         # 5. Setup action and observation spaces (requires state_builder)
         self._setup_spaces()
 
-        # 5. Initialize other components using worker_config where available
+        # 6. Initialize other components using worker_config where available
         trading_rules = self.config.get("trading_rules", {})
         penalties = self.config.get("environment", {}).get("penalties", {})
-        self.order_manager = OrderManager(trading_rules=trading_rules, penalties=penalties)
-
-        # Use reward_config from worker_config, fallback to main config's environment section
-        reward_cfg = self.worker_config.get(
-            "reward_config", self.config.get("environment", {}).get("reward_config", {})
+        self.order_manager = OrderManager(
+            trading_rules=trading_rules, 
+            penalties=penalties
         )
-        # Create a proper env_config dictionary with the reward_shaping section
-        env_config = {"reward_shaping": reward_cfg}
-        self.reward_calculator = RewardCalculator(env_config=env_config)
-        self.observation_validator = ObservationValidator()
 
-        # Use dbe_config from worker_config, fallback to main config
-        dbe_config = self.worker_config.get("dbe_config", self.config.get("dbe", {}))
+        # Get reward config with fallback to main config
+        env_section = self.config.get("environment", {})
+        reward_cfg = self.worker_config.get(
+            "reward_config", 
+            env_section.get("reward_config", {})
+        )
+        
+        # Create env config with reward shaping
+        env_config = {"reward_shaping": reward_cfg}
+        self.reward_calculator = RewardCalculator(
+            env_config=env_config
+        )
+        
+        # Initialize observation validator (will be initialized if needed)
+        self.observation_validator = None
+
+        # Initialize DBE with config from worker or main config
+        dbe_config = self.worker_config.get(
+            "dbe_config", 
+            self.config.get("dbe", {})
+        )
         self.dbe = DynamicBehaviorEngine(
-            config=dbe_config,  # Pass the specific DBE config
-            finance_manager=getattr(self.portfolio, "finance_manager", None),
+            config=dbe_config,
+            finance_manager=getattr(
+                self.portfolio, 
+                "finance_manager", 
+                None
+            ),
         )
 
     def _init_data_loader(self, assets: List[str]) -> Any:
@@ -196,11 +241,14 @@ class MultiAssetChunkedEnv(gym.Env):
             ValueError: If configuration is invalid or no assets are available
         """
         if not self.worker_config:
-            raise ValueError("worker_config must be provided to initialize the data loader.")
+            raise ValueError(
+                "worker_config must be provided to initialize the data loader."
+            )
 
         # Ensure paths are resolved
         if not hasattr(self, 'config') or not self.config:
             raise ValueError("Configuration not properly initialized")
+            
         # Mapping for asset names to file system names (e.g., BTC -> BTCUSDT)
         asset_mapping = {
             "BTC": "BTCUSDT",
@@ -217,20 +265,18 @@ class MultiAssetChunkedEnv(gym.Env):
         if not mapped_assets:
             raise ValueError("No assets specified in worker or environment config")
 
-        # Nouveau code plus permissif
-        global_data_timeframes = self.config.get("data", {}).get("timeframes", [])
+        # Get timeframes from config with fallback to worker config
+        global_data_timeframes = self.config.get(
+            "data", {}).get("timeframes", [])
         worker_timeframes = self.worker_config.get("timeframes", [])
 
-        if worker_timeframes:
-            # Le worker a spécifié quelques timeframes : on les prend tous
-            self.timeframes = worker_timeframes
-        else:
-            # Sinon, on retombe sur la liste complète de la config globale
-            self.timeframes = global_data_timeframes
+        # Use worker timeframes if specified, otherwise fallback to global config
+        self.timeframes = worker_timeframes or global_data_timeframes
 
         if not self.timeframes:
             raise ValueError(
-                f"No timeframes defined: global={global_data_timeframes}, worker={worker_timeframes}"
+                f"No timeframes defined: global={global_data_timeframes}, "
+                f"worker={worker_timeframes}"
             )
 
         # Create a copy of the config with resolved paths
@@ -238,15 +284,20 @@ class MultiAssetChunkedEnv(gym.Env):
             **self.config,
             "data": {
                 **self.config.get("data", {}),
-                "features_per_timeframe": self.config.get("data", {}).get("features_per_timeframe", {}),
-                "assets": mapped_assets # Use mapped_assets here
+                "features_per_timeframe": self.config.get(
+                    "data", {}).get("features_per_timeframe", {}),
+                "assets": mapped_assets  # Use mapped_assets here
             }
         }
+        
         # Ensure we have features configured for each timeframe
         features_config = loader_config["data"]["features_per_timeframe"]
         for tf in self.timeframes:
             if tf not in features_config:
-                logger.warning(f"No features configured for timeframe {tf}, using default features")
+                logger.warning(
+                    f"No features configured for timeframe {tf}, "
+                    "using default features"
+                )
                 features_config[tf] = ["open", "high", "low", "close", "volume"]
 
         # Initialize the data loader
@@ -254,7 +305,7 @@ class MultiAssetChunkedEnv(gym.Env):
             config=loader_config,
             worker_config={
                 **self.worker_config,
-                "assets": mapped_assets, # Use mapped_assets here
+                "assets": mapped_assets,  # Use mapped_assets here
                 "timeframes": self.timeframes
             }
         )
@@ -287,39 +338,45 @@ class MultiAssetChunkedEnv(gym.Env):
             dtype=np.float32,
         )
 
+        # Configure observation space based on StateBuilder
         try:
-            # Get the 3D observation shape from StateBuilder
-            n_timeframes, window_size, n_features = self.state_builder.get_observation_shape()
-            # Store the shape for later use
+            # Get the observation shape from StateBuilder (returns 4 values in new version)
+            observation_shape = self.state_builder.get_observation_shape()
+            
+            # Handle both old (3 values) and new (4 values) return formats
+            if len(observation_shape) == 4:
+                n_timeframes, window_size, n_features, portfolio_dim = observation_shape
+            else:
+                # Backward compatibility with old state builders
+                logger.warning("Using legacy observation shape format. Update your StateBuilder.")
+                n_timeframes, window_size, n_features = observation_shape
+                portfolio_dim = 17  # Default value for backward compatibility
+            
+            # Store the shape information
             self.observation_shape = (n_timeframes, window_size, n_features)
-            # Use the total flattened size calculated by StateBuilder
-            flattened_size = self.state_builder.total_flattened_observation_size
-
-            logger.info(f"Observation space shape: {self.observation_shape} (flattened: {flattened_size})")
-
-            # Create a flat Box space that matches the actual flattened observation size
-            self.observation_space = gym.spaces.Box(
-                low=-np.inf,
-                high=np.inf,
-                shape=(flattened_size,),  # Flattened shape for compatibility
-                dtype=np.float32,
-            )
-            logger.info(f"Observation space configured with flattened shape: {flattened_size}")
-
+            self.portfolio_state_dim = portfolio_dim
+            
+            # Create observation space dictionary
+            self.observation_space = gym.spaces.Dict({
+                'observation': gym.spaces.Box(
+                    low=-np.inf,
+                    high=np.inf,
+                    shape=self.observation_shape,
+                    dtype=np.float32
+                ),
+                'portfolio_state': gym.spaces.Box(
+                    low=-np.inf,
+                    high=np.inf,
+                    shape=(self.portfolio_state_dim,),
+                    dtype=np.float32
+                )
+            })
+            
+            logger.info(f"Observation space: {self.observation_space}")
+            
         except Exception as e:
-            logger.error(f"Failed to set up observation space: {str(e)}")
+            logger.error(f"Error setting up observation space: {str(e)}")
             raise
-
-    def set_shared_buffer(self, shared_buffer):
-        """
-        Définit le buffer d'expérience partagé à utiliser par cet environnement.
-
-        Args:
-            shared_buffer: Instance de SharedExperienceBuffer à utiliser pour stocker
-                         les expériences de cet environnement
-        """
-        self.shared_buffer = shared_buffer
-        logger.info(f"Buffer d'expérience partagé défini pour l'environnement {self.worker_id}")
 
     def reset(self, *, seed=None, options=None):
         """Reset the environment to start a new episode.
@@ -331,35 +388,19 @@ class MultiAssetChunkedEnv(gym.Env):
         Returns:
             tuple: (observation, info) containing the initial observation and info
         """
-        # Save cache information if needed
-        cache_backup = {}
-        if hasattr(self, '_observation_cache'):
-            # Keep the last 10 observations
-            cache_backup = dict(list(self._observation_cache.items())[-10:])
-
-        # Initialize data structures
-        self.current_data = {}
+        super().reset(seed=seed)
+        
+        # Reset episode-specific variables
         self.current_step = 0
+        self.done = False
+        self.episode_reward = 0.0
         self.step_in_chunk = 0
-        self.current_chunk_idx = 0
-        self.current_chunk = 0  # Initialisation de current_chunk
-        self.episode = 0
-        self.total_steps = 0
-        # max_steps est déjà défini dans __init__, on l'utilise directement
-        self.precomputed_windows = {}  # Dictionnaire pour stocker les fenêtres pré-calculées
-        self._last_observation = None
-        self._last_info = None
-        self._last_reward = 0.0
-        self._last_done = False
-        self._last_truncated = False
-        self._last_action = None
-        # Suppression de la réinitialisation de _last_info car elle est déjà faite ci-dessus
-        start_time = time.time()
-
-        # Reset portfolio
+        
+        # Reset portfolio and order manager
         self.portfolio.reset()
+        self.order_manager.reset()
 
-        # Load the first chunk of data
+        # Load initial chunk of data
         self.current_chunk_idx = 0
         self.current_data = self.data_loader.load_chunk(self.current_chunk_idx)
         
@@ -379,8 +420,7 @@ class MultiAssetChunkedEnv(gym.Env):
                     # Combine data for each timeframe
                     combined_data = {}
                     for tf, dfs in scaler_data.items():
-                        # Only concatenate if there are DataFrames to combine
-                        if dfs:
+                        if dfs:  # Only concatenate if there are DataFrames
                             combined_data[tf] = pd.concat(dfs, axis=0)
                     
                     # Fit scalers on the combined data
@@ -393,30 +433,31 @@ class MultiAssetChunkedEnv(gym.Env):
                     logger.error("Error fitting scalers: %s", str(e))
                     raise
 
-        # Determine the total number of chunks from the loaded data
-        # This is now initialized in _init_data_loader
-        # if self.current_data:
-        #     first_asset = next(iter(self.current_data.keys()))
-        #     if first_asset and self.current_data[first_asset]:
-        #         # Assuming chunk size is the length of the first dataframe
-        #         self.total_chunks = 1  # Simplified for now
-        #     else:
-        #         self.total_chunks = 0
-        # else:
-        #     self.total_chunks = 0
-
-        # Improved warm-up logic
+        # Get configuration
         state_config = self.config.get("state", {})
         env_config = self.config.get("environment", {})
         self.window_size = state_config.get("window_size", 50)
         self.warmup_steps = env_config.get("warmup_steps", self.window_size)
 
+        # Log configuration
+        logger.info(f"[CONFIG] Window size: {self.window_size}")
+        logger.info(f"[CONFIG] Warmup steps: {self.warmup_steps}")
+
+        # Get max steps configuration
+        self.max_steps = env_config.get("max_steps", 1000)
+        logger.info(f"[CONFIG] Max steps per episode: {self.max_steps}")
+
+        # Initialize last trade step
+        self.last_trade_step = 0
+        logger.info("[INIT] Last trade step initialized to 0")
+
         if self.warmup_steps < self.window_size:
-            logger.warning(
+            msg = (
                 f"warmup_steps ({self.warmup_steps}) is less than "
                 f"window_size ({self.window_size}). Setting warmup_steps to "
                 f"{self.window_size}"
             )
+            logger.warning(msg)
             self.warmup_steps = self.window_size
 
         first_asset = next(iter(self.current_data.keys()))
@@ -460,7 +501,20 @@ class MultiAssetChunkedEnv(gym.Env):
         self, action: np.ndarray
     ) -> Tuple[np.ndarray, float, bool, bool, Dict[str, Any]]:
         """Execute one time step within the environment."""
-        self._last_action = action
+        if not self._is_initialized:
+            raise RuntimeError("Environment not initialized. Call reset() first.")
+
+        self.current_step += 1
+        self.global_step += 1
+        
+        # Log current step and action
+        logger.info(f"[STEP {self.current_step}] Executing step with action: {action}")
+        
+        # Log portfolio value at the start of the step
+        if hasattr(self, 'portfolio_manager') and hasattr(self.portfolio_manager, 'portfolio_value'):
+            logger.info(f"[STEP {self.current_step}] Portfolio value: {self.portfolio_manager.portfolio_value:.2f}")
+        else:
+            logger.warning("[STEP] Portfolio manager or portfolio_value not available")
 
         if self.done:
             # Reset automatiquement l'environnement si l'épisode est terminé
@@ -493,18 +547,71 @@ class MultiAssetChunkedEnv(gym.Env):
             first_asset = next(iter(self.current_data.keys()))
             data_length = len(self.current_data[first_asset])
 
-            if self.step_in_chunk >= data_length:
-                self.current_chunk_idx += 1
-                self.current_chunk += 1  # Incrémenter le compteur de chunks
-                if self.current_chunk_idx >= self.total_chunks:
-                    self.done = True
-                else:
-                    self.current_data = self.data_loader.load_chunk(
-                        self.current_chunk_idx
-                    )
-                    self.step_in_chunk = 0
-                    if hasattr(self.dbe, "_reset_for_new_chunk"):
-                        self.dbe._reset_for_new_chunk()
+            MIN_EPISODE_STEPS = 500  # Minimum absolu avant évaluation
+            done = False
+            termination_reason = ""
+        
+            # Log current state before checking termination conditions
+            logger.info(f"[TERMINATION CHECK] Step: {self.current_step}, "
+                       f"Max Steps: {self.max_steps}, "
+                       f"Portfolio Value: {self.portfolio_manager.portfolio_value:.2f}, "
+                       f"Initial Equity: {self.portfolio_manager.initial_equity:.2f}, "
+                       f"Steps Since Last Trade: {self.current_step - self.last_trade_step}")
+        
+            if self.current_step < MIN_EPISODE_STEPS:
+                done = False
+                termination_reason = f"Min steps not reached ({self.current_step} < {MIN_EPISODE_STEPS})"
+                logger.info(f"[TERMINATION] {termination_reason}")
+            elif self.current_step >= self.max_steps:
+                done = True
+                termination_reason = f"Max steps reached ({self.current_step} >= {self.max_steps})"
+                logger.info(f"[TERMINATION] {termination_reason}")
+            elif self.portfolio_manager.total_value <= self.initial_equity * 0.70:
+                done = True
+                termination_reason = f"Max drawdown exceeded ({self.portfolio_manager.total_value:.2f} <= {self.initial_equity * 0.70:.2f})"
+                logger.warning(f"[TERMINATION] {termination_reason}")
+            elif self.current_step - self.last_trade_step > 300:
+                done = True
+                termination_reason = f"Max inactive steps reached ({self.current_step - self.last_trade_step} > 300)"
+                logger.warning(f"[TERMINATION] {termination_reason}")
+            elif self.current_step >= len(self.current_chunk) - 1:
+                done = True
+                termination_reason = f"End of chunk reached (step {self.current_step} >= {len(self.current_chunk) - 1})"
+                logger.info(f"[TERMINATION] {termination_reason}")
+        
+            # Log final decision and handle episode termination
+            if done:
+                logger.info(f"[EPISODE END] Episode ending. Reason: {termination_reason}")
+                logger.info(f"[EPISODE STATS] Total steps: {self.current_step}, "
+                          f"Final portfolio value: {self.portfolio_manager.total_value:.2f}, "
+                          f"Return: {(self.portfolio_manager.total_value/self.initial_equity - 1)*100:.2f}%")
+            else:
+                logger.debug(f"[TERMINATION] Episode continues. Current step: {self.current_step}")
+                
+                # Check for inactivity
+                if self.current_step - self.last_trade_step > 300:  # 300 steps without trading
+                    termination_reason = f"Max inactive steps reached (Last trade: {self.current_step - self.last_trade_step} steps ago)"
+                    logger.warning(f"[INACTIVITY] {termination_reason}")
+                    done = True
+                
+                # Handle chunk transitions
+                if self.step_in_chunk >= data_length:
+                    logger.info(f"[CHUNK] Reached end of chunk {self.current_chunk_idx + 1}/{self.total_chunks}")
+                    self.current_chunk_idx += 1
+                    self.current_chunk += 1
+                    if self.current_chunk_idx >= self.total_chunks:
+                        self.done = True
+                        logger.info("[CHUNK] Reached final chunk, episode complete")
+                    else:
+                        logger.debug(f"[CHUNK] Loading next chunk {self.current_chunk_idx + 1}/{self.total_chunks}")
+                        self.current_data = self.data_loader.load_chunk(
+                            self.current_chunk_idx
+                        )
+                        self.step_in_chunk = 0
+                        if hasattr(self.dbe, "_reset_for_new_chunk"):
+                            logger.debug("[DBE] Resetting DBE for new chunk")
+                            self.dbe._reset_for_new_chunk()
+                        logger.info(f"[CHUNK] Successfully loaded chunk {self.current_chunk_idx + 1}")
 
             next_observation = self._get_observation()
             
@@ -589,66 +696,312 @@ class MultiAssetChunkedEnv(gym.Env):
     def _execute_trades(
         self, action: np.ndarray, dbe_modulation: Dict[str, Any] = None
     ) -> None:
-        """Execute trades based on the continuous action vector."""
+        """Execute trades based on the continuous action vector with improved validation and risk management.
+        
+        Args:
+            action: Array of action values between -1 and 1 for each asset
+            dbe_modulation: Optional dictionary of dynamic behavior engine parameters
+            
+        Raises:
+            RuntimeError: If environment is not initialized
+            ValueError: If action dimensions are invalid
+        """
+        if not hasattr(self, '_is_initialized') or not self._is_initialized:
+            raise RuntimeError("Environment not initialized. Call reset() first.")
+            
+        logger.info(f"[TRADE] Starting trade execution for step {self.current_step}")
+        
+        # Initialize trades executed counter
+        trades_executed = 0
+        
+        # Validate action dimensions
         if len(action) != len(self.assets):
-            raise ValueError(
-                f"Action dimension {len(action)} does not match "
-                f"number of assets {len(self.assets)}"
-            )
+            error_msg = f"Action dimension {len(action)} does not match number of assets {len(self.assets)}"
+            logger.error(error_msg)
+            raise ValueError(error_msg)
 
-        current_prices = self._get_current_prices()
-        portfolio_metrics = self.portfolio.get_metrics()
-        cash = portfolio_metrics.get("cash", 0.0)
+        try:
+            # Get current market data
+            current_prices = self._get_current_prices()
+            
+            # Validate market data
+            if not self._validate_market_data(current_prices):
+                logger.error("Invalid market data, skipping trade execution")
+                return
+                
+            # Get current portfolio state
+            portfolio_metrics = self.portfolio.get_metrics()
+            cash_before = portfolio_metrics.get("cash", 0.0)
+            portfolio_value_before = self.portfolio.portfolio_value
+            current_drawdown = self.portfolio.calculate_drawdown()
+            current_leverage = self.portfolio.get_leverage()
+            
+            # Log current state
+            logger.info(f"[PORTFOLIO] Before trades - "
+                       f"Value: ${portfolio_value_before:.2f}, "
+                       f"Cash: ${cash_before:.2f}, "
+                       f"Leverage: {current_leverage:.2f}x, "
+                       f"Drawdown: {current_drawdown*100:.2f}%")
+            
+            # Log current prices and actions
+            logger.info(f"[MARKET] Current prices: {', '.join([f'{a}: ${p:.2f}' for a, p in current_prices.items()])}")
+            logger.info(f"[ACTION] Raw actions: {dict(zip(self.assets, action))}")
 
-        if dbe_modulation is None:
-            dbe_modulation = {}
-
-        for _i, (asset, action_value) in enumerate(
-            zip(self.assets, action, strict=True)
-        ):
-            action_value = np.clip(float(action_value), -1.0, 1.0)
-
-            if action_value > 0.1:
-                discrete_action = 1
-            elif action_value < -0.1:
-                discrete_action = 2
+            # Log open positions
+            open_positions = [
+                (asset, pos) for asset, pos in self.portfolio.positions.items() 
+                if hasattr(pos, 'is_open') and pos.is_open
+            ]
+            
+            if open_positions:
+                logger.info("[TRADE] Current open positions:")
+                for asset, pos in open_positions:
+                    current_price = current_prices.get(asset, 0.0)
+                    pnl_pct = ((current_price / pos.entry_price) - 1) * 100 if hasattr(pos, 'entry_price') and pos.entry_price > 0 else 0
+                    logger.info(
+                        f"  - {asset}: {pos.size:.6f} @ ${pos.entry_price:.2f} "
+                        f"(Current: ${current_price:.2f}, P&L: {pnl_pct:+.2f}%)"
+                    )
             else:
-                discrete_action = 0
+                logger.info("[TRADE] No open positions")
 
-            if discrete_action == 1:  # BUY
-                if not self.portfolio.positions[asset].is_open:
-                    self.order_manager.open_position(self.portfolio, asset, current_prices[asset], confidence=action_value)
+            # Handle DBE modulation
+            dbe_modulation = dbe_modulation or {}
+            if dbe_modulation:
+                logger.debug(f"DBE modulation: {dbe_modulation}")
+            
+            # Get trading parameters from config with defaults
+            trading_config = self.config.get('trading', {})
+            risk_config = trading_config.get('risk_management', {})
+            
+            base_sl = risk_config.get('base_stop_loss', 0.02)
+            base_tp = risk_config.get('base_take_profit', 0.05)
+            risk_per_trade = risk_config.get('risk_per_trade', 0.01)
+            
+            # Adjust risk based on drawdown (more conservative with higher drawdown)
+            risk_multiplier = max(0.1, 1.0 - current_drawdown)  # Reduce risk as drawdown increases
+            
+            # Process each asset
+            for i, (asset, action_value) in enumerate(zip(self.assets, action)):
+                try:
+                    action_value = float(np.clip(action_value, -1.0, 1.0))
+                    price = current_prices.get(asset)
+                    
+                    if price is None or price <= 0:
+                        logger.warning(f"Invalid price {price} for {asset}, skipping")
+                        continue
+                    
+                    # Get or create position
+                    position = self.portfolio.positions.get(asset)
+                    
+                    # Determine action type
+                    if action_value > 0.1:  # BUY
+                        if position and position.is_open:
+                            logger.debug(f"[ORDER] Position in {asset} already open, holding")
+                            continue
+                            
+                        # Calculate position size with risk management
+                        position_size = self.portfolio.calculate_position_size(
+                            price=price,
+                            risk_per_trade=risk_per_trade,
+                            account_risk_multiplier=risk_multiplier
+                        )
+                        
+                        if position_size > 0:
+                            logger.info(f"[ORDER] Opening position in {asset}: {position_size:.6f} @ ${price:.2f}")
+                            self.order_manager.open_position(
+                                portfolio=self.portfolio,
+                                asset=asset,
+                                price=price,
+                                size=position_size,
+                                stop_loss=price * (1 - base_sl),
+                                take_profit=price * (1 + base_tp)
+                            )
+                            trades_executed += 1
+                            self.last_trade_step = self.current_step
+                        
+                    elif action_value < -0.1:  # SELL
+                        if not position or not position.is_open:
+                            logger.debug(f"[ORDER] No position in {asset} to close")
+                            continue
+                            
+                        logger.info(f"[ORDER] Closing position in {asset} at ${price:.2f}")
+                        self.order_manager.close_position(
+                            portfolio=self.portfolio,
+                            asset=asset,
+                            price=price
+                        )
+                        trades_executed += 1
+                        self.last_trade_step = self.current_step
+                    
+                    # No action for values between -0.1 and 0.1 (HOLD)
+                    
+                except Exception as e:
+                    logger.error(f"Error processing trade for {asset}: {str(e)}", exc_info=True)
+            
+            # Update portfolio metrics after trades
+            self.portfolio.update_market_price(current_prices)
+            rebalance_result = self.portfolio.rebalance(current_prices)
+            
+            # Log portfolio state after trades
+            portfolio_metrics = self.portfolio.get_metrics()
+            cash_after = portfolio_metrics.get("cash", 0.0)
+            portfolio_value_after = self.portfolio.portfolio_value
+            
+            logger.info(f"[PORTFOLIO] After trades - "
+                      f"Trades executed: {trades_executed}, "
+                      f"Cash: ${cash_after:.2f} (Δ${cash_after - cash_before:+.2f}), "
+                      f"Portfolio Value: ${portfolio_value_after:.2f} (Δ${portfolio_value_after - portfolio_value_before:+.2f})")
+            
+            # Log detailed position information
+            if hasattr(self.portfolio, 'positions'):
+                open_positions = [
+                    asset for asset, pos in self.portfolio.positions.items() 
+                    if hasattr(pos, 'is_open') and pos.is_open
+                ]
+                if open_positions:
+                    logger.info(f"[POSITIONS] Open positions: {', '.join(open_positions)}")
+                    for asset in open_positions:
+                        pos = self.portfolio.positions[asset]
+                        current_price = current_prices.get(asset, 0.0)
+                        portfolio_metrics = self.portfolio.get_metrics()
+                        position_info = (
+                            f"  - {asset}: {pos.size:.4f} @ ${pos.entry_price:.2f} "
+                            f"(Current: ${current_price:.2f}, "
+                            f"P&L: ${portfolio_metrics.get('unrealized_pnl', 0):.2f}, "
+                            f"Return: {portfolio_metrics.get('total_return_pct', 0):.2f}%)"
+                        )
+                        logger.info(position_info)
                 else:
-                    logger.debug(f"Attempted to BUY {asset} but position is already open. Holding.")
-            elif discrete_action == 2:  # SELL
-                if self.portfolio.positions[asset].is_open:
-                    self.order_manager.close_position(self.portfolio, asset, current_prices[asset])
-                else:
-                    logger.debug(f"Attempted to SELL {asset} but no position is open. Holding.")
-
-        self.portfolio.update_market_price(current_prices)
-        self.portfolio.rebalance(current_prices)
+                    logger.info("[POSITIONS] No open positions")
+                    
+        except Exception as e:
+            logger.error(f"Critical error in _execute_trades: {str(e)}", exc_info=True)
+            raise
 
     def _get_current_prices(self) -> Dict[str, float]:
-        """Get current prices for all assets."""
-        start_time = time.time()
+        """Get the current prices for all assets with caching."""
+        current_time = time.time()
         prices = {}
+        
+        # Vérifier si le cache est activé
+        perf_config = self.config.get('trading', {}).get('performance', {})
+        enable_caching = perf_config.get('enable_data_caching', True)
+        
         for _asset, timeframe_data in self.current_data.items():
+            # Vérifier si le prix est en cache et toujours valide
+            cache_valid = (enable_caching and 
+                         hasattr(self, '_price_cache') and 
+                         _asset in self._price_cache and 
+                         hasattr(self, '_last_price_update') and
+                         _asset in self._last_price_update and
+                         current_time - self._last_price_update[_asset] < self._cache_ttl)
+            
+            if cache_valid:
+                prices[_asset] = self._price_cache[_asset]
+                continue
+                
+            # Si pas en cache ou expiré, calculer le prix
             if not timeframe_data:
                 continue
+                
             tf = next(iter(timeframe_data.keys()))
             df = timeframe_data[tf]
+            
             if not df.empty and self.current_step < len(df):
-                if "close" in df.columns:
-                    prices[_asset] = df.iloc[self.current_step]["close"]
-                elif not df.empty:
-                    numeric_cols = df.select_dtypes(include=[np.number]).columns
-                    if len(numeric_cols) > 0:
-                        current_row = df.iloc[self.current_step]
-                        prices[_asset] = current_row[numeric_cols[0]]
-        end_time = time.time()
-        logger.debug(f"_get_current_prices took {end_time - start_time:.4f} seconds")
+                try:
+                    if "close" in df.columns:
+                        price = float(df.iloc[self.current_step]["close"])
+                        prices[_asset] = price
+                    else:
+                        numeric_cols = df.select_dtypes(include=[np.number]).columns
+                        if len(numeric_cols) > 0:
+                            price = float(df.iloc[self.current_step][numeric_cols[0]])
+                            prices[_asset] = price
+                except Exception as e:
+                    logger.warning(f"Error getting price for {_asset}: {str(e)}")
+        
         return prices
+        
+    def _validate_market_data(self, prices: Dict[str, float]) -> bool:
+        """Valide les données de marché avant l'exécution des trades.
+
+        Args:
+            prices: Dictionnaire des prix actuels par actif
+
+        Returns:
+            bool: True si les données sont valides, False sinon
+        """
+        if not prices:
+            logger.error("No market data available")
+            return False
+
+        invalid_assets = [
+            asset for asset, price in prices.items()
+            if price <= 0 or not np.isfinite(price)
+        ]
+
+        if invalid_assets:
+            invalid_list = ", ".join(invalid_assets)
+            logger.error("Invalid prices for assets: %s", invalid_list)
+            return False
+
+        return True
+    
+    def _log_trade_error(
+            self,
+            asset: str,
+            action_value: float,
+            price: float,
+            error: str
+    ) -> None:
+        """Enregistre les erreurs de trading pour analyse ultérieure.
+
+        Args:
+            asset: Symbole de l'actif concerné
+            action_value: Valeur de l'action (-1 à 1)
+            price: Prix au moment de l'erreur
+            error: Message d'erreur détaillé
+        """
+        # Déterminer le type d'action
+        if action_value > 0.1:
+            action = 'BUY'
+        elif action_value < -0.1:
+            action = 'SELL'
+        else:
+            action = 'HOLD'
+        
+        # Préparer les informations d'erreur
+        error_info = {
+            'timestamp': datetime.now().isoformat(),
+            'step': self.current_step,
+            'asset': asset,
+            'action': action,
+            'action_value': float(action_value),
+            'price': float(price) if price is not None else None,
+            'error': error,
+        }
+        
+        # Ajouter la valeur du portefeuille si disponible
+        if hasattr(self.portfolio, 'portfolio_value'):
+            error_info['portfolio_value'] = float(
+                self.portfolio.portfolio_value
+            )
+        
+        # Logger l'erreur
+        logger.error(f"Trade error: {error_info}")
+        
+        # Enregistrer dans un fichier si configuré
+        log_config = self.config.get('logging', {})
+        error_log_path = log_config.get('error_log_path', 'trade_errors.log')
+        
+        try:
+            with open(error_log_path, 'a', encoding='utf-8') as f:
+                f.write(json.dumps(error_info) + '\n')
+        except IOError as e:
+            logger.error(f"Failed to write to error log: {str(e)}")
+        except Exception as e:
+            logger.error(f"Unexpected error writing to log: {str(e)}")
 
     def _get_current_timestamp(self) -> pd.Timestamp:
         """Get the current timestamp."""
@@ -827,174 +1180,135 @@ class MultiAssetChunkedEnv(gym.Env):
             # Fallback to minimal DataFrame
             return pd.DataFrame(columns=['timestamp', 'close'])
 
-    def _get_observation(self) -> np.ndarray:
-        """Get the current observation from the environment."""
-        start_time = time.time()
+    def _get_observation(self) -> Dict[str, np.ndarray]:
+        """
+        Construit et retourne l'observation actuelle sous forme de dictionnaire.
         
-        # Vérifier si l'observation est dans le cache
-        cache_key = f"{self.current_step}_{self.step_in_chunk}"
-        cached_obs = self._manage_cache(cache_key)
-        if cached_obs is not None:
-            end_time = time.time()
-            logger.debug(f"_get_observation (cached) took {end_time - start_time:.4f} seconds")
-            return cached_obs
-
+        Returns:
+            Dict[str, np.ndarray]: Dictionnaire contenant:
+                - 'observation': np.ndarray de forme (timeframes, window_size, features)
+                - 'portfolio_state': np.ndarray de forme (portfolio_state_size,)
+        """
+        if self._current_observation is not None:
+            return self._current_observation
+            
         try:
-            # Log precomputed windows for debugging
-            logger.debug("=== Precomputed Windows ===")
-            for tf, assets in self.precomputed_windows.items():
-                logger.debug(f"Timeframe {tf} assets: {list(assets.keys())}")
-                for asset, window in assets.items():
-                    if window is None:
-                        logger.warning(f"  {asset}: None")
-                    else:
-                        logger.debug(f"  {asset}: shape={window.shape if hasattr(window, 'shape') else 'N/A'}")
-
-            # Get feature configuration for all timeframes
-            feature_config = {}
-            for tf in self.timeframes:
-                try:
-                    features = self.state_builder.get_feature_names(tf)
-                    if features:
-                        feature_config[tf] = features
-                        logger.debug(f"Configured features for {tf}: {features}")
-                    else:
-                        logger.warning(f"No features found for timeframe {tf}")
-                except Exception as e:
-                    logger.warning(f"Error getting features for timeframe {tf}: {str(e)}")
-            
-            if not feature_config:
-                raise ValueError("No valid feature configurations found for any timeframe")
-
-            # Process asset data for available timeframes
-            processed_data = self._process_assets(feature_config)
-            
-            # Log processed data structure
-            logger.debug("=== Processed Data Structure ===")
-            for tf, assets in processed_data.items():
-                logger.debug(f"Timeframe {tf} has data for assets: {list(assets.keys())}")
-                for asset, df in assets.items():
-                    logger.debug(f"  {asset}: shape={df.shape if hasattr(df, 'shape') else 'N/A'}")
-            
-            # Ensure all timeframes and assets are present in the processed data
-            for tf in self.timeframes:
-                if tf not in processed_data:
-                    logger.warning(f"No data available for timeframe {tf}, creating empty data")
-                    processed_data[tf] = {}
-                
-                # Ensure all assets have data for this timeframe
-                for asset in self.assets:
-                    if asset not in processed_data[tf]:
-                        logger.warning(f"No data for {asset} {tf}, creating empty DataFrame")
-                        empty_df = self._create_empty_dataframe(tf, window_size=self.window_sizes.get(tf, 1))
-                        if empty_df is not None:
-                            processed_data[tf][asset] = empty_df
-                        else:
-                            logger.error(f"Failed to create empty DataFrame for {asset} {tf}")
-            
-            if not processed_data:
-                logger.error("No market data available to build observation.")
-                return np.zeros(self.observation_space.shape, dtype=np.float32)
-
-            # Log final data structure before transformation
-            logger.debug("=== Final Data Structure ===")
-            for tf, assets in processed_data.items():
-                logger.debug(f"Timeframe {tf} final assets: {list(assets.keys())}")
-                for asset, df in assets.items():
-                    logger.debug(f"  {asset}: shape={df.shape if hasattr(df, 'shape') else 'N/A'}")
-            
-            # Transform data structure from {timeframe: {asset: df}} to {asset: {timeframe: df}}
-            transformed_data = {asset: {} for asset in self.assets}
-            
-            # Initialize all timeframes for all assets with empty DataFrames if needed
-            for tf in self.timeframes:
-                for asset in self.assets:
-                    if tf not in processed_data or asset not in processed_data[tf]:
-                        logger.warning(f"Creating empty DataFrame for {asset} {tf}")
-                        empty_df = self._create_empty_dataframe(tf, window_size=self.window_sizes.get(tf, 1))
-                        if empty_df is not None:
-                            if tf not in processed_data:
-                                processed_data[tf] = {}
-                            processed_data[tf][asset] = empty_df
-            
-            # Now perform the transformation
-            for tf in self.timeframes:
-                if tf in processed_data:
-                    for asset in self.assets:
-                        if asset in processed_data[tf]:
-                            transformed_data[asset][tf] = processed_data[tf][asset]
-            
-            # Log the transformed structure
-            logger.debug("=== Transformed Data Structure ===")
-            for asset, timeframes in transformed_data.items():
-                logger.debug(f"Asset {asset} has data for timeframes: {list(timeframes.keys())}")
-                for tf, df in timeframes.items():
-                    logger.debug(f"  {tf}: shape={df.shape if hasattr(df, 'shape') else 'N/A'}")
-
-            # Build the observation
-            build_obs_start_time = time.time()
-            observation = self.state_builder.build_adaptive_observation(
-                self.current_step,
-                transformed_data,  # Use the transformed data structure
-                self.portfolio
+            # Construire l'observation 3D via le StateBuilder
+            # Use current_step instead of current_idx
+            obs_3d = self.state_builder.build_observation(
+                current_idx=self.current_step,
+                data=self.current_data  # Use current_data instead of data
             )
-            build_obs_end_time = time.time()
-            logger.debug(f"state_builder.build_adaptive_observation took {build_obs_end_time - build_obs_start_time:.4f} seconds")
-
-            if not isinstance(observation, np.ndarray):
-                logger.error(
-                    f"Observation from build_adaptive_observation is not a numpy array: "
-                    f"{type(observation)}"
-                )
-                return np.zeros(self.observation_space.shape, dtype=np.float32)
             
-            # Cache the observation
-            self._manage_cache(cache_key, observation)
-            return observation
+            # Construire l'état du portefeuille
+            portfolio_state = self.portfolio_manager.get_state()
+            
+            # Convertir en tableaux numpy si nécessaire
+            obs_3d = np.asarray(obs_3d, dtype=np.float32)
+            portfolio_state = np.asarray(portfolio_state, dtype=np.float32)
+            
+            # S'assurer que les dimensions sont correctes
+            if len(obs_3d.shape) != 3:
+                obs_3d = obs_3d.reshape(
+                    (len(self.timeframes), self.window_size, -1)
+                )
+                
+            if len(portfolio_state.shape) != 1:
+                portfolio_state = portfolio_state.flatten()
+            
+            # Créer et mettre en cache l'observation
+            self._current_observation = {
+                'observation': obs_3d,
+                'portfolio_state': portfolio_state
+            }
+            
+            return self._current_observation
             
         except Exception as e:
-            logger.error(f"Error in _get_observation: {str(e)}", exc_info=True)
-            return np.zeros(self.observation_space.shape, dtype=np.float32)
+            self.logger.error(
+                f"Erreur lors de la construction de l'observation: {e}"
+            )
+            # Retourner une observation vide en cas d'erreur
+            return {
+                'observation': np.zeros(
+                    (len(self.timeframes), self.window_size, 1),
+                    dtype=np.float32
+                ),
+                'portfolio_state': np.zeros(10, dtype=np.float32)
+            }
             
     def _calculate_reward(self, action: np.ndarray) -> float:
-        """Calcule la récompense pour l'étape actuelle."""
+        """
+        Calcule la récompense pour l'étape actuelle.
+        
+        La récompense est calculée comme suit :
+        - Récompense de base : rendement du portefeuille
+        - Pénalité de risque : basée sur le drawdown maximum
+        - Pénalité de transaction : basée sur le turnover
+        - Pénalité de concentration : pénalise les positions trop importantes
+        - Pénalité de régularité des actions : pénalise les changements brusques
+        
+        Args:
+            action: Vecteur d'actions du modèle
+            
+        Returns:
+            float: Valeur de la récompense
+        """
+        if not hasattr(self, '_is_initialized') or not self._is_initialized:
+            raise RuntimeError(
+                "Environment not initialized. Call reset() first."
+            )
+            
+        # Récupération des métriques du portefeuille
         portfolio_metrics = self.portfolio.get_metrics()
         returns = portfolio_metrics.get("returns", 0.0)
         max_drawdown = portfolio_metrics.get("max_drawdown", 0.0)
         reward_config = self.config.get("reward", {})
+        
+        # Configuration des paramètres de récompense
         return_scale = reward_config.get("return_scale", 1.0)
         risk_aversion = reward_config.get("risk_aversion", 1.5)
+        
+        # Calcul de la récompense de base
         base_reward = returns * return_scale
         risk_penalty = risk_aversion * max_drawdown
+        
+        # Calcul de la pénalité de transaction
         transaction_penalty = 0.0
         if hasattr(self, "_last_portfolio_value"):
-            turnover = abs(
-                portfolio_metrics.get("total_value", 0.0)
-                - self._last_portfolio_value
-            ) / max(1.0, self._last_portfolio_value)
+            last_value = self._last_portfolio_value
+            current_value = portfolio_metrics.get("total_value", 0.0)
+            turnover = abs(current_value - last_value) / max(1.0, last_value)
             transaction_penalty = (
                 reward_config.get("transaction_cost_penalty", 0.1) * turnover
             )
+        
+        # Calcul de la pénalité de concentration
         position_concentration = 0.0
         if portfolio_metrics.get("total_value", 0) > 0:
-            position_values = [
-                p.get("value", 0)
-                for p in portfolio_metrics.get("positions", {}).values()
-            ]
+            positions = portfolio_metrics.get("positions", {})
+            position_values = [p.get("value", 0) for p in positions.values()]
             if position_values:
                 max_position = max(position_values)
                 position_concentration = (
                     max_position / portfolio_metrics["total_value"]
                 ) ** 2
+        
         concentration_penalty = (
-            reward_config.get("concentration_penalty", 0.5) * position_concentration
+            reward_config.get("concentration_penalty", 0.5) 
+            * position_concentration
         )
+        
+        # Calcul de la pénalité de régularité des actions
         action_smoothness_penalty = 0.0
         if hasattr(self, "_last_action") and self._last_action is not None:
             action_diff = np.mean(np.abs(action - self._last_action))
             action_smoothness_penalty = (
-                reward_config.get("action_smoothness_penalty", 0.1) * action_diff
+                reward_config.get("action_smoothness_penalty", 0.1) 
+                * action_diff
             )
+        
+        # Calcul de la récompense totale
         reward = (
             base_reward
             - risk_penalty
@@ -1002,8 +1316,12 @@ class MultiAssetChunkedEnv(gym.Env):
             - concentration_penalty
             - action_smoothness_penalty
         )
+        
+        # Mise à jour des états pour la prochaine itération
         self._last_portfolio_value = portfolio_metrics.get("total_value", 0.0)
         self._last_action = action.copy()
+        
+        # Journalisation des composantes de la récompense
         self._last_reward_components = {
             "base_reward": float(base_reward),
             "risk_penalty": float(risk_penalty),
@@ -1012,6 +1330,7 @@ class MultiAssetChunkedEnv(gym.Env):
             "action_smoothness_penalty": float(action_smoothness_penalty),
             "total_reward": float(reward),
         }
+        
         return float(reward)
 
     def _get_info(self) -> Dict[str, Any]:

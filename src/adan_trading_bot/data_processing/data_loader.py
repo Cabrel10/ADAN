@@ -5,10 +5,14 @@ Chargeur de données pour le projet ADAN.
 Charge les données de trading à partir de fichiers parquet organisés par actif et timeframe.
 """
 import logging
+import os
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
-from typing import Dict, List
+from typing import Dict, List, Tuple
 
+import numpy as np
 import pandas as pd
+from tqdm import tqdm
 
 from ..common.config_loader import ConfigLoader
 
@@ -78,10 +82,15 @@ class ChunkedDataLoader:
         if not self.timeframes:
             raise ValueError("Aucun timeframe défini dans la configuration du worker.")
 
+        # Configuration du parallélisme
+        self.max_workers = min(8, (os.cpu_count() or 4) * 2)
         logger.info(
-            f"Chargement des données pour les actifs: {self.assets_list} "
-            f"et timeframes: {self.timeframes}"
+            f"Chargement des données pour {len(self.assets_list)} actifs et "
+            f"{len(self.timeframes)} timeframes en parallèle (max {self.max_workers} workers)"
         )
+        logger.debug(f"Actifs: {self.assets_list}")
+        logger.debug(f"Timeframes: {self.timeframes}")
+        logger.debug(f"Jeu de données: {self.data_split}")
 
     def _validate_timeframes(self):
         """
@@ -162,53 +171,95 @@ class ChunkedDataLoader:
         else:
             raise FileNotFoundError(f"Fichier introuvable: {file_path}")
 
-    def load_chunk(self, chunk_index: int = 0) -> Dict[str, Dict[str, pd.DataFrame]]:
+    def _load_asset_timeframe(self, asset: str, timeframe: str) -> pd.DataFrame:
         """
-        Charge un morceau de données pour les actifs et timeframes configurés.
+        Charge les données d'un actif et d'un timeframe spécifique.
+        
+        Args:
+            asset: Symbole de l'actif (ex: 'BTC')
+            timeframe: Période de temps (ex: '5m', '1h')
+            
+        Returns:
+            DataFrame contenant les données demandées
+            
+        Raises:
+            FileNotFoundError: Si le fichier n'est pas trouvé
+            ValueError: Si les données sont corrompues ou incomplètes
+        """
+        file_path = self._get_data_path(asset, timeframe)
+        
+        try:
+            # Charge les données depuis le fichier parquet
+            df = pd.read_parquet(file_path)
+            
+            # Vérifie que le DataFrame n'est pas vide
+            if df.empty:
+                raise ValueError(f"Le fichier {file_path} est vide.")
+                
+            # Vérifie les colonnes requises
+            required_columns = {'OPEN', 'HIGH', 'LOW', 'CLOSE', 'VOLUME'}
+            missing_columns = required_columns - set(df.columns)
+            
+            if missing_columns:
+                raise ValueError(
+                    f"Colonnes manquantes dans {file_path}: {missing_columns}"
+                )
+                
+            logger.debug(f"Données chargées pour {asset} {timeframe}: {len(df)} lignes")
+            return df
+            
+        except Exception as e:
+            logger.error(f"Erreur lors du chargement de {file_path}: {str(e)}")
+            raise
+            
+    def _load_asset_timeframe_parallel(self, asset: str, tf: str) -> Tuple[str, str, pd.DataFrame]:
+        """
+        Charge les données d'un actif et d'un timeframe spécifique.
+        Méthode utilisée pour le chargement parallèle.
+        
+        Returns:
+            Tuple (asset, timeframe, DataFrame)
+        """
+        try:
+            df = self._load_asset_timeframe(asset, tf)
+            return asset, tf, df
+            
+        except Exception as e:
+            logger.error(f"Erreur lors du chargement de {asset} {tf}: {str(e)}")
+            raise
+
+    def load_chunk(self, chunk_idx: int = 0) -> Dict[str, Dict[str, pd.DataFrame]]:
+        """
+        Charge un chunk de données pour tous les actifs et timeframes configurés en parallèle.
 
         Args:
-            chunk_index: Index du morceau à charger (non utilisé pour l'instant)
+            chunk_idx: Index du chunk à charger (non utilisé, conservé pour compatibilité)
 
         Returns:
-            Dictionnaire imbriqué de DataFrames: {asset: {timeframe: df}}
+            Dictionnaire imbriqué {actif: {timeframe: DataFrame}}
         """
-        data = {}
-
-        for asset in self.assets_list:
-            data[asset] = {}
-
-            for timeframe in self.timeframes:
-                file_path = self._get_data_path(asset, timeframe)
-
-                try:
-                    # Charge les données depuis le fichier parquet
-                    df = pd.read_parquet(file_path)
-
-                    # Vérifie que le DataFrame n'est pas vide
-                    if df.empty:
-                        logger.warning(f"Le fichier {file_path} est vide.")
-                        continue
-
-                    # Vérifie que les colonnes requises sont présentes
-                    required_columns = {'OPEN', 'HIGH', 'LOW', 'CLOSE', 'VOLUME'}
-                    missing_columns = required_columns - set(df.columns)
-                    if missing_columns:
-                        raise ValueError(
-                            f"Colonnes manquantes dans {file_path}: {missing_columns}"
-                        )
-
-                    # Stocke le DataFrame dans la structure de données de sortie
-                    data[asset][timeframe] = df
-
-                    logger.info(
-                        f"Données chargées pour {asset} {timeframe}: {len(df)} lignes"
-                    )
-
-                except FileNotFoundError:
-                    logger.error(f"Fichier introuvable: {file_path}")
-                    raise
-                except Exception as e:
-                    logger.error(f"Erreur lors du chargement de {file_path}: {str(e)}")
-                    raise
-
+        data = {asset: {} for asset in self.assets_list}
+        total_tasks = len(self.assets_list) * len(self.timeframes)
+        
+        with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
+            # Création des tâches de chargement
+            futures = {
+                executor.submit(self._load_asset_timeframe_parallel, asset, tf): (asset, tf)
+                for asset in self.assets_list
+                for tf in self.timeframes
+            }
+            
+            # Traitement des résultats au fur et à mesure
+            with tqdm(total=total_tasks, desc="Chargement des données") as pbar:
+                for future in as_completed(futures):
+                    asset, tf = futures[future]
+                    try:
+                        asset, tf, df = future.result()
+                        data[asset][tf] = df
+                        pbar.update(1)
+                        pbar.set_postfix_str(f"{asset} {tf} - {len(df)} lignes")
+                    except Exception as e:
+                        logger.error(f"Échec du chargement de {asset} {tf}: {str(e)}")
+                        raise
+        
         return data

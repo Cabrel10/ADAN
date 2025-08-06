@@ -21,10 +21,10 @@ class OrderManager:
         logger.info("OrderManager initialized.")
 
     def open_position(
-        self, 
-        portfolio: PortfolioManager, 
-        asset: str, 
-        price: float, 
+        self,
+        portfolio: PortfolioManager,
+        asset: str,
+        price: float,
         size: float = None,
         stop_loss: float = None,
         take_profit: float = None,
@@ -73,8 +73,7 @@ class OrderManager:
         
         if size <= 0:
             logger.warning(
-                f"Invalid position size {size} for {asset} "
-                f"at price {price}"
+                f"Invalid position size {size} for {asset} at price {price}"
             )
             return False
             
@@ -84,9 +83,9 @@ class OrderManager:
         return portfolio.open_position(asset, price, size)
 
     def close_position(
-        self, 
-        portfolio: PortfolioManager, 
-        asset: str, 
+        self,
+        portfolio: PortfolioManager,
+        asset: str,
         price: float
     ) -> float:
         """
@@ -100,17 +99,19 @@ class OrderManager:
         Returns:
             The realized PnL from closing the position.
         """
-        if (asset not in portfolio.positions or 
+        if (asset not in portfolio.positions or
                 not portfolio.positions[asset].is_open):
-            logger.warning(f"Cannot close a position for {asset}, none is open.")
+            logger.warning(
+                f"Cannot close a position for {asset}, none is open."
+            )
             return 0.0
 
-        # The portfolio manager handles the logic of closing
+# The portfolio manager handles the logic of closing
         return portfolio.close_position(asset, price)
 
     def validate_order(
-        self, 
-        order: dict, 
+        self,
+        order: dict,
         portfolio_manager: PortfolioManager
     ) -> tuple[bool, float]:
         """
@@ -118,9 +119,9 @@ class OrderManager:
         Note: This seems to be a legacy method. The primary logic is now in
         open_position and close_position which use the portfolio's own validation.
         """
-        # This method's logic is largely incompatible with the current 
-        # PortfolioManager structure. It relies on dictionary access to positions 
-        # and a 'capital' attribute. The core validation is now handled within 
+        # This method's logic is largely incompatible with the current
+        # PortfolioManager structure. It relies on dictionary access to positions
+        # and a 'capital' attribute. The core validation is now handled within
         # PortfolioManager.validate_position. We can perform a basic check here.
         size = order.get('units', 0)
         price = order.get('price', 0)
@@ -137,10 +138,11 @@ class OrderManager:
     def reset(self) -> None:
         """
         Reset the order manager's internal state.
-        
-        This method is called at the beginning of each episode to reset any 
-        internal state. Currently, OrderManager doesn't maintain internal state 
-        that needs resetting, but this method is provided for API consistency.
+
+        This method is called at the beginning of each episode to reset any
+        internal state that needs resetting. Currently, OrderManager doesn't
+        maintain internal state that needs resetting, but this method is
+        provided for API consistency.
         """
         logger.debug("OrderManager reset called.")
-        # No internal state to reset at the moment
+# No internal state to reset at the moment

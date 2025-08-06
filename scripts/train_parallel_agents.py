@@ -20,9 +20,11 @@ import time
 import copy
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from datetime import datetime
-from typing import Any, Dict, List, Optional
-import yaml
+from typing import Any, Dict, Optional
+
 import gymnasium as gym
+import numpy as np
+import yaml
 from stable_baselines3 import PPO
 from stable_baselines3.common.monitor import Monitor
 from stable_baselines3.common.vec_env import DummyVecEnv
@@ -67,8 +69,12 @@ def setup_logging() -> logging.Logger:
     
     # Set specific log levels for verbose modules
     logging.getLogger('adan_trading_bot').setLevel(logging.DEBUG)
-    logging.getLogger('adan_trading_bot.environment.multi_asset_chunked_env').setLevel(logging.DEBUG)
-    logging.getLogger('adan_trading_bot.data_processing.state_builder').setLevel(logging.DEBUG)
+    logging.getLogger(
+        'adan_trading_bot.environment.multi_asset_chunked_env'
+    ).setLevel(logging.DEBUG)
+    logging.getLogger(
+        'adan_trading_bot.data_processing.state_builder'
+    ).setLevel(logging.DEBUG)
     
     # Disable excessive logging from libraries
     logging.getLogger('matplotlib').setLevel(logging.WARNING)
@@ -184,7 +190,11 @@ def train_single_instance(
         logger.info(f"  - Timeframes: {', '.join(worker_config.get('timeframes', []))}")
         logger.info(f"  - Jeu de données: {worker_config.get('data_split', 'train')}")
         
-        # 5. Créer l'environnement avec la configuration fusionnée
+        # 5. S'assurer que la configuration de l'environnement est correctement structurée
+        if 'environment' not in base_config:
+            base_config['environment'] = {}
+        
+        # 6. Créer l'environnement avec la configuration fusionnée
         env = MultiAssetChunkedEnv(config=base_config, worker_config=worker_config)
 
         # --- Validation dimensionnelle ---
@@ -207,8 +217,17 @@ def train_single_instance(
         env = Monitor(env)
         vec_env = DummyVecEnv([lambda: env])
 
-        policy_class = "MlpPolicy"
+        policy_class = "MultiInputPolicy"
         logger.info(f"Using policy: {policy_class}")
+        
+        # Forcer l'observation space à être un dictionnaire si ce n'est pas déjà le cas
+        if not isinstance(env.observation_space, gym.spaces.Dict):
+            logger.warning("L'espace d'observation n'est pas un dictionnaire, conversion en cours...")
+            # Créer un nouvel espace d'observation de type Dict
+            env.observation_space = gym.spaces.Dict({
+                'observation': env.observation_space,
+                'portfolio_state': gym.spaces.Box(low=-np.inf, high=np.inf, shape=(17,), dtype=np.float32)
+            })
 
         # Les paramètres de l'agent sont maintenant dans la config du worker
         agent_config = worker_config.get("agent_config", {})

@@ -17,6 +17,7 @@ import numpy as np
 import pandas as pd
 import psutil
 from sklearn.preprocessing import MinMaxScaler, RobustScaler, StandardScaler
+import hashlib
 
 logger = logging.getLogger(__name__)
 
@@ -170,14 +171,30 @@ class StateBuilder:
         self.scalers = {tf: None for tf in self.timeframes}
         self.feature_indices = {}
         self._col_mappings: Dict[str, Dict[str,str]] = {}
+        
+        # Initialize scaler cache with LRU behavior
+        self._scaler_cache = {}
+        self._scaler_cache_hits = 0
+        self._scaler_cache_misses = 0
+        self._max_scaler_cache_size = 100  # Maximum number of scalers to cache
 
         # Initialisation des scalers
         self._init_scalers()
 
-        # The observation_shape for StateBuilder will be the 3D shape
-        self.total_flattened_observation_size = self.observation_shape[0] * self.observation_shape[1] * self.observation_shape[2]
-        if self.include_portfolio_state:
-            self.total_flattened_observation_size += 17
+        # Calcul de la taille totale de l'observation après flatten
+        market_obs_size = len(self.timeframes) * self.window_size * self.max_features
+        
+        # Ajout de la taille de l'état du portefeuille
+        dummy_portfolio = np.zeros(1)  # Taille ignorée
+        portfolio_dim = len(self._build_portfolio_state(dummy_portfolio)) if hasattr(self, '_build_portfolio_state') else 17
+        
+        self.total_flattened_observation_size = market_obs_size + (portfolio_dim if self.include_portfolio_state else 0)
+        
+        logger.info(
+            f"Observation dimensions - Market: {market_obs_size} "
+            f"+ Portfolio: {portfolio_dim if self.include_portfolio_state else 0} = "
+            f"Total: {self.total_flattened_observation_size}"
+        )
 
         logger.info(f"StateBuilder initialized. Target flattened observation size: {self.total_flattened_observation_size}")
         logger.info(f"Features per timeframe: {self.nb_features_per_tf}")
@@ -202,6 +219,19 @@ class StateBuilder:
             logger.error(f"Error initializing memory metrics: {str(e)}")
             self._update_performance_metrics('errors_count', self.get_performance_metrics().get('errors_count', 0) + 1)
 
+    def _get_data_hash(self, data: np.ndarray) -> str:
+        """
+        Generate a hash key for the input data to be used in the scaler cache.
+        
+        Args:
+            data: Input data array to hash
+            
+        Returns:
+            str: MD5 hash of the data's content
+        """
+        # Convert data to bytes and generate MD5 hash
+        return hashlib.md5(data.tobytes()).hexdigest()
+        
     def _get_memory_usage_mb(self):
         """
         Get current memory usage in MB with monitoring.
@@ -223,12 +253,16 @@ class StateBuilder:
                 warnings_count = metrics.get('warnings_count', 0)
                 self._update_performance_metrics('warnings_count', warnings_count + 1)
             
+            # Mettre à jour le pic de mémoire
+            self.memory_peak_mb = max(getattr(self, 'memory_peak_mb', 0), memory_mb)
+            self._update_performance_metrics('memory_peak_mb', self.memory_peak_mb)
+            
             return memory_mb
             
         except Exception as e:
             logger.error(f"Error getting memory usage: {str(e)}")
             self._update_performance_metrics('errors_count', self.get_performance_metrics().get('errors_count', 0) + 1)
-            return 0
+            return 0  # Return 0 on error
 
     def _cleanup_memory(self):
         """
@@ -415,9 +449,24 @@ class StateBuilder:
                 if len(timeframe_data) < 2:
                     raise ValueError(f"Not enough data samples ({len(timeframe_data)}) to fit scaler for {tf}")
                 
-                # Fit le scaler avec optimisation de mémoire
-                self.scalers[tf].fit(timeframe_data)
-                logger.info(f"Fitted scaler for timeframe {tf} on {len(timeframe_data)} samples")
+                # Generate cache key and check cache first
+                data_hash = self._get_data_hash(timeframe_data)
+                cache_key = f"{tf}_{data_hash}"
+                
+                if cache_key in self._scaler_cache:
+                    self._scaler_cache_hits += 1
+                    self.scalers[tf] = self._scaler_cache[cache_key]
+                    logger.debug(f"Using cached scaler for {tf}")
+                else:
+                    self._scaler_cache_misses += 1
+                    # Fit new scaler
+                    self.scalers[tf].fit(timeframe_data)
+                    
+                    # Cache the fitted scaler (LRU eviction)
+                    if len(self._scaler_cache) >= self._max_scaler_cache_size:
+                        del self._scaler_cache[next(iter(self._scaler_cache))]
+                    self._scaler_cache[cache_key] = self.scalers[tf]
+                    logger.info(f"Fitted new scaler for {tf} on {len(timeframe_data)} samples")
             
             # Sauvegarder les scalers si nécessaire
             if self.scaler_path:
@@ -432,11 +481,18 @@ class StateBuilder:
             self._update_performance_metrics('errors_count', self.get_performance_metrics().get('errors_count', 0) + 1)
             raise
         
-        # Mettre à jour les métriques de mémoire
+        # Update memory metrics
         current_memory = self._get_memory_usage_mb()
-        # Utiliser 0 comme valeur par défaut si memory_peak_mb n'est pas défini
         self.memory_peak_mb = max(getattr(self, 'memory_peak_mb', 0), current_memory)
         self._update_performance_metrics('memory_peak_mb', self.memory_peak_mb)
+        
+        # Log cache statistics
+        cache_hit_rate = (self._scaler_cache_hits / (self._scaler_cache_hits + self._scaler_cache_misses)) * 100 \
+            if (self._scaler_cache_hits + self._scaler_cache_misses) > 0 else 0
+            
+        logger.info(f"Scaler cache stats: {len(self._scaler_cache)} cached scalers, "
+                  f"{self._scaler_cache_hits} hits, {self._scaler_cache_misses} misses, "
+                  f"{cache_hit_rate:.1f}% hit rate")
 
     def build_multi_channel_observation(self, 
                                         current_idx: int, 
@@ -507,10 +563,21 @@ class StateBuilder:
     
     def get_observation_shape(self) -> Tuple[int, ...]:
         """
-        Retourne la forme de l'observation.
-        Forme fixe : (3, 100, 36) pour (timeframes, fenêtre, features)
+        Retourne la forme de l'observation avant flatten.
+        
+        Returns:
+            Tuple: (n_timeframes, window_size, max_features, portfolio_state_size)
         """
-        return len(self.timeframes), self.window_size, self.max_features
+        # Création d'un état de portefeuille factice pour déterminer sa taille
+        dummy_portfolio = np.zeros(1)  # La taille sera ignorée dans _build_portfolio_state
+        portfolio_dim = len(self._build_portfolio_state(dummy_portfolio)) if hasattr(self, '_build_portfolio_state') else 17
+        
+        return (
+            len(self.timeframes),
+            self.window_size,
+            self.max_features,
+            portfolio_dim
+        )
 
     def calculate_expected_flat_dimension(self, portfolio_included: bool = False) -> int:
         """
@@ -718,77 +785,128 @@ class StateBuilder:
         
         return stats
     
-    def calculate_market_volatility(self, data: Dict[str, pd.DataFrame], current_idx: int) -> float:
+    def detect_market_regime(self, data: Dict[str, pd.DataFrame], current_idx: int) -> Dict[str, float]:
         """
-        Calculate current market volatility for adaptive window sizing.
+        Détecte le régime de marché actuel basé sur plusieurs indicateurs.
         
-        Args:
-            data: Dictionary mapping timeframes to DataFrames
-            current_idx: Current index in the data
-            
-        Returns:
-            Normalized volatility score (0.0 = low volatility, 1.0+ = high volatility)
+        Retourne un dictionnaire contenant:
+        - regime: 'trending', 'ranging', 'volatile'
+        - confidence: score de confiance [0-1]
+        - volatility: niveau de volatilité [0-1]
+        - trend_strength: force de la tendance [-1, 1]
         """
+        regime_metrics = {
+            'regime': 'ranging',
+            'confidence': 0.5,
+            'volatility': 0.5,
+            'trend_strength': 0.0
+        }
+        
         try:
-            volatilities = []
+            # 1. Calcul de la volatilité
+            volatility_scores = []
+            trend_strengths = []
             
             for tf in self.timeframes:
                 if tf not in data:
                     continue
                     
                 df = data[tf]
+                start_idx = max(0, current_idx - 50)  # Fenêtre de 50 périodes
+                window = df.iloc[start_idx:current_idx+1]
                 
-                # Get recent price data for volatility calculation
-                start_idx = max(0, current_idx - self.volatility_window + 1)
-                price_window = df.iloc[start_idx:current_idx+1]
-                
-                # Use close price or high-low range for volatility
-                if 'close' in price_window.columns:
-                    prices = price_window['close']
-                elif f'{tf}_close' in price_window.columns:
-                    prices = price_window[f'{tf}_close']
-                else:
+                # Récupération des prix
+                close_col = 'close' if 'close' in window.columns else f'{tf}_close'
+                if close_col not in window.columns:
+                    continue
+                    
+                prices = window[close_col]
+                if len(prices) < 20:  # Minimum 20 périodes
                     continue
                 
-                if len(prices) < 2:
-                    continue
+                # Calcul de la volatilité (ATR sur 14 périodes)
+                high = window.get('high', prices)
+                low = window.get('low', prices)
+                tr = np.maximum(
+                    high - low,
+                    np.maximum(
+                        abs(high - prices.shift(1)),
+                        abs(low - prices.shift(1))
+                    )
+                )
+                atr = tr.rolling(window=14).mean().iloc[-1] / prices.mean()
+                volatility_scores.append(atr)
                 
-                # Calculate returns and volatility
-                returns = prices.pct_change().dropna()
-                if len(returns) > 0:
-                    vol = returns.std() * np.sqrt(len(returns))  # Annualized volatility
-                    volatilities.append(vol * self.timeframe_weights[tf])
+                # Calcul de la force de tendance (ADX)
+                if 'ADX_14' in window.columns:
+                    adx = window['ADX_14'].iloc[-1] / 100  # Normalisation 0-1
+                    trend_strengths.append(adx)
             
-            if not volatilities:
-                return 0.5  # Default medium volatility
+            # Calcul des métriques agrégées
+            if volatility_scores:
+                regime_metrics['volatility'] = float(np.mean(volatility_scores))
+                
+            if trend_strengths:
+                regime_metrics['trend_strength'] = float(np.mean(trend_strengths)) * 2 - 1  # -1 à 1
             
-            # Weighted average volatility
-            weighted_volatility = np.mean(volatilities)
+            # Détection du régime
+            if regime_metrics['trend_strength'] > 0.3:
+                regime_metrics['regime'] = 'trending'
+                regime_metrics['confidence'] = min(1.0, regime_metrics['trend_strength'])
+            elif regime_metrics['volatility'] > 0.7:
+                regime_metrics['regime'] = 'volatile'
+                regime_metrics['confidence'] = min(1.0, regime_metrics['volatility'])
+            else:
+                regime_metrics['regime'] = 'ranging'
+                regime_metrics['confidence'] = 1.0 - max(regime_metrics['trend_strength'], regime_metrics['volatility'])
             
-            # Update volatility history
-            self.volatility_history.append(weighted_volatility)
+            return regime_metrics
+            
+        except Exception as e:
+            logger.error(f"Erreur lors de la détection du régime de marché: {e}")
+            return regime_metrics
+    
+    def calculate_market_volatility(self, data: Dict[str, pd.DataFrame], current_idx: int) -> float:
+        """
+        Calcule la volatilité du marché avec une approche plus robuste.
+        
+        Args:
+            data: Dictionnaire des données par timeframe
+            current_idx: Index actuel dans les données
+            
+        Returns:
+            Score de volatilité normalisé [0-1]
+        """
+        try:
+            # Utiliser la détection de régime pour obtenir la volatilité
+            regime_metrics = self.detect_market_regime(data, current_idx)
+            
+            # Mise à jour de l'historique de volatilité
+            self.volatility_history.append(regime_metrics['volatility'])
             if len(self.volatility_history) > self.volatility_window:
                 self.volatility_history.pop(0)
             
-            # Normalize against historical volatility
+            # Calcul de la volatilité normalisée par rapport à l'historique
             if len(self.volatility_history) > 1:
                 hist_mean = np.mean(self.volatility_history)
                 hist_std = np.std(self.volatility_history)
                 
                 if hist_std > 0:
-                    normalized_vol = (weighted_volatility - hist_mean) / hist_std
-                    # Convert to 0-1+ scale
-                    normalized_vol = max(0, (normalized_vol + 2) / 4)  # Shift and scale
+                    normalized_vol = (regime_metrics['volatility'] - hist_mean) / hist_std
+                    # Transformation en échelle 0-1 avec saturation
+                    normalized_vol = 0.5 + np.tanh(normalized_vol) * 0.5
                 else:
                     normalized_vol = 0.5
             else:
-                normalized_vol = 0.5
+                normalized_vol = regime_metrics['volatility']
             
-            return min(2.0, normalized_vol)  # Cap at 2.0 for extreme volatility
+            logger.debug(f"Volatilité du marché: {normalized_vol:.3f} (régime: {regime_metrics['regime']}, confiance: {regime_metrics['confidence']:.2f})")
+            
+            return min(1.0, max(0.0, normalized_vol))
             
         except Exception as e:
-            logger.error(f"Error calculating market volatility: {e}")
-            return 0.5  # Default medium volatility
+            logger.error(f"Erreur dans le calcul de la volatilité: {e}")
+            return 0.5  # Valeur par défaut en cas d'erreur
     
     def adapt_window_size(self, volatility: float) -> int:
         """
@@ -831,6 +949,63 @@ class StateBuilder:
         
         return adapted_size
     
+    def _update_timeframe_weights(self, regime_metrics: Dict[str, float]) -> None:
+        """
+        Met à jour les poids des différents timeframes en fonction du régime de marché détecté.
+        
+        Stratégie de pondération :
+        - Marché en tendance : Poids plus élevé sur les timeframes plus longs (4h, 1h)
+        - Marché range : Poids équilibré entre les timeframes
+        - Marché volatile : Poids plus élevé sur les timeframes plus courts (5m, 1h)
+        
+        Args:
+            regime_metrics: Métriques du régime de marché (récupérées via detect_market_regime)
+        """
+        regime = regime_metrics.get('regime', 'ranging')
+        confidence = regime_metrics.get('confidence', 0.5)
+        
+        # Poids de base pour chaque régime
+        if regime == 'trending':
+            # Privilégier les timeframes plus longs en tendance
+            weights = {
+                '5m': 0.7,  # Moins important en tendance établie
+                '1h': 1.0,  # Important pour identifier la tendance
+                '4h': 1.3   # Très important pour la tendance à long terme
+            }
+        elif regime == 'volatile':
+            # Privilégier les timeframes plus courts en période de volatilité
+            weights = {
+                '5m': 1.3,  # Très important pour la réactivité
+                '1h': 1.0,  # Important pour le contexte
+                '4h': 0.7   # Moins important en période de forte volatilité
+            }
+        else:  # ranging
+            # Poids équilibré en marché range
+            weights = {
+                '5m': 1.0,  # Important pour les mouvements courts
+                '1h': 1.0,  # Contexte moyen terme
+                '4h': 1.0   # Contexte long terme
+            }
+        
+        # Ajuster les poids en fonction de la confiance
+        # Plus la confiance est élevée, plus on applique les poids du régime
+        # Avec une confiance faible, on se rapproche de poids neutres (1.0)
+        for tf in self.timeframe_weights:
+            if tf in weights:
+                # Interpolation linéaire entre poids neutre (1.0) et le poids cible
+                # en fonction de la confiance
+                target_weight = weights[tf]
+                self.timeframe_weights[tf] = 1.0 + (target_weight - 1.0) * confidence
+        
+        # Normaliser les poids pour que leur somme reste constante
+        total_weight = sum(self.timeframe_weights.values())
+        num_timeframes = len(self.timeframe_weights)
+        if total_weight > 0:
+            for tf in self.timeframe_weights:
+                self.timeframe_weights[tf] = (self.timeframe_weights[tf] / total_weight) * num_timeframes
+        
+        logger.debug(f"Mise à jour des poids des timeframes (régime: {regime}, confiance: {confidence:.2f}): {self.timeframe_weights}")
+    
     def update_adaptive_window(self, data: Dict[str, pd.DataFrame], current_idx: int) -> None:
         """
         Update the window size based on current market conditions.
@@ -846,6 +1021,12 @@ class StateBuilder:
             return
             
         try:
+            # Détecter le régime de marché
+            regime_metrics = self.detect_market_regime(data, current_idx)
+            
+            # Mettre à jour les poids des timeframes en fonction du régime
+            self._update_timeframe_weights(regime_metrics)
+            
             # Calculate current market volatility
             volatility = self.calculate_market_volatility(data, current_idx)
             
@@ -920,16 +1101,26 @@ class StateBuilder:
             self._col_mappings[tf] = m
         return self._col_mappings[tf]
     
-    def build_observation(self, current_idx: int, data: Dict[str, Dict[str, pd.DataFrame]]) -> Dict[str, np.ndarray]:
+    def _build_asset_timeframe_state(self, asset, timeframe, df: pd.DataFrame):
+        required = self.features_config[timeframe]
+        # 1) Ajout des colonnes manquantes à 0.0
+        for feat in required:
+            if feat not in df.columns:
+                df[feat] = 0.0
+        # 2) Sélection et ordre garanti
+        arr = df[required].to_numpy()
+        return arr  # shape = (n_rows, len(required))
+
+    def build_observation(self, current_idx: int, data: Dict[str, Dict[str, pd.DataFrame]]) -> np.ndarray:
         """
-        Build observations for each timeframe.
+        Build observations for each timeframe and combine into a 3D array.
         
         Args:
             current_idx: Current index in the data
             data: Dictionary mapping assets to their timeframe data
             
         Returns:
-            Dictionary mapping timeframes to their observations
+            3D numpy array of shape (n_timeframes, window_size, n_features)
         """
         observations = {}
         
@@ -1004,120 +1195,91 @@ class StateBuilder:
                 
             observations[tf] = obs
             
-        logger.debug(f"build_observation returning: type={type(observations)}, content={observations}")
-        return observations
+        # Stack observations along the first axis to create a 3D array
+        try:
+            # Stack in the order defined by self.timeframes to maintain consistency
+            stacked_obs = np.stack([observations[tf] for tf in self.timeframes], axis=0)
+            logger.debug(f"build_observation returning 3D array with shape: {stacked_obs.shape}")
+            return stacked_obs
+        except Exception as e:
+            logger.error(f"Error stacking observations: {e}")
+            # Fallback: return zeros with correct shape
+            return np.zeros(
+                (len(self.timeframes), self.window_size, self.max_features),
+                dtype=np.float32
+            )
 
     def build_adaptive_observation(self, 
                                  current_idx: int, 
                                  data: Dict[str, Dict[str, pd.DataFrame]],
-                                 portfolio_manager: Any = None) -> np.ndarray:
+                                 portfolio_manager: Any = None) -> Dict[str, np.ndarray]:
         """
         Build observation with adaptive window sizing and timeframe weighting.
         
         Args:
             current_idx: Current index in the data
             data: Dictionary mapping assets to their timeframe data
+            portfolio_manager: Portfolio manager instance for portfolio state
             
         Returns:
-            3D numpy array with adaptive sizing and weighting applied
+            Dictionary containing:
+            - 'observation': 3D numpy array of shape (timeframes, window_size, features)
+            - 'portfolio_state': 1D numpy array of portfolio state features
         """
+        # Initialize return dictionary
+        result = {
+            'observation': None,
+            'portfolio_state': None
+        }
+        
         # Update adaptive window based on current market conditions
-        # Note: This part needs to be adapted to handle the new data structure
-        # For now, we'll just use the first asset for volatility calculation
         first_asset = next(iter(data.keys()))
         self.update_adaptive_window(data[first_asset], current_idx)
         
         # Build standard observations
-        observations = self.build_observation(current_idx, data)
+        observation_3d = self.build_observation(current_idx, data)
         
-        logger.debug(f"build_adaptive_observation received: type={type(observations)}, content={observations}")
-        if not observations or any(not isinstance(obs, np.ndarray) or obs.size == 0 for obs in observations.values()):
-            logger.warning("Observations dictionary is empty or contains empty arrays. Returning zero-padded observation.")
-            logger.debug(f"Observations before weighting: {observations}")
-            return np.zeros(self.observation_shape, dtype=np.float32)
-        
-        # Apply timeframe weighting
-        weighted_observations = self.apply_timeframe_weighting(observations)
-        
-        # Build multi-channel observation with current window size
-        # Use self.max_features which is determined during initialization
-        max_features = self.max_features
-        n_timeframes = len(self.timeframes)
-        
-        # Initialize a 1D array for the flattened observation
-        flattened_output = np.zeros(self.total_flattened_observation_size, dtype=np.float32)
-        current_offset = 0
-        
-        # Fill the output array
-        for i, tf in enumerate(self.timeframes):
-            if tf in weighted_observations:
-                obs = weighted_observations[tf]
-                
-                # Adjust observation to current window size
-                if obs.shape[0] > self.window_size:
-                    # Take the most recent data
-                    obs = obs[-self.window_size:]
-                elif obs.shape[0] < self.window_size:
-                    # Pad with zeros at the beginning
-                    padding = np.zeros((self.window_size - obs.shape[0], obs.shape[1]), dtype=np.float32)
-                    obs = np.vstack([padding, obs])
-                
-                # Debug log the observation shape
-                logger.debug(f"Observation for {tf}: shape={obs.shape}, features={obs.shape[1]}, max_features={max_features}")
-                
-                # Handle feature dimension padding
-                if obs.shape[1] < max_features:
-                    padding = max_features - obs.shape[1]
-                    left_pad = padding // 2
-                    right_pad = padding - left_pad
-                    obs = np.pad(obs, ((0, 0), (left_pad, right_pad)), 
-                               mode='constant', constant_values=0)
-                    logger.debug(f"Padded {tf} observation from {obs.shape[1]-padding} to {obs.shape[1]} features")
-                
-                # Make sure the observation has the correct number of features
-                if obs.shape[1] != max_features:
-                    logger.warning(f"Observation for {tf} has {obs.shape[1]} features, expected {max_features}. Adjusting...")
-                    obs = obs[:, :max_features]  # Truncate if too many features
-                    
-                # Flatten the current timeframe's observation and place it into the main flattened_output
-                tf_flattened_obs = obs.flatten()
-                expected_tf_size = self.window_size * max_features
-                
-                if tf_flattened_obs.size != expected_tf_size:
-                    logger.warning(f"Timeframe {tf} flattened size mismatch: {tf_flattened_obs.size} vs expected {expected_tf_size}. Adjusting.")
-                    if tf_flattened_obs.size < expected_tf_size:
-                        tf_padding = np.zeros(expected_tf_size - tf_flattened_obs.size, dtype=tf_flattened_obs.dtype)
-                        tf_flattened_obs = np.concatenate([tf_flattened_obs, tf_padding])
-                    else:
-                        tf_flattened_obs = tf_flattened_obs[:expected_tf_size]
-                
-                current_offset += expected_tf_size
-
-        # Add portfolio state to the end of the flattened output
-        if self.include_portfolio_state:
-            portfolio_state_array = self.build_portfolio_state(portfolio_manager)
+        logger.debug(f"build_adaptive_observation received array with shape: {observation_3d.shape}")
+        if not isinstance(observation_3d, np.ndarray) or observation_3d.size == 0:
+            logger.warning("Observation array is empty. Returning zero-padded observation.")
+            result['observation'] = np.zeros(self.observation_shape, dtype=np.float32)
+            if self.include_portfolio_state:
+                result['portfolio_state'] = np.zeros(17, dtype=np.float32)
+            return result
             
-            # Ensure portfolio state array has the expected size (17 features)
-            expected_portfolio_size = 17
-            if portfolio_state_array.size != expected_portfolio_size:
-                logger.warning(f"Portfolio state size mismatch. Expected {expected_portfolio_size}, got {portfolio_state_array.size}. Adjusting.")
-                if portfolio_state_array.size < expected_portfolio_size:
-                    portfolio_padding = np.zeros(expected_portfolio_size - portfolio_state_array.size, dtype=np.float32)
-                    portfolio_state_array = np.concatenate([portfolio_state_array, portfolio_padding])
+        # Apply timeframe weighting directly on the 3D array
+        weighted_observation = observation_3d * np.array([self.timeframe_weights[tf] 
+                                                         for tf in self.timeframes])[:, np.newaxis, np.newaxis]
+        
+        # Ensure the observation has the correct shape
+        n_timeframes, window_size, n_features = self.observation_shape
+        if weighted_observation.shape[1] > window_size:
+            # Take the most recent data
+            weighted_observation = weighted_observation[:, -window_size:, :]
+        elif weighted_observation.shape[1] < window_size:
+            # Pad with zeros at the beginning
+            padding = np.zeros((n_timeframes, window_size - weighted_observation.shape[1], n_features), 
+                             dtype=np.float32)
+            weighted_observation = np.concatenate([padding, weighted_observation], axis=1)
+        
+        # Ensure correct number of features
+        weighted_observation = weighted_observation[:, :, :n_features]
+        
+        result['observation'] = weighted_observation
+        
+        # Add portfolio state if enabled
+        if self.include_portfolio_state and portfolio_manager is not None:
+            portfolio_state = self.build_portfolio_state(portfolio_manager)
+            
+            # Ensure portfolio state has exactly 17 features
+            if portfolio_state.size != 17:
+                logger.warning(f"Portfolio state size mismatch. Expected 17, got {portfolio_state.size}. Adjusting.")
+                if portfolio_state.size < 17:
+                    portfolio_state = np.pad(portfolio_state, (0, 17 - portfolio_state.size), 
+                                          mode='constant', constant_values=0)
                 else:
-                    portfolio_state_array = portfolio_state_array[:expected_portfolio_size]
-
-            # Append portfolio state to the flattened output
-            flattened_output[current_offset : current_offset + expected_portfolio_size] = portfolio_state_array
-            current_offset += expected_portfolio_size
-
-        # Final check on the total size of the flattened output
-        if flattened_output.size != self.total_flattened_observation_size:
-            logger.error(f"Final flattened output size mismatch. Expected {self.total_flattened_observation_size}, got {flattened_output.size}. Adjusting.")
-            if flattened_output.size < self.total_flattened_observation_size:
-                final_padding = np.zeros(self.total_flattened_observation_size - flattened_output.size, dtype=np.float32)
-                flattened_output = np.concatenate([flattened_output, final_padding])
-            else:
-                flattened_output = flattened_output[:self.total_flattened_observation_size]
-
-        return flattened_output
+                    portfolio_state = portfolio_state[:17]
+            
+            result['portfolio_state'] = portfolio_state.astype(np.float32)
+        
+        return result

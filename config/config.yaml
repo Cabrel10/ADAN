@@ -20,22 +20,22 @@ general:
 paths:
   base_dir: "/home/morningstar/Documents/trading/bot"
   data_dir: "/home/morningstar/Documents/trading/data"  # Chemin absolu vers les données
-  raw_data_dir: "${paths.data_dir}/raw"
-  processed_data_dir: "${paths.data_dir}/processed"
+  raw_data_dir: "/home/morningstar/Documents/trading/data/raw"
+  processed_data_dir: "/home/morningstar/Documents/trading/data/processed"
   indicators_data_dir: "/home/morningstar/Documents/trading/bot/data/processed/indicators"
-  final_data_dir: "${paths.data_dir}/final"
-  models_dir: "${paths.base_dir}/models"
-  trained_models_dir: "${paths.models_dir}/rl_agents"
-  logs_dir: "${paths.base_dir}/logs"
-  reports_dir: "${paths.base_dir}/reports"
-  figures_dir: "${paths.reports_dir}/figures"
-  metrics_dir: "${paths.reports_dir}/metrics"
+  final_data_dir: "/home/morningstar/Documents/trading/data/final"
+  models_dir: "/home/morningstar/Documents/trading/bot/models"
+  trained_models_dir: "/home/morningstar/Documents/trading/bot/models/rl_agents"
+  logs_dir: "/home/morningstar/Documents/trading/bot/logs"
+  reports_dir: "/home/morningstar/Documents/trading/bot/reports"
+  figures_dir: "/home/morningstar/Documents/trading/bot/reports/figures"
+  metrics_dir: "/home/morningstar/Documents/trading/bot/reports/metrics"
 
 # ------------------------------------------------------------------------------
 # Configuration des Données
 # ------------------------------------------------------------------------------
 data:
-  data_dir: "${paths.indicators_data_dir}"
+  data_dir: "/home/morningstar/Documents/trading/bot/data/processed/indicators"
   # Structure des fichiers de données
   file_structure:
     pattern: "{asset}/{timeframe}.parquet"
@@ -48,6 +48,15 @@ data:
 
 portfolio:
   initial_balance: 20.0
+  include_portfolio_state: true  # Inclure l'état du portefeuille dans les observations
+  portfolio_state_features:
+    - cash_available
+    - total_equity
+    - total_return_pct
+    - sharpe_ratio
+    - max_drawdown_pct
+    - num_positions
+    - largest_positions: 5  # Nombre de plus grandes positions à inclure
 
 # ------------------------------------------------------------------------------
 # Configuration des Workers

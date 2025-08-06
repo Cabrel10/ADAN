@@ -315,52 +315,50 @@ class PortfolioManager:
         account_risk_multiplier: float = 1.0,
         stop_loss_pct: float = 0.02,
     ) -> float:
-        """Calcule la taille de position en fonction du risque et du capital.
-
+        """Calcule la taille de position basée sur le risque et le capital.
+        
         Args:
             price: Prix actuel de l'actif.
             risk_per_trade: Pourcentage du capital à risquer par trade.
-                           (défaut: 0.01 pour 1%)
+                          (défaut: 0.01 pour 1%)
             account_risk_multiplier: Multiplicateur de risque basé sur le drawdown.
-                                   (défaut: 1.0)
+                                  (défaut: 1.0)
             stop_loss_pct: Pourcentage de stop-loss (défaut: 0.02 pour 2%).
 
         Returns:
             La taille de position en unités de l'actif.
         """
-        # Récupérer la configuration du palier de capital actuel
-        tier = self.get_current_tier()
-
-        # Taille de position maximale en pourcentage du capital
-        max_position_size_pct = tier.get("max_position_size_pct", 10.0) / 100.0
-
-        # Ajuster le risque par trade avec le multiplicateur de risque du compte
-        adjusted_risk = risk_per_trade * account_risk_multiplier
+        # Récupérer le tier de capital actuel
+        tier = self.get_active_tier()
         
-        # Calculer la taille de position basée sur le risque
-        position_size = 0.0
-
-        if stop_loss_pct > 0:
-            # Calculer la taille de position basée sur le risque par trade
-            risk_amount = self.portfolio_value * adjusted_risk
-            risk_per_share = price * stop_loss_pct
-            
-            if risk_per_share > 0:
-                position_size = risk_amount / risk_per_share
-
-        # Calculer la valeur de la position
-        max_position_value = self.portfolio_value * max_position_size_pct
-        position_value = position_size * price
-
-        # Limiter la taille de la position selon la valeur maximale autorisée
-        if position_value > max_position_value:
-            position_size = max_position_value / price
-            logger.debug(
-                "Position size capped at %.6f (max %.2f USD)",
-                position_size,
-                max_position_value
-            )
-
+        # Journalisation des paramètres de risque
+        logger.info(
+            f"[RISK] Tier={tier['name']} | "
+            f"RiskPct={tier['risk_per_trade_pct']:.1f}% | "
+            f"MaxPosPct={tier['max_position_size_pct']:.1f}% | "
+            f"Capital: {self.portfolio_value:.2f} USDT"
+        )
+        
+        # 1. Calcul du montant à risquer
+        risk_amount = self.cash * (tier["risk_per_trade_pct"] / 100.0) * account_risk_multiplier
+        
+        # 2. Calcul de la taille basée sur le stop loss
+        risk_based_size = risk_amount / (price * stop_loss_pct) if stop_loss_pct > 0 and price > 0 else 0
+        
+        # 3. Calcul de la taille maximale basée sur le pourcentage de capital
+        max_size = (self.cash * (tier["max_position_size_pct"] / 100.0)) / price if price > 0 else 0
+        
+        # 4. Retourner la plus petite des deux tailles
+        position_size = min(risk_based_size, max_size)
+        
+        # Journalisation des calculs
+        logger.debug(
+            f"[POSITION_SIZE] RiskAmount={risk_amount:.2f} | "
+            f"RiskBasedSize={risk_based_size:.8f} | "
+            f"MaxSize={max_size:.8f} | "
+            f"FinalSize={position_size:.8f}"
+        )
+        
         # Appliquer les limites de taille minimale et maximale
         if position_size * price < self.min_notional_value:
             position_size = 0.0
@@ -379,15 +377,16 @@ class PortfolioManager:
             )
 
         # Journalisation des détails du calcul
-        logger.debug(
-            "Calculated position size - "
-            "Price: %.8f, Size: %.8f, Value: %.2f USD, "
-            "Risk/Trade: %.1f%%, Max Size: %.1f%%",
-            price,
-            position_size,
-            position_size * price,
-            risk_per_trade * 100,
-            max_position_size_pct * 100
+        position_value = position_size * price
+        position_pct = (
+            position_value / self.portfolio_value * 100
+            if self.portfolio_value > 0 else 0
+        )
+        
+        logger.info(
+            f"[POSITION] Taille: {position_size:.8f} | "
+            f"Valeur: {position_value:.2f} USDT | "
+            f"% du portefeuille: {position_pct:.2f}%"
         )
 
         return position_size
@@ -710,20 +709,24 @@ class PortfolioManager:
         }
 
         if valid_prices:
-            was_liquidated = self.check_liquidation(valid_prices)
-            if was_liquidated:
-                # Réinitialisation des métriques après liquidation
+            protection_triggered = self.check_protection_limits(valid_prices)
+            if protection_triggered:
+                # Réinitialisation des métriques après action de protection
                 self.unrealized_pnl = 0.0
                 self.portfolio_value = self.cash
                 self.current_equity = self.cash
                 self.total_capital = self.cash
 
-                # Journalisation de l'événement de liquidation
+                # Journalisation de l'événement de protection
+                current_drawdown = self.initial_equity - self.portfolio_value
+                drawdown_pct = ((current_drawdown / self.initial_equity) * 100 
+                              if self.initial_equity > 0 else 0)
                 logger.critical(
-                    "Portefeuille liquidé. Valeur finale: %.2f USDT "
-                    "(Initial: %.2f USDT)",
+                    "[PROTECTION] Seuil atteint. Valeur: %.2f USDT "
+                    "(Initial: %.2f USDT, Drawdown: %.1f%%)",
                     self.portfolio_value,
                     self.initial_equity,
+                    drawdown_pct
                 )
         elif any(pos.is_open for pos in self.positions.values()):
             logger.warning(
@@ -731,16 +734,18 @@ class PortfolioManager:
                 "aucun prix valide disponible"
             )
 
-    def check_liquidation(self, current_prices: Dict[str, float]) -> bool:
+    def check_protection_limits(self, current_prices: Dict[str, float]) -> bool:
         """
-                Vérifie si le portefeuille est à risque de liquidation et ferme les positions si nécessaire.
-        {{ ... }}
+        Vérifie si le portefeuille dépasse les limites de protection définies.
+        
+        Dans un contexte de trading spot, cette méthode vérifie les conditions de protection
+        et ferme les positions si nécessaire pour protéger le capital.
 
-                Args:
-                    current_prices: Dictionnaire des prix actuels par actif.
+        Args:
+            current_prices: Dictionnaire des prix actuels par actif.
 
-                Returns:
-                    bool: True si une liquidation a eu lieu, False sinon.
+        Returns:
+            bool: True si une action de protection a été déclenchée, False sinon.
         """
         # Récupérer le palier de capital actuel
         tier = self.get_active_tier()
@@ -754,65 +759,89 @@ class PortfolioManager:
             if self.initial_equity > 0
             else 0
         )
+        
+        # Vérifier le solde disponible pour éviter les positions trop importantes
+        available_balance = self.cash
+        # Laisser 1% de marge pour les frais
+        max_position_size = available_balance * 0.99
+        # Journalisation des informations de risque
         logger.info(
-            "Vérification du drawdown: Actuel=%.2f USDT (%.2f%%), Max autorisé=%.2f USDT (%.1f%%)",
+            "[RISK] Drawdown actuel: %.2f/%.2f USDT (%.1f%%/%.1f%%), "
+            "Solde dispo: %.2f USDT",
             current_drawdown,
-            current_drawdown_pct,
             max_drawdown_value,
+            current_drawdown_pct,
             max_drawdown_pct * 100,
+            available_balance
         )
 
-        # Vérifier si le drawdown dépasse la limite du palier
-        if current_drawdown > max_drawdown_value:
-            logger.warning(
-                "Drawdown actuel de %.2f USDT dépasse la limite de %.2f USDT (%.1f%%). "
-                "Fermeture des positions.",
-                current_drawdown,
-                max_drawdown_value,
-                max_drawdown_pct * 100,
-            )
-
-            # Si pas de positions ouvertes et pas de futures, on retourne True
-            # car le drawdown est dépassé
-            if not self.futures_enabled and not any(
-                p.is_open for p in self.positions.values()
-            ):
-                logger.warning(
-                    "Drawdown critique atteint mais aucune position ouverte à fermer."
-                )
-                return True
-
-            # Fermer toutes les positions
-            positions_closed = False
-            for asset in list(self.positions.keys()):
-                current_price = current_prices.get(asset)
-                if current_price is not None:
-                    self.close_position(asset, current_price)
-                    positions_closed = True
-                else:
-                    logger.error(
-                        "Impossible de fermer la position %s lors de la liquidation: "
-                        "prix actuel manquant", asset, )
-
-            # Mettre à jour les métriques
-            if positions_closed or not self.futures_enabled:
-                self.unrealized_pnl = 0.0
-                self.total_capital = self.cash
-                self.portfolio_value = self.cash
-                self.current_equity = self.cash
-                self.update_metrics()
-
-                # Journaliser la liquidation
+        try:
+            # Vérifier si le drawdown dépasse la limite du palier
+            if current_drawdown > max_drawdown_value:
+                tier = self.get_active_tier()
                 logger.critical(
-                    "LIQUIDATION EFFECTUÉE - Drawdown: %.2f USDT (%.1f%%), "
-                    "Valeur portefeuille: %.2f USDT",
+                    "[CRITICAL] Drawdown critique: %.2f/%.2f USDT (%.1f%%/%.1f%%), "
+                    "Palier: %s (%.2f USDT), Solde: %.2f USDT",
                     current_drawdown,
-                    (current_drawdown / self.initial_equity) * 100,
-                    self.portfolio_value,
+                    max_drawdown_value,
+                    current_drawdown_pct,
+                    max_drawdown_pct * 100,
+                    tier.get('name', 'Inconnu'),
+                    self.initial_equity,
+                    self.portfolio_value
                 )
 
-                # Retourner True pour indiquer qu'une liquidation a eu lieu
+                # Si pas de positions ouvertes et pas de futures, on retourne True
+                if not self.futures_enabled and not any(
+                    p.is_open for p in self.positions.values()
+                ):
+                    logger.warning(
+                        "[WARNING] Drawdown critique atteint mais aucune position "
+                        "ouverte à fermer. Veuillez vérifier la stratégie de trading."
+                    )
+                    return True
+
+                # Fermer toutes les positions
+                positions_closed = False
+                for asset in list(self.positions.keys()):
+                    current_price = current_prices.get(asset)
+                    if current_price is not None:
+                        logger.info(
+                            "[ACTION] Fermeture de la position %s à %.8f USDT",
+                            asset, current_price
+                        )
+                        self.close_position(asset, current_price)
+                        positions_closed = True
+                    else:
+                        logger.error(
+                            "[ERROR] Impossible de fermer la position %s: "
+                            "prix manquant", asset
+                        )
+
+                # Mettre à jour les métriques
+                if positions_closed or not self.futures_enabled:
+                    self.unrealized_pnl = 0.0
+                    self.total_capital = self.cash
+                    self.portfolio_value = self.cash
+                    self.current_equity = self.cash
+                    logger.info(
+                        "[STATUS] Portefeuille après fermeture: %.2f USDT "
+                        "(Cash: %.2f USDT)",
+                        self.portfolio_value, self.cash
+                    )
                 return True
+                
+            # Si on arrive ici, c'est que le drawdown est dans les limites
+            return False
+            
+        except Exception as e:
+            # En cas d'erreur, on bloque par sécurité
+            logger.critical(
+                "[CRITICAL] Erreur lors de la vérification des limites de protection: %s",
+                str(e),
+                exc_info=True
+            )
+            return True
 
             # Aucune position n'a pu être fermée
             return False
