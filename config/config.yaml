@@ -291,13 +291,13 @@ environment:
   assets: ["BTC", "ETH", "SOL", "XRP", "ADA"]
   observation:
     shape: [3, 100, 36]  # 3 timeframes, 100 timesteps, max 36 features
-    window_size: 100     # Taille fixe de la fenêtre d'observation
-    warmup_steps: 99     # window_size - 1
+    window_size: 100     # Taille fixe de la fenêtre d'observation (doit correspondre avec StateBuilder)
+    warmup_steps: 100    # Doit être >= window_size
     timeframes: ["5m", "1h", "4h"]  # Les 3 timeframes utilisés
     features:
       base: ["OPEN", "HIGH", "LOW", "CLOSE", "VOLUME", "returns"]
       indicators:
-        "5m": 
+        "5m":
           - "RSI_14"
           - "STOCHk_14_3_3"
           - "STOCHd_14_3_3"
@@ -397,7 +397,7 @@ capital_tiers:
     max_capital: 30.0
     max_position_size_pct: 90
     leverage: 1.0
-    risk_per_trade_pct: 1.0
+    risk_per_trade_pct: 5.0  # Augmenté de 1% à 5% pour plus d'agressivité
     max_drawdown_pct: 50.0
 
   - name: "Small Capital"
@@ -452,8 +452,8 @@ agent:
   window_size: 100
   features_extractor_kwargs:
     cnn_configs:
-      "1m":
-        input_shape: [1, 100, 10]
+      "5m":
+        input_shape: [1, 100, 15]  # 15 features pour 5m
         conv_layers:
           - {filters: 32, kernel_size: 3, strides: 1, padding: 'same', activation: 'relu'}
           - {filters: 64, kernel_size: 3, strides: 1, padding: 'same', activation: 'relu'}
@@ -461,15 +461,15 @@ agent:
           - {pool_size: 2, strides: 2}
         dropout: 0.2
       "1h":
-        input_shape: [1, 100, 10]
+        input_shape: [1, 100, 11]  # 11 features pour 1h
         conv_layers:
           - {filters: 32, kernel_size: 3, strides: 1, padding: 'same', activation: 'relu'}
           - {filters: 64, kernel_size: 3, strides: 1, padding: 'same', activation: 'relu'}
         pool_layers:
           - {pool_size: 2, strides: 2}
         dropout: 0.2
-      "3h":
-        input_shape: [1, 100, 8]
+      "4h":
+        input_shape: [1, 100, 10]  # 10 features pour 4h
         conv_layers:
           - {filters: 16, kernel_size: 3, strides: 1, padding: 'same', activation: 'relu'}
           - {filters: 32, kernel_size: 3, strides: 1, padding: 'same', activation: 'relu'}
@@ -489,8 +489,7 @@ agent:
       gae_lambda: 0.95
       ent_coef: 0.01
       ent_coef_annealing: True
-      learning_rate: 0.0003
-      learning_rate_schedule: 'linear'
+      learning_rate: 3e-4  # Taux d'apprentissage fixe pour la stabilité
       n_steps: 1024  # Moins de pas entre les mises à jour
       batch_size: 64
       n_epochs: 2  # Seulement 2 époques pour les tests initiaux

@@ -362,3 +362,6 @@ ta-lib/
 ta-lib-0.4.0-src.tar.gz
 config/config.yaml.tar.gz
 *.zip
+
+# Checkpoints
+checkpoints/

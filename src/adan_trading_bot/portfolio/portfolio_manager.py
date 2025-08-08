@@ -9,7 +9,7 @@ capital, positions, and performance metrics.
 
 import logging
 from datetime import datetime
-from typing import Dict, Any, List
+from typing import Any, Dict, List
 
 import numpy as np
 
@@ -94,9 +94,9 @@ class PortfolioManager:
         self.total_capital = 0.0
 
         # Initialize position tracking
-        self.positions: Dict[str, Position] = {
-            asset: Position() for asset in assets}
+        self.positions: Dict[str, Position] = {asset: Position() for asset in assets}
         self.trade_history: List[Dict[str, Any]] = []
+        self.trade_log: List[Dict[str, Any]] = []  # Initialize trade log
 
         # Initialize chunk-based tracking
         self.chunk_pnl: Dict[int, Dict[str, float]] = {}
@@ -104,8 +104,7 @@ class PortfolioManager:
         self.chunk_start_equity = self.initial_equity
 
         # Trading rules configuration
-        self.futures_enabled = trading_rules_config.get(
-            "futures_enabled", False)
+        self.futures_enabled = trading_rules_config.get("futures_enabled", False)
         self.leverage = trading_rules_config.get("leverage", 1)
 
         # Commission and fees
@@ -114,14 +113,11 @@ class PortfolioManager:
                 "futures_commission_pct", 0.0
             )
         else:
-            self.commission_pct = trading_rules_config.get(
-                "commission_pct", 0.0)
+            self.commission_pct = trading_rules_config.get("commission_pct", 0.0)
 
         # Position sizing rules
-        self.min_trade_size = trading_rules_config.get(
-            "min_trade_size", 0.0001)
-        self.min_notional_value = trading_rules_config.get(
-            "min_notional_value", 10.0)
+        self.min_trade_size = trading_rules_config.get("min_trade_size", 0.0001)
+        self.min_notional_value = trading_rules_config.get("min_notional_value", 10.0)
         self.max_notional_value = trading_rules_config.get(
             "max_notional_value", 100000.0
         )
@@ -160,7 +156,8 @@ class PortfolioManager:
         for i, tier in enumerate(self.capital_tiers):
             if not isinstance(tier, dict):
                 logger.warning(
-                    "Le tier %d n'est pas un dictionnaire et sera ignoré: %s", i, tier)
+                    "Le tier %d n'est pas un dictionnaire et sera ignoré: %s", i, tier
+                )
                 continue
 
             # Vérifier les clés requises
@@ -181,8 +178,7 @@ class PortfolioManager:
 
         # 6. Vérifier la continuité des paliers
         for i in range(1, len(valid_tiers)):
-            if valid_tiers[i
-                           - 1]["min_capital"] >= valid_tiers[i]["min_capital"]:
+            if valid_tiers[i - 1]["min_capital"] >= valid_tiers[i]["min_capital"]:
                 logger.error(
                     "Les paliers de capital doivent être en ordre croissant. "
                     "Palier %d (%s) a un min_capital >= au palier %d (%s)",
@@ -212,8 +208,7 @@ class PortfolioManager:
             )
 
         # Position sizing configuration
-        self.position_sizing_config = risk_management.get(
-            "position_sizing", {})
+        self.position_sizing_config = risk_management.get("position_sizing", {})
         self.concentration_limits = self.position_sizing_config.get(
             "concentration_limits", {}
         )
@@ -268,9 +263,7 @@ class PortfolioManager:
             )
 
         # Trier les tiers par min_capital croissant (au cas où)
-        sorted_tiers = sorted(
-            self.capital_tiers,
-            key=lambda x: x["min_capital"])
+        sorted_tiers = sorted(self.capital_tiers, key=lambda x: x["min_capital"])
 
         # Trouver le premier tier où min_capital <= current_equity <
         # next_tier.min_capital
@@ -311,82 +304,63 @@ class PortfolioManager:
     def calculate_position_size(
         self,
         price: float,
+        stop_loss_pct: float = 0.02,
         risk_per_trade: float = 0.01,
         account_risk_multiplier: float = 1.0,
-        stop_loss_pct: float = 0.02,
     ) -> float:
-        """Calcule la taille de position basée sur le risque et le capital.
-        
+        """
+        Calcule la taille de position en fonction du risque, du stop loss et des limites de position.
+
+        La taille de la position est déterminée par la plus petite des deux valeurs suivantes :
+        1. Taille basée sur le risque (risque_max / (prix * stop_loss_pct))
+        2. Taille maximale autorisée par le palier (max_position_size_pct)
+
         Args:
-            price: Prix actuel de l'actif.
-            risk_per_trade: Pourcentage du capital à risquer par trade.
-                          (défaut: 0.01 pour 1%)
-            account_risk_multiplier: Multiplicateur de risque basé sur le drawdown.
-                                  (défaut: 1.0)
-            stop_loss_pct: Pourcentage de stop-loss (défaut: 0.02 pour 2%).
+            price: Prix actif
+            stop_loss_pct: Pourcentage de stop loss (ex: 0.02 pour 2%)
+            risk_per_trade: Fraction du capital à risquer (0.01 pour 1%)
+            account_risk_multiplier: Multiplicateur de risque (défini par le DBE)
 
         Returns:
-            La taille de position en unités de l'actif.
+            float: Taille de position en unités de l'actif
         """
-        # Récupérer le tier de capital actuel
+        if price <= 0 or stop_loss_pct <= 0:
+            return 0.0
+
         tier = self.get_active_tier()
-        
-        # Journalisation des paramètres de risque
-        logger.info(
-            f"[RISK] Tier={tier['name']} | "
-            f"RiskPct={tier['risk_per_trade_pct']:.1f}% | "
-            f"MaxPosPct={tier['max_position_size_pct']:.1f}% | "
-            f"Capital: {self.portfolio_value:.2f} USDT"
+
+        # 1. Calcul du montant à risquer (% du capital défini dans le palier)
+        risk_amount = self.portfolio_value * (tier["risk_per_trade_pct"] / 100.0)
+
+        # 2. Application du multiplicateur de risque du DBE
+        risk_amount *= account_risk_multiplier
+
+        # 3. Calcul de la taille de position basée sur le risque
+        risk_based_size = risk_amount / (price * stop_loss_pct)
+
+        # 4. Calcul de la taille maximale autorisée par le palier
+        max_position_value = self.portfolio_value * (
+            tier["max_position_size_pct"] / 100.0
         )
-        
-        # 1. Calcul du montant à risquer
-        risk_amount = self.cash * (tier["risk_per_trade_pct"] / 100.0) * account_risk_multiplier
-        
-        # 2. Calcul de la taille basée sur le stop loss
-        risk_based_size = risk_amount / (price * stop_loss_pct) if stop_loss_pct > 0 and price > 0 else 0
-        
-        # 3. Calcul de la taille maximale basée sur le pourcentage de capital
-        max_size = (self.cash * (tier["max_position_size_pct"] / 100.0)) / price if price > 0 else 0
-        
-        # 4. Retourner la plus petite des deux tailles
-        position_size = min(risk_based_size, max_size)
-        
-        # Journalisation des calculs
-        logger.debug(
-            f"[POSITION_SIZE] RiskAmount={risk_amount:.2f} | "
-            f"RiskBasedSize={risk_based_size:.8f} | "
-            f"MaxSize={max_size:.8f} | "
-            f"FinalSize={position_size:.8f}"
-        )
-        
-        # Appliquer les limites de taille minimale et maximale
-        if position_size * price < self.min_notional_value:
-            position_size = 0.0
-            logger.debug(
-                "Position size below minimum notional value "
-                "(%.2f < %.2f USD)",
-                position_size * price,
-                self.min_notional_value
-            )
-        elif position_size * price > self.max_notional_value:
-            position_size = self.max_notional_value / price
-            logger.debug(
-                "Position size capped at maximum notional value "
-                "(%.2f USD)",
-                self.max_notional_value
+        max_position_size = max_position_value / price
+
+        # 5. Prendre la plus petite des deux tailles (risque ou taille max)
+        position_size = min(risk_based_size, max_position_size)
+
+        # 6. Vérifier la taille minimale de trade
+        min_trade_size = self.min_trade_size
+        if position_size > 0 and position_size < min_trade_size:
+            position_size = min_trade_size
+            logger.warning(
+                f"Taille de position {position_size} inférieure au minimum autorisé "
+                f"({min_trade_size}). Ajustement à {min_trade_size}"
             )
 
-        # Journalisation des détails du calcul
-        position_value = position_size * price
-        position_pct = (
-            position_value / self.portfolio_value * 100
-            if self.portfolio_value > 0 else 0
-        )
-        
+        # 7. Journalisation détaillée
         logger.info(
-            f"[POSITION] Taille: {position_size:.8f} | "
-            f"Valeur: {position_value:.2f} USDT | "
-            f"% du portefeuille: {position_pct:.2f}%"
+            f"[POSITION_SIZE] Risk: {tier['risk_per_trade_pct']}% of {self.portfolio_value:.2f} = {risk_amount:.4f} | "
+            f"SL: {stop_loss_pct*100:.2f}% | RiskBasedSize: {risk_based_size:.8f} | "
+            f"MaxSize: {max_position_size:.8f} | FinalSize: {position_size:.8f} ({position_size * price:.2f} USDT)"
         )
 
         return position_size
@@ -516,28 +490,55 @@ class PortfolioManager:
 
         return state
 
-    def reset(self) -> None:
+    def reset(self, new_epoch: bool = False) -> None:
         """
         Reset the portfolio to its initial state.
 
-        This method resets all portfolio metrics, positions, and trade history
-        to their initial values based on the environment configuration.
+        Args:
+            new_epoch: If True, resets to initial equity. If False, keeps current portfolio value.
         """
-        # Get environment configuration
-        env_config = self.config.get("environment", {})
-
-        # Initialize initial equity from configuration
-        self.initial_equity = env_config.get("initial_balance", 10000.0)
+        # Get configuration sections
+        portfolio_config = self.config.get("portfolio", {})
+        environment_config = self.config.get("environment", {})
 
         # Close all open positions
-        for asset in self.positions:
-            self.positions[asset].close()
+        for asset in list(self.positions.keys()):
+            if self.positions[asset].is_open:
+                logger.debug("Closing position for %s during reset", asset)
+                self.close_position(asset, self.positions[asset].entry_price)
 
-        # Reset portfolio state variables
-        self.cash = self.initial_equity
-        self.total_capital = self.initial_equity
-        self.portfolio_value = self.initial_equity
-        self.current_equity = self.initial_equity
+        if new_epoch:
+            # Full reset to initial equity - use the same logic as in __init__
+            self.initial_equity = portfolio_config.get(
+                "initial_balance", environment_config.get("initial_balance", 20.0)
+            )
+            self.initial_capital = self.initial_equity  # For backward compatibility
+            self.cash = self.initial_equity
+            self.portfolio_value = self.initial_equity
+            self.current_equity = self.initial_equity
+            self.peak_equity = self.initial_equity
+
+            # Reset trade history and metrics
+            self.trade_history = [self.initial_equity]
+            self.trade_log = []
+
+            logger.info(
+                "New epoch - Portfolio reset to initial equity: %.2f",
+                self.initial_equity,
+            )
+        else:
+            # Keep current portfolio value but reset positions and metrics
+            current_value = self.get_portfolio_value()
+            self.cash = current_value
+            self.portfolio_value = current_value
+            self.current_equity = current_value
+            self.peak_equity = current_value
+
+            logger.debug(
+                "Chunk reset - Portfolio value maintained at: %.2f", current_value
+            )
+
+        # Always reset these metrics
         self.unrealized_pnl = 0.0
         self.realized_pnl = 0.0
         self.trade_count = 0
@@ -546,19 +547,20 @@ class PortfolioManager:
         self.var = 0.0
         self.cvar = 0.0
 
-        # Reset trade history and logs
-        self.trade_history = [self.initial_equity]
-        self.trade_log = []
-
-        # Initialize peak equity tracking
-        self.peak_equity = self.initial_equity
-
-        logger.info(
-            "Portfolio reset. Initial equity: %.2f",
-            self.initial_equity)
-
     def get_portfolio_value(self) -> float:
-        """Returns the current total portfolio value."""
+        """
+        Returns the current total portfolio value (cash + open positions).
+
+        Returns:
+            float: Total portfolio value in quote currency
+        """
+        # Calculate total value of open positions
+        positions_value = sum(
+            pos.size * pos.entry_price for pos in self.positions.values() if pos.is_open
+        )
+
+        # Update and return the total portfolio value
+        self.portfolio_value = self.cash + positions_value
         return self.portfolio_value
 
     def get_leverage(self) -> float:
@@ -575,8 +577,7 @@ class PortfolioManager:
         total_position_value = 0.0
         for position in self.positions.values():
             if position.is_open:
-                total_position_value += abs(position.size
-                                            * position.entry_price)
+                total_position_value += abs(position.size * position.entry_price)
 
         # Leverage = Total position value / Portfolio equity
         leverage = total_position_value / self.portfolio_value
@@ -606,19 +607,61 @@ class PortfolioManager:
 
     def get_available_capital(self) -> float:
         """
-        Returns the available capital for new trades.
+        Returns the available capital for new trades based on total portfolio value.
+
+        For spot trading, available capital is calculated as the total portfolio value
+        minus the value of all open positions. For margin trading, it considers the
+        margin used and available leverage.
 
         Returns:
             float: The amount of capital available for new trades.
         """
-        # Le capital disponible est simplement la trésorerie actuelle
-        # car nous ne voulons pas permettre un effet de levier supérieur à 1x
-        # pour les opérations sur marge
-        return self.cash
+        # Get current portfolio value (cash + open positions)
+        portfolio_value = self.get_portfolio_value()
+
+        # Calculate total value of open positions (absolute value to handle both long and short)
+        open_positions_value = sum(
+            abs(pos.size) * pos.entry_price
+            for pos in self.positions.values()
+            if pos.is_open
+        )
+
+        # Calculate available capital based on leverage
+        if self.leverage > 1.0 and open_positions_value > 0:
+            # For margin trading, available capital is reduced by margin used
+            margin_used = open_positions_value / self.leverage
+            available_capital = max(0, portfolio_value - margin_used)
+
+            # Log detailed information for margin trading
+            logger.debug(
+                "[CAPITAL] Available: %.2f (Portfolio: %.2f, Margin Used: %.2f, "
+                "Positions: %.2f, Leverage: %.1fx)",
+                available_capital,
+                portfolio_value,
+                margin_used,
+                open_positions_value,
+                self.leverage,
+            )
+        else:
+            # For spot trading, available capital is total value minus open positions
+            available_capital = max(0, portfolio_value - open_positions_value)
+
+            # Log detailed information for spot trading
+            logger.debug(
+                "[CAPITAL] Available: %.2f (Portfolio: %.2f, Positions: %.2f)",
+                available_capital,
+                portfolio_value,
+                open_positions_value,
+            )
+
+        return available_capital
 
     def update_market_price(self, current_prices: Dict[str, float]) -> None:
         """
         Met à jour la valeur du portefeuille en fonction des prix actuels.
+
+        Cette méthode met à jour la valeur totale du portefeuille (cash + positions)
+        et calcule le PnL non réalisé pour chaque position ouverte.
 
         Args:
             current_prices: Dictionnaire associant les symboles d'actifs à leurs prix actuels.
@@ -631,8 +674,12 @@ class PortfolioManager:
             )
             current_prices = {}
 
-        # Réinitialisation du PnL non réalisé
+        # Sauvegarder l'ancienne valeur du portefeuille pour le calcul des variations
+        previous_portfolio_value = self.portfolio_value
+
+        # Réinitialisation des compteurs
         self.unrealized_pnl = 0.0
+        total_positions_value = 0.0
         assets_with_missing_prices = []
 
         # Calcul du PnL non réalisé pour toutes les positions ouvertes
@@ -651,19 +698,33 @@ class PortfolioManager:
                 assets_with_missing_prices.append(asset)
                 continue
 
-            # Calcul du PnL pour cette position
-            position_pnl = position.size * \
-                (current_price - position.entry_price)
-            self.unrealized_pnl += position_pnl
+            # Calcul de la valeur actuelle et du PnL de la position
+            position_value = position.size * current_price
+            position_pnl = position_value - (position.size * position.entry_price)
 
-            # Journalisation du statut de la position pour le débogage
+            # Mise à jour des totaux du portefeuille
+            self.unrealized_pnl += position_pnl
+            total_positions_value += position_value
+
+            # Mise à jour des attributs de la position
+            position.current_price = current_price
+            position.current_value = position_value
+            position.unrealized_pnl = position_pnl
+            position.pnl_pct = (
+                (position_pnl / (position.size * position.entry_price)) * 100
+                if position.entry_price > 0
+                else 0.0
+            )
+
+            # Journalisation détaillée pour le débogage
             logger.debug(
-                "Position %s: taille=%.8f, entrée=%.8f, actuel=%.8f, pnl=%.2f",
+                "[POSITION] %s: %.8f @ %.8f (Val: %.2f USDT, PnL: %.2f USDT, %.2f%%)",
                 asset,
                 position.size,
-                position.entry_price,
                 current_price,
+                position_value,
                 position_pnl,
+                position.pnl_pct,
             )
 
         # Journalisation des actifs avec prix manquants
@@ -676,9 +737,24 @@ class PortfolioManager:
             )
 
         # Mise à jour de la valeur du portefeuille et de l'equity
-        self.current_equity = self.cash + self.unrealized_pnl
-        self.portfolio_value = self.current_equity
-        self.total_capital = self.current_equity
+        # Utilisation de la somme de la trésorerie et de la valeur totale des positions
+        # plutôt que de se fier uniquement au PnL non réalisé
+        self.portfolio_value = self.cash + total_positions_value
+        self.current_equity = self.portfolio_value
+        self.total_capital = self.portfolio_value
+
+        # Calcul du PnL total (réalisé + non réalisé)
+        total_pnl = self.portfolio_value - self.initial_equity
+
+        # Journalisation des valeurs mises à jour
+        logger.debug(
+            "[PORTFOLIO] Valeur totale: %.2f USDT (Cash: %.2f, Positions: %.2f, PnL: %.2f USDT, %.2f%%)",
+            self.portfolio_value,
+            self.cash,
+            total_positions_value,
+            total_pnl,
+            (total_pnl / self.initial_equity * 100) if self.initial_equity > 0 else 0.0,
+        )
 
         # Mettre à jour l'historique des trades (limité pour éviter la
         # surconsommation mémoire)
@@ -719,14 +795,17 @@ class PortfolioManager:
 
                 # Journalisation de l'événement de protection
                 current_drawdown = self.initial_equity - self.portfolio_value
-                drawdown_pct = ((current_drawdown / self.initial_equity) * 100 
-                              if self.initial_equity > 0 else 0)
+                drawdown_pct = (
+                    (current_drawdown / self.initial_equity) * 100
+                    if self.initial_equity > 0
+                    else 0
+                )
                 logger.critical(
                     "[PROTECTION] Seuil atteint. Valeur: %.2f USDT "
                     "(Initial: %.2f USDT, Drawdown: %.1f%%)",
                     self.portfolio_value,
                     self.initial_equity,
-                    drawdown_pct
+                    drawdown_pct,
                 )
         elif any(pos.is_open for pos in self.positions.values()):
             logger.warning(
@@ -737,7 +816,7 @@ class PortfolioManager:
     def check_protection_limits(self, current_prices: Dict[str, float]) -> bool:
         """
         Vérifie si le portefeuille dépasse les limites de protection définies.
-        
+
         Dans un contexte de trading spot, cette méthode vérifie les conditions de protection
         et ferme les positions si nécessaire pour protéger le capital.
 
@@ -759,9 +838,16 @@ class PortfolioManager:
             if self.initial_equity > 0
             else 0
         )
-        
+
         # Vérifier le solde disponible pour éviter les positions trop importantes
-        available_balance = self.cash
+        # Utilisation de la valeur totale du portefeuille moins la valeur des positions ouvertes
+        # pour éviter de compter deux fois la même valeur
+        open_positions_value = sum(
+            pos.size * current_prices.get(asset, 0)
+            for asset, pos in self.positions.items()
+            if pos.is_open and asset in current_prices
+        )
+        available_balance = max(0, self.portfolio_value - open_positions_value)
         # Laisser 1% de marge pour les frais
         max_position_size = available_balance * 0.99
         # Journalisation des informations de risque
@@ -772,7 +858,7 @@ class PortfolioManager:
             max_drawdown_value,
             current_drawdown_pct,
             max_drawdown_pct * 100,
-            available_balance
+            available_balance,
         )
 
         try:
@@ -786,9 +872,9 @@ class PortfolioManager:
                     max_drawdown_value,
                     current_drawdown_pct,
                     max_drawdown_pct * 100,
-                    tier.get('name', 'Inconnu'),
+                    tier.get("name", "Inconnu"),
                     self.initial_equity,
-                    self.portfolio_value
+                    self.portfolio_value,
                 )
 
                 # Si pas de positions ouvertes et pas de futures, on retourne True
@@ -808,14 +894,16 @@ class PortfolioManager:
                     if current_price is not None:
                         logger.info(
                             "[ACTION] Fermeture de la position %s à %.8f USDT",
-                            asset, current_price
+                            asset,
+                            current_price,
                         )
                         self.close_position(asset, current_price)
                         positions_closed = True
                     else:
                         logger.error(
                             "[ERROR] Impossible de fermer la position %s: "
-                            "prix manquant", asset
+                            "prix manquant",
+                            asset,
                         )
 
                 # Mettre à jour les métriques
@@ -827,19 +915,20 @@ class PortfolioManager:
                     logger.info(
                         "[STATUS] Portefeuille après fermeture: %.2f USDT "
                         "(Cash: %.2f USDT)",
-                        self.portfolio_value, self.cash
+                        self.portfolio_value,
+                        self.cash,
                     )
                 return True
-                
+
             # Si on arrive ici, c'est que le drawdown est dans les limites
             return False
-            
+
         except Exception as e:
             # En cas d'erreur, on bloque par sécurité
             logger.critical(
                 "[CRITICAL] Erreur lors de la vérification des limites de protection: %s",
                 str(e),
-                exc_info=True
+                exc_info=True,
             )
             return True
 
@@ -869,7 +958,9 @@ class PortfolioManager:
                     else:
                         logger.error(
                             "Impossible de fermer la position %s lors de la liquidation: "
-                            "prix actuel manquant", asset, )
+                            "prix actuel manquant",
+                            asset,
+                        )
 
                 # Mettre à jour les métriques
                 self.unrealized_pnl = 0.0
@@ -900,8 +991,7 @@ class PortfolioManager:
                     and current_price
                     <= position.entry_price * (1 - position.stop_loss_pct)
                 ):
-                    logger.info(
-                        "Stop-loss hit for %s. Closing position.", asset)
+                    logger.info("Stop-loss hit for %s. Closing position.", asset)
                     self.close_position(asset, current_price)
                 # Check take-profit
                 elif (
@@ -909,161 +999,321 @@ class PortfolioManager:
                     and current_price
                     >= position.entry_price * (1 + position.take_profit_pct)
                 ):
-                    logger.info(
-                        "Take-profit hit for %s. Closing position.", asset)
+                    logger.info("Take-profit hit for %s. Closing position.", asset)
                     self.close_position(asset, current_price)
 
     def open_position(self, asset: str, price: float, size: float) -> bool:
         """
-        Opens a new long position for a specific asset.
+        Ouvre une nouvelle position longue pour un actif spécifique.
+
+        Cette méthode gère l'ouverture d'une position en vérifiant les fonds disponibles
+        et en mettant à jour la valeur du portefeuille. Elle prend en compte la commission
+        et utilise la valeur totale du portefeuille pour les vérifications.
 
         Args:
-            asset: The asset to open a position for.
-            price: The price at which to open the position.
-            size: The size of the position to open.
+            asset: L'actif pour lequel ouvrir une position.
+            price: Le prix auquel ouvrir la position.
+            size: La taille de la position à ouvrir.
 
         Returns:
-            True if the position was opened successfully, False otherwise.
+            True si la position a été ouverte avec succès, False sinon.
         """
+        # Vérifier si une position est déjà ouverte pour cet actif
         if self.positions[asset].is_open:
             logger.warning(
-                "Cannot open a new position for %s while one is already open.",
-                asset)
+                "[ERREUR] Impossible d'ouvrir une position pour %s: position déjà ouverte",
+                asset,
+            )
             return False
 
-        # Get trading parameters from worker config (default to w1 if not
-        # specified)
+        # Récupérer la configuration du worker (par défaut w1 si non spécifié)
         worker_config = self.config.get("workers", {}).get("w1", {})
         trading_config = worker_config.get("trading_config", {})
 
-        # Get stop loss and take profit with default values
-        stop_loss_pct = trading_config.get("stop_loss_pct", 0.05)  # Default 5%
-        take_profit_pct = trading_config.get(
-            "take_profit_pct", 0.15)  # Default 15%
+        # Récupérer les paramètres de gestion des risques avec valeurs par défaut
+        stop_loss_pct = trading_config.get("stop_loss_pct", 0.05)  # 5% par défaut
+        take_profit_pct = trading_config.get("take_profit_pct", 0.15)  # 15% par défaut
 
+        # Journalisation des paramètres de trading
+        logger.debug("[OUVERTURE] %s - Configuration: %s", asset, trading_config)
         logger.debug(
-            "PortfolioManager open_position - trading_config: %s",
-            trading_config)
-        logger.debug(
-            "PortfolioManager open_position - stop_loss_pct: %s, take_profit_pct: %s",
-            stop_loss_pct,
-            take_profit_pct,
+            "[OUVERTURE] %s - Stop-loss: %.2f%%, Take-profit: %.2f%%",
+            asset,
+            stop_loss_pct * 100,
+            take_profit_pct * 100,
         )
 
+        # Calculer la valeur notionnelle et la commission
         notional_value = size * price
         commission = notional_value * self.commission_pct
+        total_cost = notional_value + commission
 
+        # Vérifier les fonds disponibles en utilisant la valeur totale du portefeuille
+        available_capital = self.get_available_capital()
+
+        # Journalisation des détails financiers
+        logger.debug(
+            "[OUVERTURE] %s - Détails financiers - Valeur notionnelle: %.2f, Commission: %.2f, Coût total: %.2f, Capital disponible: %.2f",
+            asset,
+            notional_value,
+            commission,
+            total_cost,
+            available_capital,
+        )
+
+        # Vérifier si les fonds sont suffisants
+        if total_cost > available_capital:
+            logger.warning(
+                "[ERREUR] Fonds insuffisants pour %s - Coût total: %.2f > Disponible: %.2f",
+                asset,
+                total_cost,
+                available_capital,
+            )
+            return False
+
+        # Appliquer les coûts selon le type de trading
         if self.futures_enabled:
-            # For futures, we only need to set aside the margin (notional/leverage) plus commission
-            # Commission is paid only once when opening the position (maker
-            # fee)
+            # Pour les contrats à terme : réserver la marge (valeur notionnelle/levier) plus la commission
             margin_used = notional_value / self.leverage
             self.cash -= margin_used + commission
+            logger.debug(
+                "[OUVERTURE] %s - Marge utilisée: %.2f, Commission: %.2f, Cash restant: %.2f",
+                asset,
+                margin_used,
+                commission,
+                self.cash,
+            )
         else:
-            # For spot, we pay the full notional value plus commission
-            self.cash -= notional_value + commission
+            # Pour le spot : débiter le montant total (valeur notionnelle + commission)
+            self.cash -= total_cost
+            logger.debug(
+                "[OUVERTURE] %s - Montant débité: %.2f, Cash restant: %.2f",
+                asset,
+                total_cost,
+                self.cash,
+            )
 
-        self.positions[asset].open(
-            price,
-            size,
-            stop_loss_pct=stop_loss_pct,
-            take_profit_pct=take_profit_pct)
-        self.trade_count += 1
-        trade_info = {
-            "type": "open",
-            "asset": asset,
-            "size": size,
-            "price": price,
-            "commission": commission,
-            "timestamp": datetime.now().isoformat(),
-            "current_cash": self.cash,
-            "portfolio_value": self.portfolio_value,
-        }
-        self.trade_log.append(trade_info)
-        logger.info(
-            "Opened position for %s: %.4f units at %.2f. Details: %s",
-            asset,
-            size,
-            price,
-            trade_info,
-        )
-        return True
+        try:
+            # Ouvrir la position avec les paramètres de gestion des risques
+            self.positions[asset].open(
+                entry_price=price,
+                size=size,
+                stop_loss_pct=stop_loss_pct,
+                take_profit_pct=take_profit_pct,
+            )
+
+            # Mettre à jour le compteur de trades
+            self.trade_count += 1
+
+            # Préparer les informations de suivi
+            trade_info = {
+                "type": "open",
+                "asset": asset,
+                "size": size,
+                "price": price,
+                "stop_loss": price * (1 - stop_loss_pct) if stop_loss_pct > 0 else None,
+                "take_profit": price * (1 + take_profit_pct)
+                if take_profit_pct > 0
+                else None,
+                "commission": commission,
+                "timestamp": datetime.now().isoformat(),
+                "current_cash": self.cash,
+                "portfolio_value": self.portfolio_value,
+                "available_capital": self.get_available_capital(),
+                "leverage": self.leverage if self.futures_enabled else 1.0,
+            }
+
+            # Ajouter au journal des trades
+            self.trade_log.append(trade_info)
+
+            # Journalisation détaillée
+            logger.info(
+                "[POSITION OUVERTE] %s - Taille: %.8f @ %.8f | Valeur: %.2f | SL: %.8f | TP: %.8f | Commission: %.2f",
+                asset.upper(),
+                size,
+                price,
+                notional_value,
+                trade_info["stop_loss"] if trade_info["stop_loss"] else 0.0,
+                trade_info["take_profit"] if trade_info["take_profit"] else 0.0,
+                commission,
+            )
+
+            # Journalisation des soldes
+            logger.debug(
+                "[SOLDE] Cash: %.2f | Capital disponible: %.2f | Valeur portefeuille: %.2f",
+                self.cash,
+                self.get_available_capital(),
+                self.portfolio_value,
+            )
+
+            return True
+
+        except Exception as e:
+            logger.error(
+                "[ERREUR] Échec de l'ouverture de la position pour %s: %s",
+                asset,
+                str(e),
+                exc_info=True,
+            )
+            # Annuler les modifications en cas d'erreur
+            if self.futures_enabled:
+                self.cash += (notional_value / self.leverage) + commission
+            else:
+                self.cash += notional_value + commission
+
+            return False
 
     def close_position(self, asset: str, price: float) -> float:
         """
-        Closes the current open position for a specific asset.
+        Ferme la position ouverte pour un actif spécifique.
+
+        Cette méthode gère la fermeture d'une position, calcule le PnL réalisé,
+        met à jour la trésorerie et journalise les détails de la transaction.
 
         Args:
-            asset: The asset to close the position for.
-            price: The price at which to close the position.
+            asset: L'actif pour lequel fermer la position.
+            price: Le prix auquel fermer la position.
 
         Returns:
-            The realized PnL from the trade after commissions.
+            float: Le PnL net réalisé (après commissions) ou 0 en cas d'erreur.
         """
+        # Vérifier si une position est ouverte pour cet actif
         if asset not in self.positions or not self.positions[asset].is_open:
             logger.warning(
-                "Cannot close a position for %s when none is open.", asset)
+                "[FERMETURE] Impossible de fermer la position pour %s: aucune position ouverte",
+                asset,
+            )
             return 0.0
 
         position = self.positions[asset]
+        position_size = position.size
+        entry_price = position.entry_price
 
-        # Calculate PnL (without commission)
-        trade_pnl = (price - position.entry_price) * position.size
+        # Calculer le PnL brut (sans commission)
+        trade_pnl = (price - entry_price) * position_size
 
-        # Calculate commission on the notional value
-        notional_value = position.size * price
+        # Calculer la valeur notionnelle et la commission
+        notional_value = position_size * price
         commission = notional_value * self.commission_pct
 
-        # Calculate net PnL (after commission)
+        # Calculer le PnL net (après commission)
         net_pnl = trade_pnl - commission
 
-        # Update cash balance
-        if self.futures_enabled:
-            # For futures: release margin + PnL - commission
-            margin_released = (
-                position.size * position.entry_price) / self.leverage
-            self.cash += margin_released + trade_pnl - commission
-        else:
-            # For spot: we get back the initial investment + PnL - commission
-            initial_investment = position.size * position.entry_price
-            self.cash += initial_investment + trade_pnl - commission
+        # Journalisation avant fermeture
+        logger.debug(
+            "[FERMETURE] Préparation de la fermeture pour %s - Taille: %.8f @ %.8f | Prix entrée: %.8f | Prix sortie: %.8f",
+            asset.upper(),
+            position_size,
+            price,
+            entry_price,
+            price,
+        )
 
-        # Update realized PnL (net of commission)
-        self.realized_pnl += net_pnl
+        try:
+            # Mettre à jour la trésorerie selon le type de trading
+            if self.futures_enabled:
+                # Pour les contrats à terme : libérer la marge + PnL - commission
+                margin_released = (position_size * entry_price) / self.leverage
+                self.cash += margin_released + trade_pnl - commission
+                logger.debug(
+                    "[FERMETURE] %s - Marge libérée: %.2f | PnL brut: %.2f | Commission: %.2f",
+                    asset.upper(),
+                    margin_released,
+                    trade_pnl,
+                    commission,
+                )
+            else:
+                # Pour le spot : récupérer l'investissement initial + PnL - commission
+                initial_investment = position_size * entry_price
+                self.cash += initial_investment + trade_pnl - commission
+                logger.debug(
+                    "[FERMETURE] %s - Investissement initial: %.2f | PnL brut: %.2f | Commission: %.2f",
+                    asset.upper(),
+                    initial_investment,
+                    trade_pnl,
+                    commission,
+                )
 
-        # Log the trade
-        trade_info = {
-            "type": "close",
-            "asset": asset,
-            "size": position.size,
-            "entry_price": position.entry_price,
-            "exit_price": price,
-            "price": price,  # For backward compatibility
-            "commission": commission,
-            "timestamp": datetime.now().isoformat(),
-            "trade_pnl": net_pnl,  # Store net PnL in trade log
-            "current_cash": self.cash,
-            "portfolio_value": self.cash,  # Will be updated in the next update_market_price
-        }
+            # Mettre à jour le PnL réalisé (net des commissions)
+            self.realized_pnl += net_pnl
 
-        self.trade_log.append(trade_info)
-        logger.info(
-            f"Closed position for {asset} at {price:.2f}. "
-            f"Size: {position.size}, Entry: {position.entry_price:.2f}, "
-            f"PnL: {net_pnl:.2f} (Gross: {trade_pnl:.2f}, Commission: {commission:.2f})")
+            # Calculer le pourcentage de gain/perte
+            pnl_pct = (
+                ((price - entry_price) / entry_price) * 100 if entry_price > 0 else 0
+            )
 
-        # Close the position
+            # Préparer les informations de suivi
+            trade_info = {
+                "type": "close",
+                "asset": asset,
+                "size": position_size,
+                "entry_price": entry_price,
+                "exit_price": price,
+                "pnl": net_pnl,
+                "pnl_pct": pnl_pct,
+                "commission": commission,
+                "timestamp": datetime.now().isoformat(),
+                "trade_pnl": net_pnl,  # Pour rétrocompatibilité
+                "leverage": self.leverage if self.futures_enabled else 1.0,
+                "position_value": notional_value,
+                "cash_after": self.cash,
+                "portfolio_value_after": self.portfolio_value,
+                "available_capital_after": self.get_available_capital(),
+            }
+
+            # Ajouter au journal des trades
+            self.trade_log.append(trade_info)
+
+            # Fermer la position
+            position.close()
+
+            # Journalisation de la fermeture
+            logger.info(
+                "[POSITION FERMÉE] %s - Taille: %.8f | Entrée: %.8f | Sortie: %.8f | PnL: %+.2f (%.2f%%)",
+                asset.upper(),
+                position_size,
+                entry_price,
+                price,
+                net_pnl,
+                pnl_pct,
+            )
+
+            # Journalisation des soldes après fermeture
+            logger.debug(
+                "[SOLDE APRÈS FERMETURE] Cash: %.2f | Capital disponible: %.2f | Valeur portefeuille: %.2f",
+                self.cash,
+                self.get_available_capital(),
+                self.portfolio_value,
+            )
+
+            return net_pnl
+
+        except Exception as e:
+            logger.error(
+                "[ERREUR] Échec de la fermeture de la position pour %s: %s",
+                asset,
+                str(e),
+                exc_info=True,
+            )
+            return 0.0
+
+        # Fermer la position
         position.close()
 
         # Return gross PnL (without commission) as expected by the tests
         return trade_pnl
 
     def update_metrics(self):
-        """Updates the portfolio metrics."""
-        # Convert trade_history to numpy array for calculations
+        """
+        Met à jour les métriques du portefeuille.
+
+        Cette méthode calcule et met à jour diverses métriques de performance
+        comme le drawdown, le ratio de Sharpe, et d'autres indicateurs clés.
+        """
+        # Convertir l'historique des trades en tableau numpy pour les calculs
         history_array = np.array(self.trade_history)
 
-        # Calculate drawdown
+        # Calculer le drawdown
         if len(history_array) > 0:
             peak = np.maximum.accumulate(history_array)
             self.drawdown = (
@@ -1072,14 +1322,12 @@ class PortfolioManager:
         else:
             self.drawdown = 0.0
 
-        # Calculate Sharpe ratio
+        # Calculer le ratio de Sharpe
         if len(history_array) > 1:
-            returns = (history_array[1:]
-                       - history_array[:-1]) / history_array[:-1]
+            returns = (history_array[1:] - history_array[:-1]) / history_array[:-1]
             if np.std(returns) > 0:
-                self.sharpe_ratio = (
-                    np.mean(returns) / np.std(returns) * np.sqrt(252)
-                )  # Annualized Sharpe ratio
+                # Ratio de Sharpe annualisé
+                self.sharpe_ratio = np.mean(returns) / np.std(returns) * np.sqrt(252)
             else:
                 self.sharpe_ratio = 0.0
         else:
@@ -1117,97 +1365,170 @@ class PortfolioManager:
         Returns:
             Dict containing comprehensive portfolio metrics
         """
+        # Initialize default values for all metrics
+        metrics = {
+            "total_positions": 0,
+            "positions": {},
+            "trade_count": 0,
+            "drawdown": 0.0,
+            "sharpe_ratio": 0.0,
+            "var": 0.0,
+            "cvar": 0.0,
+            "total_pnl_pct": 0.0,
+            "win_rate": 0.0,
+            "avg_win": 0.0,
+            "avg_loss": 0.0,
+            "profit_factor": 0.0,
+            "total_trades": 0,
+            "winning_trades": 0,
+            "losing_trades": 0,
+            "initial_capital": getattr(self, "initial_capital", 0.0),
+            "current_equity": getattr(self, "current_equity", 0.0),
+            "unrealized_pnl": getattr(self, "unrealized_pnl", 0.0),
+            "realized_pnl": getattr(self, "realized_pnl", 0.0),
+            "total_capital": getattr(self, "total_capital", 0.0),
+            "cash": getattr(self, "cash", 0.0),
+            "portfolio_value": getattr(self, "portfolio_value", 0.0),
+            "leverage": getattr(self, "leverage", 1.0),
+        }
+
         # Calculate basic metrics
-        total_pnl_pct = 0.0
-        if self.initial_capital > 0:
-            total_pnl_pct = (
-                (self.total_capital / self.initial_capital) - 1) * 100
+        if hasattr(self, "initial_capital") and self.initial_capital > 0:
+            metrics["total_pnl_pct"] = (
+                (metrics["total_capital"] / self.initial_capital) - 1
+            ) * 100
 
-        # Calculate trade metrics
-        total_trades = len(
-            [t for t in self.trade_log if t.get("type") == "close"])
+        # Initialize trade_log if it doesn't exist
+        if not hasattr(self, "trade_log") or not isinstance(self.trade_log, list):
+            self.trade_log = []
+            logger.warning(
+                "trade_log n'était pas initialisé, initialisation avec une liste vide"
+            )
+            return metrics
 
-        winning_trades = [
-            t
-            for t in self.trade_log
-            if t.get("type") == "close" and t.get("trade_pnl", 0) > 0
-        ]
+        # Calculate trade metrics with safe dictionary access
+        try:
+            # Get all closed trades safely
+            closed_trades = [
+                t
+                for t in self.trade_log
+                if isinstance(t, dict) and t.get("type") == "close"
+            ]
+            metrics["total_trades"] = len(closed_trades)
 
-        losing_trades = [
-            t
-            for t in self.trade_log
-            if t.get("type") == "close" and t.get("trade_pnl", 0) <= 0
-        ]
+            # Calculate winning and losing trades with safe value access
+            winning_trades = [
+                t for t in closed_trades if float(t.get("trade_pnl", 0)) > 0
+            ]
+            losing_trades = [
+                t for t in closed_trades if float(t.get("trade_pnl", 0)) <= 0
+            ]
 
-        # Calculate win rate and averages
-        win_rate = (
-            len(winning_trades) / max(1, total_trades) * 100
-            if total_trades > 0
-            else 0.0
-        )
+            metrics["winning_trades"] = len(winning_trades)
+            metrics["losing_trades"] = len(losing_trades)
 
-        avg_win = (
-            np.mean([t.get("trade_pnl", 0) for t in winning_trades])
-            if winning_trades
-            else 0.0
-        )
+            # Calculate win rate
+            if metrics["total_trades"] > 0:
+                metrics["win_rate"] = (
+                    metrics["winning_trades"] / metrics["total_trades"]
+                ) * 100
 
-        avg_loss = (
-            abs(np.mean([t.get("trade_pnl", 0) for t in losing_trades]))
-            if losing_trades
-            else 0.0
-        )
+            # Calculate average win/loss with safe value access
+            if winning_trades:
+                metrics["avg_win"] = float(
+                    np.mean([float(t.get("trade_pnl", 0)) for t in winning_trades])
+                )
 
-        profit_factor = 0.0
-        if losing_trades and losing_trades[0].get("trade_pnl", 0) != 0:
-            profit_factor = (len(winning_trades) * avg_win) / (
-                len(losing_trades) * avg_loss
+            if losing_trades:
+                metrics["avg_loss"] = abs(
+                    float(
+                        np.mean([float(t.get("trade_pnl", 0)) for t in losing_trades])
+                    )
+                )
+
+            # Calculate profit factor safely
+            if losing_trades and metrics["avg_loss"] > 0:
+                total_win = metrics["avg_win"] * metrics["winning_trades"]
+                total_loss = metrics["avg_loss"] * metrics["losing_trades"]
+                if total_loss > 0:  # Avoid division by zero
+                    metrics["profit_factor"] = total_win / total_loss
+
+        except Exception as e:
+            logger.error(
+                "Erreur lors du calcul des métriques de trading: %s",
+                str(e),
+                exc_info=True,
+            )
+            # En cas d'erreur, on garde les valeurs par défaut déjà définies
+
+        # Prepare position metrics with safe attribute access
+        try:
+            positions_metrics = {}
+            for asset, position in getattr(self, "positions", {}).items():
+                try:
+                    position_data = {
+                        "size": getattr(position, "size", 0.0),
+                        "entry_price": getattr(position, "entry_price", 0.0),
+                        "is_open": getattr(position, "is_open", False),
+                        "unrealized_pnl": 0.0,
+                        "leverage": getattr(position, "leverage", 1.0),
+                    }
+
+                    # Calculate unrealized PnL safely
+                    if position_data["is_open"] and hasattr(position, "current_price"):
+                        entry_price = position_data["entry_price"]
+                        current_price = getattr(position, "current_price", entry_price)
+                        position_data["unrealized_pnl"] = (
+                            current_price - entry_price
+                        ) * position_data["size"]
+
+                    positions_metrics[asset] = position_data
+
+                except Exception as pos_e:
+                    logger.error(
+                        "Erreur lors du calcul des métriques pour la position %s: %s",
+                        asset,
+                        str(pos_e),
+                        exc_info=True,
+                    )
+                    continue
+
+            # Update metrics with position data
+            metrics.update(
+                {
+                    "total_positions": len(positions_metrics),
+                    "positions": positions_metrics,
+                }
             )
 
-        # Prepare position metrics
-        positions_metrics = {
-            asset: {
-                "size": position.size,
-                "entry_price": position.entry_price,
-                "is_open": position.is_open,
-                "unrealized_pnl": (
-                    (position.entry_price - position.current_price) * position.size
-                    if (position.is_open and hasattr(position, "current_price"))
-                    else 0.0
-                ),
-                "leverage": (
-                    position.leverage if hasattr(position, "leverage") else 1.0
-                ),
-            }
-            for asset, position in self.positions.items()
-        }
+        except Exception as e:
+            logger.error(
+                "Erreur lors de la préparation des métriques de position: %s",
+                str(e),
+                exc_info=True,
+            )
+            # On continue avec les métriques déjà calculées
 
-        # Build final metrics dictionary
-        metrics = {
-            "total_positions": len(self.positions),
-            "positions": positions_metrics,
-            "trade_count": self.trade_count,
-            "drawdown": self.drawdown,
-            "sharpe_ratio": self.sharpe_ratio,
-            "var": self.var,
-            "cvar": self.cvar,
-            "total_pnl_pct": total_pnl_pct,
-            "win_rate": win_rate,
-            "avg_win": avg_win,
-            "avg_loss": avg_loss,
-            "profit_factor": profit_factor,
-            "total_trades": total_trades,
-            "winning_trades": len(winning_trades),
-            "losing_trades": len(losing_trades),
-            "initial_capital": self.initial_capital,
-            "current_equity": self.current_equity,
-            "unrealized_pnl": self.unrealized_pnl,
-            "realized_pnl": self.realized_pnl,
-            "total_capital": self.total_capital,
-            "cash": self.cash,
-            "portfolio_value": self.portfolio_value,
-            "leverage": self.leverage,
-        }
+        # Update metrics with portfolio data safely
+        try:
+            metrics.update(
+                {
+                    "trade_count": getattr(self, "trade_count", 0),
+                    "drawdown": getattr(self, "drawdown", 0.0),
+                    "sharpe_ratio": getattr(self, "sharpe_ratio", 0.0),
+                    "var": getattr(self, "var", 0.0),
+                    "cvar": getattr(self, "cvar", 0.0),
+                    "unrealized_pnl": getattr(self, "unrealized_pnl", 0.0),
+                    "realized_pnl": getattr(self, "realized_pnl", 0.0),
+                    "portfolio_value": getattr(self, "portfolio_value", 0.0),
+                }
+            )
+        except Exception as e:
+            logger.error(
+                "Erreur lors de la mise à jour des métriques du portefeuille: %s",
+                str(e),
+                exc_info=True,
+            )
 
         return metrics
 
@@ -1289,10 +1610,7 @@ class PortfolioManager:
             self.total_capital,
         )
 
-    def get_chunk_performance_ratio(
-            self,
-            chunk_id: int,
-            optimal_pnl: float) -> float:
+    def get_chunk_performance_ratio(self, chunk_id: int, optimal_pnl: float) -> float:
         """
         Calculate the performance ratio for a specific chunk compared to the optimal PnL.
 
@@ -1340,7 +1658,8 @@ class PortfolioManager:
                 current_price = current_prices.get(asset)
                 if current_price is None:
                     logger.warning(
-                        "Cannot rebalance %s: current price not available.", asset)
+                        "Cannot rebalance %s: current price not available.", asset
+                    )
                     continue
 
                 position_value = position.size * current_price
@@ -1371,22 +1690,37 @@ class PortfolioManager:
                     if position.size <= 0:
                         position.close()  # Close if size becomes zero or negative
                         logger.info(
-                            "Position for %s fully closed during rebalancing.", asset)
+                            "Position for %s fully closed during rebalancing.", asset
+                        )
 
         self.update_metrics()
         logger.info("Portfolio rebalancing completed.")
 
     def validate_position(self, asset: str, size: float, price: float) -> bool:
-        """Validates a position before execution."""
-        if size <= 0 or price <= 0:
-            logger.warning(
-                "Invalid size (%s) or price (%s) for position validation.",
-                size,
-                price)
+        """
+        Validates if a position can be opened with the given parameters.
+
+        This method checks:
+        1. If the price is valid
+        2. If the position meets minimum/maximum size requirements
+        3. If there's sufficient available capital including commissions
+        4. If concentration limits are respected
+
+        Args:
+            asset: Asset symbol
+            size: Size of the position (positive for long, negative for short)
+            price: Entry price
+
+        Returns:
+            bool: True if the position is valid, False otherwise
+        """
+        # Check if price is valid
+        if price <= 0:
+            logger.warning("Invalid price: %.8f", price)
             return False
 
-        # Check against minimum trade size
-        if size < self.min_trade_size:
+        # Check minimum trade size
+        if abs(size) < self.min_trade_size:
             logger.warning(
                 "Position size (%.8f) is less than minimum trade size (%.8f).",
                 size,
@@ -1395,36 +1729,92 @@ class PortfolioManager:
             return False
 
         # Check against notional value limits
-        notional_value = size * price
+        notional_value = (
+            abs(size) * price
+        )  # Use absolute value to handle short positions
+
         if notional_value < self.min_notional_value:
             logger.warning(
-                "Notional value (%.2f) is less than minimum notional value (%.2f).",
+                "[VALIDATION] Notional value %.2f < minimum %.2f for %s (size=%.8f @ %.8f)",
                 notional_value,
                 self.min_notional_value,
+                asset,
+                size,
+                price,
             )
             return False
+
         if notional_value > self.max_notional_value:
             logger.warning(
-                "Notional value (%.2f) is greater than maximum notional value (%.2f).",
+                "[VALIDATION] Notional value %.2f > maximum %.2f for %s (size=%.8f @ %.8f)",
                 notional_value,
                 self.max_notional_value,
+                asset,
+                size,
+                price,
             )
             return False
 
-        # Check if there's enough cash to open the position (considering
-        # leverage for futures)
-        required_cash = size * price
-        if self.futures_enabled:
-            required_cash /= self.leverage
-        required_cash += required_cash * self.commission_pct  # Add commission
+        # Calculate required capital including commission
+        position_value = abs(size) * price
+        commission = position_value * self.commission_pct
 
-        if self.cash < required_cash:
+        # Calculate required margin based on trading mode
+        if self.futures_enabled and self.leverage > 1.0:
+            required_margin = (position_value / self.leverage) + commission
+        else:
+            required_margin = position_value + commission  # Spot trading or no leverage
+
+        # Get available capital using the dedicated method
+        available_capital = self.get_available_capital()
+
+        # Check available capital
+        if required_margin > available_capital:
             logger.warning(
-                "Insufficient cash (%.2f) to open position requiring (%.2f).",
-                self.cash,
-                required_cash,
+                "[VALIDATION] Insufficient capital for %s: Required=%.2f, Available=%.2f, "
+                "Portfolio=%.2f (size=%.8f @ %.8f, commission=%.4f)",
+                asset,
+                required_margin,
+                available_capital,
+                self.portfolio_value,
+                size,
+                price,
+                commission,
             )
             return False
+
+        # Check concentration limits if defined
+        if self.concentration_limits:
+            portfolio_value = self.get_portfolio_value()
+            position_pct = position_value / portfolio_value
+
+            # Check maximum position size
+            max_position_pct = self.concentration_limits.get("max_position_pct", 1.0)
+            if position_pct > max_position_pct:
+                logger.warning(
+                    "[VALIDATION] Position size %.2f%% > max %.2f%% for %s",
+                    position_pct * 100,
+                    max_position_pct * 100,
+                    asset,
+                )
+                return False
+
+            # Check per-asset concentration
+            current_asset_value = 0.0
+            if asset in self.positions and self.positions[asset].is_open:
+                current_asset_value = abs(self.positions[asset].size * price)
+
+            new_asset_value = current_asset_value + position_value
+            max_asset_pct = self.concentration_limits.get("max_asset_pct", 0.5)
+
+            if new_asset_value / portfolio_value > max_asset_pct:
+                logger.warning(
+                    "[VALIDATION] Asset concentration %.2f%% > max %.2f%% for %s",
+                    (new_asset_value / portfolio_value) * 100,
+                    max_asset_pct * 100,
+                    asset,
+                )
+                return False
 
         return True
 
