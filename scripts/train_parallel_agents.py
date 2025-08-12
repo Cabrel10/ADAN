@@ -453,21 +453,235 @@ def train_single_instance(
         policy_class = "MultiInputPolicy"
         logger.info(f"Using policy: {policy_class} (for dict observation space)")
 
+        def validate_numeric_param(value, param_name, min_val=None, max_val=None):
+            """Valide un paramètre numérique et le convertit en float.
+
+            Args:
+                value: Valeur à valider (peut être une liste, un tuple ou un nombre)
+                param_name: Nom du paramètre pour les messages d'erreur
+                min_val: Valeur minimale autorisée (inclusive)
+                max_val: Valeur maximale autorisée (inclusive)
+
+            Returns:
+                float: La valeur validée
+
+            Raises:
+                ValueError: Si la valeur n'est pas valide
+            """
+            if isinstance(value, (list, tuple)):
+                if len(value) == 0:
+                    raise ValueError(f"{param_name} ne peut pas être une liste vide")
+                # Pour les listes, on prend la première valeur
+                value = value[0]
+                logging.warning(
+                    f"Plusieurs valeurs fournies pour {param_name}, utilisation de {value}"
+                )
+
+            try:
+                value = float(value)
+            except (TypeError, ValueError) as e:
+                raise ValueError(f"{param_name} doit être un nombre valide") from e
+
+            if min_val is not None and value < min_val:
+                raise ValueError(f"{param_name} doit être >= {min_val}")
+            if max_val is not None and value > max_val:
+                raise ValueError(f"{param_name} doit être <= {max_val}")
+
+            return value
+
+        def make_linear_schedule(initial_value, final_value, param_name="param"):
+            """Crée un schedule linéaire entre une valeur initiale et finale.
+
+            Args:
+                initial_value: Valeur initiale (au début de l'entraînement)
+                final_value: Valeur finale (à la fin de l'entraînement)
+                param_name: Nom du paramètre pour les messages de log et d'erreur
+
+            Returns:
+                Une fonction qui prend le progrès restant (1->0) et retourne la valeur courante
+
+            Raises:
+                ValueError: Si les valeurs fournies ne sont pas valides
+            """
+            try:
+                initial = float(initial_value)
+                final = float(final_value)
+            except (TypeError, ValueError) as e:
+                raise ValueError(
+                    f"Les valeurs initiale et finale de {param_name} doivent être des nombres"
+                ) from e
+
+            def schedule(progress_remaining: float) -> float:
+                return final + (initial - final) * progress_remaining
+
+            return schedule
+
         # Créer ou charger le modèle
         if shared_model_path and os.path.exists(shared_model_path):
             logger.info(f"Chargement du modèle partagé depuis {shared_model_path}")
             model = PPO.load(shared_model_path, env=vec_env, verbose=1)
         else:
             logger.info("Création d'un nouveau modèle")
-            # Créer une copie de la configuration sans la clé 'policy' si elle existe
+
+            # Extraire la configuration du modèle
             model_config = {k: v for k, v in agent_config.items() if k != "policy"}
-            model = PPO(
-                policy=policy_class,
-                env=vec_env,
-                verbose=1,
-                tensorboard_log=f"logs/tensorboard/instance_{instance_id}",
-                **model_config,
-            )
+
+            try:
+                # Fonction utilitaire pour analyser les valeurs numériques ou les plages
+                def parse_numeric_or_range(value, default_range=None, param_name='param'):
+                    """Parse une valeur ou une plage de valeurs numériques.
+
+                    Args:
+                        value: La valeur à parser (nombre, chaîne, liste, etc.)
+                        default_range: Plage par défaut si la valeur ne peut pas être parsée
+                        param_name: Nom du paramètre pour les messages d'erreur
+
+                    Returns:
+                        Une liste [min, max] de valeurs numériques valides
+                    """
+                    import ast
+                    import numbers
+
+                    if default_range is None:
+                        default_range = [1e-4, 1e-5]
+
+                    # Définir les limites en fonction du paramètre
+                    limits = {
+                        'learning_rate': (1e-7, 2.5e-5),  # Min: 1e-7, Max: 2.5e-5
+                        'ent_coef': (1e-5, 0.1),         # Min: 1e-5, Max: 0.1
+                        'gamma': (0.8, 0.9999)           # Min: 0.8, Max: 0.9999
+                    }
+
+                    min_val, max_val = limits.get(param_name, (None, None))
+
+                    def clip_value(val):
+                        try:
+                            val = float(val)
+                            if min_val is not None and val < min_val:
+                                logger.warning(f"{param_name} {val} inférieur à la valeur minimale {min_val}, utilisation de {min_val}")
+                                return min_val
+                            if max_val is not None and val > max_val:
+                                logger.warning(f"{param_name} {val} supérieur à la valeur maximale {max_val}, utilisation de {max_val}")
+                                return max_val
+                            return val
+                        except (ValueError, TypeError):
+                            logger.warning(f"Impossible de convertir la valeur {val} en nombre, utilisation de la valeur par défaut")
+                            return default_range[0]  # Retourne la première valeur par défaut
+
+                    # Gestion des valeurs None
+                    if value is None:
+                        return [clip_value(x) for x in default_range]
+
+                    # Gestion des chaînes de caractères
+                    if isinstance(value, str):
+                        try:
+                            # Essayer de parser la chaîne comme une expression Python
+                            value = ast.literal_eval(value)
+                        except (ValueError, SyntaxError):
+                            try:
+                                # Si ce n'est pas une expression, essayer de convertir directement en float
+                                val = float(value)
+                                return [clip_value(val * 0.1), clip_value(val)]
+                            except (ValueError, TypeError):
+                                logger.warning(f"Impossible de parser la valeur numérique : {value}. Utilisation de la valeur par défaut.")
+                                return [clip_value(x) for x in default_range]
+
+                    # Conversion des types numpy/pandas si nécessaire
+                    if hasattr(value, 'tolist'):
+                        try:
+                            value = value.tolist()
+                        except Exception as e:
+                            logger.warning(f"Erreur lors de la conversion tolist: {e}")
+
+                    # Traitement des nombres simples
+                    if isinstance(value, numbers.Number):
+                        value = float(value)
+                        return [clip_value(value * 0.1), clip_value(value)]
+
+                    # Traitement des listes/tuples
+                    if isinstance(value, (list, tuple)):
+                        if not value:
+                            return [clip_value(x) for x in default_range]
+
+                        # Convertir tous les éléments en float et les clip
+                        values = []
+                        for x in value[:2]:
+                            try:
+                                values.append(float(x))
+                            except (ValueError, TypeError):
+                                logger.warning(f"Valeur non numérique détectée: {x}, utilisation de la valeur par défaut")
+                                values.append(default_range[0])
+
+                        # Si une seule valeur, créer une plage
+                        if len(values) == 1:
+                            val = values[0]
+                            return [clip_value(val * 0.1), clip_value(val)]
+
+                        # Pour deux valeurs ou plus, prendre les deux premières et les clip
+                        return [clip_value(x) for x in values[:2]]
+
+                    # Si le type n'est pas reconnu, retourner les valeurs par défaut
+                    logger.warning(f"Type de valeur non pris en charge: {type(value)}. Utilisation des valeurs par défaut.")
+                    return [clip_value(x) for x in default_range]
+
+                # Récupération et traitement du learning rate
+                lr_config = model_config.pop('learning_rate', None)
+                lr_range = parse_numeric_or_range(lr_config, [2.5e-5, 2.5e-5], 'learning_rate')
+
+                # Si une seule valeur, créer une plage autour de cette valeur
+                if len(lr_range) == 1:
+                    lr_val = lr_range[0]
+                    lr_range = [lr_val * 0.1, lr_val]
+
+                # S'assurer que nous avons exactement 2 valeurs
+                if len(lr_range) != 2:
+                    logger.warning(f"Format de plage de learning rate invalide: {lr_range}. Utilisation des valeurs par défaut.")
+                    lr_range = [2.5e-5, 2.5e-5]
+
+                # Création du schedule de learning rate
+                learning_rate = make_linear_schedule(lr_range[0], lr_range[1], "learning_rate")
+                logger.info(f"Learning rate: {lr_range[0]:.2e} -> {lr_range[1]:.2e}")
+
+                # Configurer ent_coef avec une valeur fixe
+                ent_coef = model_config.pop('ent_coef', 0.01)
+                ent_coef = validate_numeric_param(ent_coef, "ent_coef", 0.0, 1.0)
+
+                # Configurer gamma avec une valeur fixe
+                gamma = model_config.pop('gamma', 0.99)
+                gamma = validate_numeric_param(gamma, "gamma", 0.8, 0.9999)
+
+                # Valider les autres paramètres numériques du modèle
+                if 'n_steps' in model_config:
+                    model_config['n_steps'] = int(validate_numeric_param(
+                        model_config['n_steps'], 'n_steps', 1, 100000
+                    ))
+                if 'batch_size' in model_config:
+                    model_config['batch_size'] = int(validate_numeric_param(
+                        model_config['batch_size'], 'batch_size', 1, 100000
+                    ))
+                if 'n_epochs' in model_config:
+                    model_config['n_epochs'] = int(validate_numeric_param(
+                        model_config['n_epochs'], 'n_epochs', 1, 100
+                    ))
+
+                logger.info(f"Learning rate: {lr_range[0]:.2e} -> {lr_range[1]:.2e}")
+                logger.info(f"Entropy coefficient: {ent_coef}")
+                logger.info(f"Gamma: {gamma}")
+
+                model = PPO(
+                    policy=policy_class,
+                    env=vec_env,
+                    verbose=1,
+                    learning_rate=learning_rate,
+                    ent_coef=ent_coef,
+                    gamma=gamma,
+                    tensorboard_log=f"logs/tensorboard/instance_{instance_id}",
+                    **model_config,
+                )
+
+            except ValueError as e:
+                logger.error(f"Erreur de configuration du modèle: {str(e)}")
+                raise
 
         # Configuration de l'entraînement
         n_steps = agent_config.get("n_steps", 2048)
@@ -571,6 +785,7 @@ def main(
     config_path: str = "config/config.yaml",
     timeout: int = None,
     checkpoint_dir: str = "checkpoints",
+    shared_model_path: str = None,
 ):
     """Fonction principale d'entraînement parallèle"""
     logger = setup_logging()
@@ -607,7 +822,7 @@ def main(
                 instance_id=i,
                 total_timesteps=timesteps_per_instance,
                 config_override=None,
-                shared_model_path=None,
+                shared_model_path=shared_model_path,
                 checkpoint_path=os.path.join(
                     checkpoint_dir, f"instance_{i}_checkpoint.pt"
                 )
@@ -696,6 +911,12 @@ if __name__ == "__main__":
         help="Directory to save checkpoints",
     )
     parser.add_argument(
+        "--shared-model",
+        type=str,
+        default=None,
+        help="Path to shared model for distributed training",
+    )
+    parser.add_argument(
         "--resume", action="store_true", help="Resume training from latest checkpoint"
     )
     args = parser.parse_args()
@@ -705,5 +926,6 @@ if __name__ == "__main__":
         config_path=args.config,
         timeout=args.timeout,
         checkpoint_dir=args.checkpoint_dir,
+        shared_model_path=args.shared_model,
     )
     sys.exit(0 if success else 1)

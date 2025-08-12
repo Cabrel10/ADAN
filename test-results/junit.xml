@@ -1,13 +1,1 @@
-<?xml version="1.0" encoding="utf-8"?><testsuites name="pytest tests"><testsuite name="pytest" errors="0" failures="3" skipped="0" tests="4" time="10.985" timestamp="2025-08-01T17:54:10.251876+00:00" hostname="kali"><testcase classname="tests.test_state_builder.TestStateBuilder" name="test_build_adaptive_observation_with_portfolio" time="0.248"><failure message="ValueError: could not broadcast input array from shape (17,) into shape (0,)">tests/test_state_builder.py:176: in test_build_adaptive_observation_with_portfolio
-    observation = state_builder.build_adaptive_observation(
-src/adan_trading_bot/data_processing/state_builder.py:1099: in build_adaptive_observation
-    flattened_output[current_offset : current_offset + expected_portfolio_size] = portfolio_state_array
-    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-E   ValueError: could not broadcast input array from shape (17,) into shape (0,)</failure></testcase><testcase classname="tests.test_state_builder.TestStateBuilder" name="test_build_observation" time="0.206"><failure message="NameError: name 'obs_array' is not defined">tests/test_state_builder.py:123: in test_build_observation
-    observation = state_builder.build_multi_channel_observation(
-src/adan_trading_bot/data_processing/state_builder.py:529: in build_multi_channel_observation
-    return obs_array
-           ^^^^^^^^^
-E   NameError: name 'obs_array' is not defined</failure></testcase><testcase classname="tests.test_state_builder.TestStateBuilder" name="test_initialization" time="0.192" /><testcase classname="tests.test_state_builder.TestStateBuilder" name="test_observation_shape" time="0.102"><failure message="AssertionError: 1 != 3">tests/test_state_builder.py:106: in test_observation_shape
-    self.assertEqual(len(shape), 3)
-E   AssertionError: 1 != 3</failure></testcase></testsuite></testsuites>
+<?xml version="1.0" encoding="utf-8"?><testsuites name="pytest tests"><testsuite name="pytest" errors="0" failures="0" skipped="0" tests="5" time="7.905" timestamp="2025-08-09T20:28:43.295535+00:00" hostname="kali"><testcase classname="tests.unit.trading.test_trading_interface.TestTradingInterface" name="test_cancel_order" time="0.005" /><testcase classname="tests.unit.trading.test_trading_interface.TestTradingInterface" name="test_check_order_status" time="0.003" /><testcase classname="tests.unit.trading.test_trading_interface.TestTradingInterface" name="test_create_limit_order_validation_fail" time="0.003" /><testcase classname="tests.unit.trading.test_trading_interface.TestTradingInterface" name="test_create_limit_order_validation_pass" time="0.002" /><testcase classname="tests.unit.trading.test_trading_interface.TestTradingInterface" name="test_submit_order" time="0.003" /></testsuite></testsuites>

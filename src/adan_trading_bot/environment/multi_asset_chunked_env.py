@@ -6,21 +6,28 @@ Environnement de trading multi-actifs avec chargement par morceaux.
 Ce module implémente un environnement de trading pour plusieurs actifs
 avec chargement efficace des données par lots.
 """
+import json
 import logging
+import os
 import time
-import traceback
-from typing import Any, Dict, List, Optional, Tuple
+from datetime import datetime
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 import gymnasium as gym
 import numpy as np
 import pandas as pd
+from stable_baselines3.common.vec_env import DummyVecEnv, SubprocVecEnv
 
 from adan_trading_bot.data_processing.data_loader import ChunkedDataLoader
 from adan_trading_bot.data_processing.state_builder import StateBuilder, TimeframeConfig
-from adan_trading_bot.environment.dynamic_behavior_engine import DynamicBehaviorEngine
-from adan_trading_bot.environment.order_manager import OrderManager
-from adan_trading_bot.environment.reward_calculator import RewardCalculator
 from adan_trading_bot.portfolio.portfolio_manager import PortfolioManager
+
+# Importations locales
+from .dynamic_behavior_engine import DynamicBehaviorEngine
+from .order_manager import OrderManager
+from adan_trading_bot.portfolio.portfolio_manager import PortfolioManager as Portfolio
+from .reward_calculator import RewardCalculator
+from .reward_shaper import RewardShaper
 
 
 # Configuration du logger
@@ -86,6 +93,18 @@ class MultiAssetChunkedEnv(gym.Env):
         self.current_chunk_idx = 0
         self.done = False  # État done
         self.global_step = 0  # Compteur global d'étapes
+
+        # Suivi des paliers
+        self.current_tier = None
+        self.previous_tier = None
+        self.episode_count = 0
+        self.episodes_in_tier = 0
+        self.best_portfolio_value = 0.0
+        self.last_tier_change_step = 0
+        self.tier_history = []  # Historique des paliers
+
+        # Suivi des trades
+        self.last_trade_step = 0  # Dernière étape où un trade a été effectué
 
         # Initialisation des composants critiques
         self._is_initialized = False  # Standardisation sur _is_initialized
@@ -156,8 +175,9 @@ class MultiAssetChunkedEnv(gym.Env):
             tf: config.features for tf, config in timeframe_configs_dict.items()
         }
 
-        # Initialize with default target size first
-        window_size = self.config.get("state", {}).get("max_window_size", 50)
+        # Initialize window_size from YAML environment.observation.window_size (defaults to 100)
+        env_obs_cfg = self.config.get("environment", {}).get("observation", {})
+        window_size = env_obs_cfg.get("window_size", 100)
 
         self.state_builder = StateBuilder(
             features_config=features_config,
@@ -169,7 +189,11 @@ class MultiAssetChunkedEnv(gym.Env):
         # 5. Setup action and observation spaces (requires state_builder)
         self._setup_spaces()
 
-        # 6. Initialize other components using worker_config where available
+        # 6. Initialize max_steps from config
+        self.max_steps = self.config.get("environment", {}).get("max_steps", 1000)
+        self.logger.info(f"Initialized max_steps to {self.max_steps}")
+
+        # 7. Initialize other components using worker_config where available
         trading_rules = self.config.get("trading_rules", {})
         penalties = self.config.get("environment", {}).get("penalties", {})
         self.order_manager = OrderManager(
@@ -361,9 +385,212 @@ class MultiAssetChunkedEnv(gym.Env):
         self.episode_reward = 0.0
         self.step_in_chunk = 0
 
+        # Reset portfolio and load initial data chunk
+        self.portfolio.reset()
+        self.current_chunk_idx = 0
+        self.current_data = self.data_loader.load_chunk(self.current_chunk_idx)
+
+        # Get initial observation and info
+        observation = self._get_observation()
+        info = self._get_info()
+
+        return observation, info
+
+    def _apply_tier_reward(self, reward: float, current_value: float) -> float:
+        """Applique les récompenses et pénalités liées aux changements de palier.
+
+        Args:
+            reward: Récompense actuelle à modifier
+            current_value: Valeur actuelle du portefeuille
+
+        Returns:
+            float: Récompense modifiée
+        """
+        if not hasattr(self, 'current_tier') or self.current_tier is None:
+            return reward
+
+        # Mettre à jour le meilleur portefeuille pour ce palier
+        if current_value > self.best_portfolio_value:
+            self.best_portfolio_value = current_value
+
+        # Vérifier si le palier a changé
+        has_changed, is_promotion = self._update_tier(current_value)
+
+        if not has_changed:
+            return reward
+
+        # Appliquer les bonus/malus de changement de palier
+        tier_rewards = self.config.get('reward_shaping', {}).get('tier_rewards', {})
+
+        if is_promotion:
+            promotion_bonus = tier_rewards.get('promotion_bonus', 0.0)
+            logger.info(f"Applying promotion bonus: {promotion_bonus}")
+            reward += promotion_bonus
+
+            # Sauvegarder le modèle si configuré
+            if tier_rewards.get('checkpoint_on_promotion', False):
+                self._save_checkpoint_on_promotion()
+        else:
+            demotion_penalty = tier_rewards.get('demotion_penalty', 0.0)
+            logger.info(f"Applying demotion penalty: {demotion_penalty}")
+            reward -= demotion_penalty
+
+        # Appliquer le multiplicateur de performance du palier
+        performance_multiplier = self.current_tier.get('performance_multiplier', 1.0)
+        if performance_multiplier != 1.0:
+            reward *= performance_multiplier
+            logger.info(f"Applied tier performance multiplier: {performance_multiplier}")
+
+        return reward
+
+    def _save_checkpoint_on_promotion(self) -> None:
+        """Sauvegarde un point de contrôle complet lors d'une promotion de palier.
+
+        Cette méthode sauvegarde à la fois le modèle et l'état de l'environnement.
+        """
+        if not hasattr(self, 'model') or self.model is None:
+            logger.warning("Cannot save checkpoint: model not available")
+            return
+
+        # Créer le répertoire de checkpoints s'il n'existe pas
+        tier_rewards = self.config.get('reward_shaping', {}).get('tier_rewards', {})
+        checkpoint_dir = tier_rewards.get('checkpoint_dir', 'checkpoints')
+        os.makedirs(checkpoint_dir, exist_ok=True)
+
+        # Générer un nom de fichier unique avec le timestamp et le palier
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        tier_name = self.current_tier['name'].lower().replace(' ', '_')
+        checkpoint_base = os.path.join(
+            checkpoint_dir,
+            f"model_{tier_name}_promo_{timestamp}"
+        )
+
+        try:
+            # 1. Sauvegarder le modèle
+            model_path = f"{checkpoint_base}_model"
+            self.model.save(model_path)
+            logger.info(f"Model checkpoint saved to {model_path}")
+
+            # 2. Sauvegarder l'état de l'environnement
+            env_checkpoint = self._save_checkpoint()
+            env_checkpoint['model_path'] = model_path
+
+            # 3. Sauvegarder les métadonnées supplémentaires
+            metadata = {
+                'tier': self.current_tier['name'],
+                'timestamp': timestamp,
+                'portfolio_value': self.portfolio.get_total_value(),
+                'episode': self.episode_count,
+                'step': self.current_step,
+                'checkpoint_type': 'promotion',
+                'tier_info': {
+                    'current_tier': self.current_tier['name'],
+                    'min_value': self.current_tier['min_value'],
+                    'max_value': self.current_tier.get('max_value', float('inf')),
+                    'episodes_in_tier': self.episodes_in_tier,
+                    'last_tier_change_step': self.last_tier_change_step
+                }
+            }
+
+            # 4. Fusionner les métadonnées avec le checkpoint
+            env_checkpoint['metadata'] = metadata
+
+            # 5. Sauvegarder le checkpoint complet
+            checkpoint_path = f"{checkpoint_base}_full.pkl"
+            with open(checkpoint_path, 'wb') as f:
+                import pickle
+                pickle.dump(env_checkpoint, f, protocol=pickle.HIGHEST_PROTOCOL)
+
+            logger.info(f"Full environment checkpoint saved to {checkpoint_path}")
+
+            # 6. Mettre à jour l'historique des checkpoints
+            if not hasattr(self, 'checkpoint_history'):
+                self.checkpoint_history = []
+
+            self.checkpoint_history.append({
+                'timestamp': timestamp,
+                'path': checkpoint_path,
+                'tier': self.current_tier['name'],
+                'portfolio_value': self.portfolio.get_total_value()
+            })
+
+            # 7. Garder uniquement les N derniers checkpoints
+            max_checkpoints = tier_rewards.get('max_checkpoints', 5)
+            if len(self.checkpoint_history) > max_checkpoints:
+                oldest_checkpoint = self.checkpoint_history.pop(0)
+                try:
+                    os.remove(oldest_checkpoint['path'])
+                    logger.info(f"Removed old checkpoint: {oldest_checkpoint['path']}")
+                except Exception as e:
+                    logger.error(f"Failed to remove old checkpoint: {e}")
+
+        except Exception as e:
+            logger.error(f"Failed to save promotion checkpoint: {e}")
+            raise
+
+    def _update_tier(self, current_value: float) -> Tuple[bool, bool]:
+        """Met à jour le palier actuel en fonction de la valeur du portefeuille.
+
+        Args:
+            current_value: Valeur actuelle du portefeuille
+
+        Returns:
+            Tuple[bool, bool]: (has_tier_changed, is_promotion) indiquant
+                              si le palier a changé et si c'est une promotion
+        """
+        if not hasattr(self, 'portfolio'):
+            return False, False
+
+        current_tier = self.portfolio.get_current_tier()
+
+        # Si c'est la première initialisation
+        if self.current_tier is None:
+            self.current_tier = current_tier
+            self.best_portfolio_value = current_value
+            self.tier_history.append({
+                'step': self.current_step,
+                'tier': current_tier['name'],
+                'portfolio_value': current_value,
+                'episode': self.episode_count,
+                'is_promotion': False
+            })
+            return False, False
+
+        # Vérifier si le palier a changé
+        if current_tier['name'] != self.current_tier['name']:
+            self.previous_tier = self.current_tier
+            self.current_tier = current_tier
+            self.last_tier_change_step = self.current_step
+            self.episodes_in_tier = 0
+
+            # Déterminer s'il s'agit d'une promotion
+            prev_min = (self.previous_tier.get('min_capital', 0)
+                       if self.previous_tier else 0)
+            is_promotion = current_tier['min_capital'] > prev_min
+
+            # Mettre à jour l'historique
+            self.tier_history.append({
+                'step': self.current_step,
+                'tier': current_tier['name'],
+                'portfolio_value': current_value,
+                'episode': self.episode_count,
+                'is_promotion': is_promotion
+            })
+
+            prev_name = self.previous_tier['name']
+            curr_name = current_tier['name']
+            logger.info(
+                f"Tier changed from {prev_name} to {curr_name} "
+                f"(Promotion: {is_promotion}) at step {self.current_step}"
+            )
+
+            return True, is_promotion
+
+        return False, False
+
         # Reset portfolio and order manager
-        # Use new_epoch=True to ensure initial capital is properly set
-        self.portfolio.reset(new_epoch=True)
+        # Use new_epoch=hard_reset to control whether to reset capital
+        self.portfolio.reset(new_epoch=hard_reset)
         self.order_manager.reset()
 
         # Load initial chunk of data
@@ -461,12 +688,36 @@ class MultiAssetChunkedEnv(gym.Env):
 
         return observation, info
 
-    def step(
-        self, action: np.ndarray
-    ) -> Tuple[np.ndarray, float, bool, bool, Dict[str, Any]]:
+    def step(self, action: np.ndarray) -> tuple:
         """Execute one time step within the environment."""
+        # Initialize Rich console once per environment if not done already
+        if not hasattr(self, "_rich_initialized"):
+            try:
+                from rich.console import Console
+                from rich.table import Table
+                from rich.text import Text
+                self._rich_console = Console(force_terminal=True, force_interactive=True)
+                self._rich_table = Table
+                self._rich_text = Text
+                self._rich_initialized = True
+                self._rich_last_print = 0
+                self._rich_print_interval = max(1, int(os.getenv("ADAN_RICH_STEP_EVERY", "10")))
+            except Exception as e:
+                self._rich_console = None
+                self._rich_initialized = True
+                self.logger.debug(f"Rich console disabled: {e}")
+
         if not self._is_initialized:
             raise RuntimeError("Environment not initialized. Call reset() first.")
+
+        # Validate action
+        if not self._check_array("action", action):
+            self.logger.warning("Invalid action detected, using no-op action")
+            action = np.zeros_like(action, dtype=np.float32)
+
+        # Nettoyage et validation de l'action
+        action = np.nan_to_num(action, nan=0.0, posinf=1.0, neginf=-1.0)
+        action = np.clip(action, -1.0, 1.0).astype(np.float32)
 
         self.current_step += 1
         self.global_step += 1
@@ -475,12 +726,14 @@ class MultiAssetChunkedEnv(gym.Env):
         logger.info(f"[STEP {self.current_step}] Executing step with action: {action}")
 
         # Log portfolio value at the start of the step
-        if hasattr(self, "portfolio_manager") and hasattr(
-            self.portfolio_manager, "portfolio_value"
-        ):
-            logger.info(
-                f"[STEP {self.current_step}] Portfolio value: {self.portfolio_manager.portfolio_value:.2f}"
-            )
+        if hasattr(self, "portfolio_manager"):
+            try:
+                pv = float(self.portfolio_manager.get_portfolio_value())
+                logger.info(
+                    f"[STEP {self.current_step}] Portfolio value: {pv:.2f}"
+                )
+            except Exception as _e:
+                logger.warning("[STEP] Failed to read portfolio value: %s", str(_e))
         else:
             logger.warning("[STEP] Portfolio manager or portfolio_value not available")
 
@@ -490,9 +743,8 @@ class MultiAssetChunkedEnv(gym.Env):
             initial_obs, info = self.reset()
             return initial_obs, 0.0, False, False, info
 
-        current_observation = self._get_observation()
-
         try:
+            # Préparation de l'action
             action = np.clip(np.asarray(action, dtype=np.float32), -1.0, 1.0)
 
             if action.shape != (len(self.assets),):
@@ -501,18 +753,50 @@ class MultiAssetChunkedEnv(gym.Env):
                     f"expected shape (n_assets={len(self.assets)},)"
                 )
 
+            # Early risk check before executing any trades
+            # Ensure local info dict exists to attach spot protection context
+            info = {}
+            current_prices = self._get_current_prices()
+            try:
+                # Update portfolio with current prices and enforce protection limits
+                if hasattr(self, "portfolio_manager"):
+                    self.portfolio_manager.update_market_price(current_prices)
+                    protection_triggered = self.portfolio_manager.check_protection_limits(current_prices)
+                    if protection_triggered:
+                        if getattr(self.portfolio_manager, "futures_enabled", False):
+                            # In futures mode, terminate on protection (e.g., liquidation)
+                            info = {
+                                "termination_reason": "Risk protection triggered",
+                                "current_prices": current_prices,
+                                "protection": "futures_liquidation_or_breach",
+                            }
+                            observation = self._get_observation()
+                            logger.warning("[TERMINATION] Risk protection triggered at step %d (futures)", self.current_step)
+                            self.done = True
+                            return observation, 0.0, True, False, info
+                        else:
+                            # Spot mode: protection disables new buys; continue episode
+                            logger.warning("[PROTECTION] Spot drawdown breach: new BUY orders disabled. Continuing episode.")
+                            info.update({"protection": "spot_drawdown", "trading_disabled": True})
+            except Exception as risk_e:
+                logger.error("Early risk check failed: %s", str(risk_e), exc_info=True)
+
+            # Mise à jour de l'état DBE et calcul de la modulation
             self._update_dbe_state()
             dbe_modulation = self.dbe.compute_dynamic_modulation()
 
+            # Exécution des trades avec modulation DBE et récupération du PnL réalisé
             trade_start_time = time.time()
-            self._execute_trades(action, dbe_modulation)
+            realized_pnl = self._execute_trades(action, dbe_modulation)
             trade_end_time = time.time()
             logger.debug(
                 f"_execute_trades took {trade_end_time - trade_start_time:.4f} seconds"
             )
 
+            # Journalisation du PnL réalisé
+            logger.info(f"[REWARD] Realized PnL for step: ${realized_pnl:.2f}")
+
             self.step_in_chunk += 1
-            self.current_step += 1
 
             first_asset = next(iter(self.current_data.keys()))
             data_length = len(self.current_data[first_asset])
@@ -525,7 +809,7 @@ class MultiAssetChunkedEnv(gym.Env):
             logger.info(
                 f"[TERMINATION CHECK] Step: {self.current_step}, "
                 f"Max Steps: {self.max_steps}, "
-                f"Portfolio Value: {self.portfolio_manager.portfolio_value:.2f}, "
+                f"Portfolio Value: {self.portfolio_manager.get_portfolio_value():.2f}, "
                 f"Initial Equity: {self.portfolio_manager.initial_equity:.2f}, "
                 f"Steps Since Last Trade: {self.current_step - self.last_trade_step}"
             )
@@ -542,17 +826,20 @@ class MultiAssetChunkedEnv(gym.Env):
                     f"Max steps reached ({self.current_step} >= {self.max_steps})"
                 )
                 logger.info(f"[TERMINATION] {termination_reason}")
-            elif self.portfolio_manager.total_value <= self.initial_equity * 0.70:
+            elif self.portfolio_manager.get_portfolio_value() <= self.portfolio_manager.initial_equity * 0.70:
                 done = True
-                termination_reason = f"Max drawdown exceeded ({self.portfolio_manager.total_value:.2f} <= {self.initial_equity * 0.70:.2f})"
+                termination_reason = (
+                    f"Max drawdown exceeded ({self.portfolio_manager.get_portfolio_value():.2f} "
+                    f"<= {self.portfolio_manager.initial_equity * 0.70:.2f})"
+                )
                 logger.warning(f"[TERMINATION] {termination_reason}")
             elif self.current_step - self.last_trade_step > 300:
                 done = True
                 termination_reason = f"Max inactive steps reached ({self.current_step - self.last_trade_step} > 300)"
                 logger.warning(f"[TERMINATION] {termination_reason}")
-            elif self.current_step >= len(self.current_chunk) - 1:
+            elif self.current_step >= data_length - 1:
                 done = True
-                termination_reason = f"End of chunk reached (step {self.current_step} >= {len(self.current_chunk) - 1})"
+                termination_reason = f"End of chunk reached (step {self.current_step} >= {data_length - 1})"
                 logger.info(f"[TERMINATION] {termination_reason}")
 
             # Log final decision and handle episode termination
@@ -562,8 +849,8 @@ class MultiAssetChunkedEnv(gym.Env):
                 )
                 logger.info(
                     f"[EPISODE STATS] Total steps: {self.current_step}, "
-                    f"Final portfolio value: {self.portfolio_manager.total_value:.2f}, "
-                    f"Return: {(self.portfolio_manager.total_value/self.initial_equity - 1)*100:.2f}%"
+                    f"Final portfolio value: {self.portfolio_manager.get_portfolio_value():.2f}, "
+                    f"Return: {(self.portfolio_manager.get_portfolio_value()/self.portfolio_manager.initial_equity - 1)*100:.2f}%"
                 )
             else:
                 logger.debug(
@@ -603,8 +890,20 @@ class MultiAssetChunkedEnv(gym.Env):
                             f"[CHUNK] Successfully loaded chunk {self.current_chunk_idx + 1}"
                         )
 
-            next_observation = self._get_observation()
+            # Build observations and validate
+            current_observation = self._get_observation()
+            if not self._check_array(
+                "observation",
+                np.concatenate([v.flatten() for v in current_observation.values()]),
+            ):
+                self.logger.error("Invalid observation detected, resetting environment")
+                obs_reset, info_reset = self.reset()
+                return obs_reset, 0.0, True, False, {
+                    "nan_detected": True,
+                    "nan_source": "observation",
+                }
 
+            # Calculate reward using internal shaper (includes risk penalties/tier adjustments)
             reward = self._calculate_reward(action)
             terminated = self.done
             truncated = False
@@ -619,12 +918,332 @@ class MultiAssetChunkedEnv(gym.Env):
             if hasattr(self, "_last_reward_components"):
                 info.update({"reward_components": self._last_reward_components})
 
+            # --- Minimal structured JSON-lines logging for multicolumn visualization ---
+            try:
+                # Prepare JSON metrics using available fields; null for unavailable ones
+                pm = getattr(self, "portfolio_manager", None)
+                pm_metrics = pm.get_metrics() if pm and hasattr(pm, "get_metrics") else {}
+                portfolio_value = pm_metrics.get("total_value") or pm_metrics.get("total_capital")
+                cash = pm_metrics.get("cash")
+                sharpe = pm_metrics.get("sharpe_ratio")
+                max_dd = pm_metrics.get("max_drawdown")
+                trading_disabled = bool(getattr(pm, "trading_disabled", False)) if pm else False
+                futures_enabled = bool(getattr(pm, "futures_enabled", False)) if pm else False
+                current_prices = info.get("market", {}).get("current_prices") or {}
+                # Derive a basic protection event label for quick filtering
+                protection_event = (
+                    "futures_liquidation" if futures_enabled and self.done else (
+                        "spot_drawdown" if (not futures_enabled and trading_disabled) else "none"
+                    )
+                )
+                # Compose compact positions list: symbol:size:entry_price:side if available
+                positions_compact = []
+                for sym, pos in pm_metrics.get("positions", {}).items():
+                    size = pos.get("quantity") or pos.get("size")
+                    entry = pos.get("entry_price") or pos.get("avg_price")
+                    side = "LONG" if (size or 0) >= 0 else "SHORT"
+                    positions_compact.append(f"{sym}:{float(size or 0):.8f}:{float(entry or 0):.8f}:{side}")
+                reward_components = info.get("reward_components") or {}
+                event_tags = []
+                if trading_disabled:
+                    event_tags.append("[PROTECTION]")
+                # Detect tier change
+                current_tier = (pm_metrics or {}).get("tier")
+                last_tier = getattr(self, "_last_tier", None)
+                tier_changed = (current_tier is not None and current_tier != last_tier)
+                if tier_changed:
+                    event_tags.append("[TIER]")
+                setattr(self, "_last_tier", current_tier)
+                # Pull potential sizer outputs from info if available
+                sizer_final_val = info.get("sizer_final")
+                sizer_reason_val = info.get("sizer_reason")
+                sizer_clamped = (sizer_final_val == 0) or (sizer_reason_val is not None)
+                if sizer_clamped:
+                    event_tags.append("[SIZER]")
+                # Build record
+                record = {
+                    "timestamp": self._get_safe_timestamp(),
+                    "step": int(self.current_step),
+                    "env_id": int(getattr(self, "worker_id", 0)),
+                    "episode_id": int(getattr(self, "episode_count", 0)),
+                    "chunk_id": int(getattr(self, "current_chunk", 0)),
+                    "action": action.tolist() if isinstance(action, np.ndarray) else action,
+                    "action_meaning": "VECTOR",
+                    "price_reference": None,
+                    "sizer_raw": None,
+                    "sizer_final": sizer_final_val if sizer_final_val is not None else None,
+                    "sizer_reason": sizer_reason_val if sizer_reason_val is not None else None,
+                    "available_cash": float(cash) if cash is not None else None,
+                    "portfolio_value": float(portfolio_value) if portfolio_value is not None else None,
+                    "cash": float(cash) if cash is not None else None,
+                    "positions_value": info.get("portfolio", {}).get("total_position_value"),
+                    "unrealized_pnl": None,
+                    "realized_pnl": float(realized_pnl) if 'realized_pnl' in locals() and realized_pnl is not None else None,
+                    "cum_realized_pnl": None,
+                    "num_positions": int(info.get("portfolio", {}).get("num_positions", 0)),
+                    "positions": positions_compact,
+                    "order_notional": None,
+                    "order_status": None,
+                    "commission": None,
+                    "slippage": None,
+                    "reward": float(reward),
+                    "reward_components": reward_components,
+                    "drawdown_value": float(max_dd) if max_dd is not None else None,
+                    "drawdown_pct": float(max_dd) if max_dd is not None else None,
+                    "max_drawdown_pct": None,
+                    "tier": str(getattr(self, "current_tier", "")) if getattr(self, "current_tier", None) is not None else None,
+                    "trading_disabled": trading_disabled,
+                    "protection_event": protection_event,
+                    "protection_msg": None,
+                    "dbE_regime": None,
+                    "dbe_params": None,
+                    "ppo_metrics": None,
+                    "learning_rate": None,
+                    "grad_norm": None,
+                    "num_trades_step": None,
+                    "cum_num_trades": None,
+                    "num_wins": None,
+                    "num_losses": None,
+                    "winrate": None,
+                    "avg_win": None,
+                    "avg_loss": None,
+                    "avg_trade_duration": None,
+                    "last_trade_entry_step": None,
+                    "last_trade_exit_step": None,
+                    "metrics_sharpe": float(sharpe) if sharpe is not None else None,
+                    "metrics_volatility": None,
+                    "throughput": info.get("performance", {}).get("steps_per_second"),
+                    "memory_usage": None,
+                    "custom_tags": event_tags,
+                    "notes": None,
+                }
+                # Sampling control to reduce noise: default every 10 steps, always on protection events
+                jsonl_every_env = os.getenv("ADAN_JSONL_EVERY", "")
+                jsonl_every_cfg = 10
+                try:
+                    jsonl_every_cfg = int((self.config or {}).get("logging", {}).get("jsonl_every", 10)) if hasattr(self, "config") else 10
+                except Exception:
+                    jsonl_every_cfg = 10
+                jsonl_every = int(jsonl_every_env) if jsonl_every_env.isdigit() else jsonl_every_cfg
+                should_write = (
+                    (self.current_step % max(1, jsonl_every) == 0)
+                    or (protection_event != "none")
+                    or sizer_clamped
+                    or tier_changed
+                )
+                if should_write:
+                    logs_dir = os.path.abspath(
+                        os.path.join(os.path.dirname(__file__), "..", "..", "..", "..", "logs")
+                    )
+                    os.makedirs(logs_dir, exist_ok=True)
+                    jsonl_path = os.path.join(logs_dir, "training_events.jsonl")
+                    with open(jsonl_path, "a", encoding="utf-8") as f:
+                        f.write(json.dumps(record, separators=(",", ":")) + "\n")
+            except Exception as _log_e:
+                logger.debug("[JSONL] Failed to write training event: %s", str(_log_e))
+
+            # Quiet verbose DEBUG logs after initial checks (one-time)
+            try:
+                if not getattr(self, "_quiet_after_init", False):
+                    # default ON; set ADAN_QUIET_AFTER_INIT=0 to disable
+                    _quiet_env = os.getenv("ADAN_QUIET_AFTER_INIT", "1").lower() in ("1", "true", "yes", "on")
+                    if _quiet_env and int(self.current_step) >= 1:
+                        try:
+                            import logging as _logging
+                            logger.setLevel(_logging.INFO)
+                        except Exception:
+                            pass
+                        self._quiet_after_init = True
+            except Exception:
+                pass
+
+            # --- Rich Summary Table ---
+            if hasattr(self, "_rich_console") and self._rich_console is not None:
+                    # Get configuration
+                    rich_cfg = (self.config or {}).get("logging", {}) if hasattr(self, "config") else {}
+                    env_enabled = os.getenv("ADAN_RICH_STEP_TABLE", "").lower() in ("1", "true", "yes", "on")
+                    rich_enabled = rich_cfg.get("rich_step_table", True) if "rich_step_table" in rich_cfg else env_enabled
+
+                    if not rich_enabled:
+                        return observation, reward, terminated, truncated, info
+
+                    # Check if we should print on this step
+                    print_interval = getattr(self, '_rich_print_interval', 10)
+                    should_print = (self.current_step % print_interval == 0) or \
+                                 (self.current_step - getattr(self, '_rich_last_print', 0) >= print_interval)
+
+                    if should_print:
+                        self._rich_last_print = self.current_step
+
+                        # Local import for Text to avoid scope issues
+                        from rich.text import Text
+
+                        # Helpers
+                        def _fmt(v):
+                            if v is None:
+                                return "-"
+                            if isinstance(v, float):
+                                return f"{v:.6g}"
+                            return str(v)
+
+                        def _dd_cell(v):
+                            if not isinstance(v, (int, float)):
+                                return Text("-")
+                            if v < 0.05:
+                                return Text(f"{v:.3f}", style="green")
+                            if v < 0.20:
+                                return Text(f"{v:.3f}", style="yellow")
+                            if v < 0.50:
+                                return Text(f"{v:.3f}", style="orange3")
+                            return Text(f"{v:.3f}", style="red")
+
+                        def _reward_cell(v, avg=None):
+                            if not isinstance(v, (int, float)):
+                                return Text("-")
+                            style = None
+                            if v > 0:
+                                style = "green3"
+                            elif avg is not None and isinstance(avg, (int, float)) and v < -1.0 * abs(avg):
+                                style = "red"
+                            elif v < 0:
+                                style = "orange3"
+                            return Text(f"{v:.4g}", style=style)
+
+                        def _prot_cell(p):
+                            if p and p != "none":
+                                return Text(str(p), style="orange3")
+                            return Text("none")
+
+                        def _reason_cell(reason: str):
+                            if not reason:
+                                return Text("-")
+                            r = str(reason)
+                            if "insufficient_cash" in r:
+                                return Text(r, style="magenta")
+                            if "min_notional" in r:
+                                return Text(r, style="orange3")
+                            if ("step_size" in r) or ("precision" in r):
+                                return Text(r, style="gold1")
+                            if "trading_disabled" in r:
+                                return Text(r, style="red")
+                            return Text(r)
+
+                        def _winrate_cell(w):
+                            if not isinstance(w, (int, float)):
+                                return Text("-")
+                            if w >= 0.6:
+                                return Text(f"{w:.2f}", style="green3")
+                            if w >= 0.4:
+                                return Text(f"{w:.2f}")
+                            return Text(f"{w:.2f}", style="orange3")
+
+                        def _loss_cell(cur, prev):
+                            if not isinstance(cur, (int, float)):
+                                return Text("-")
+                            if isinstance(prev, (int, float)):
+                                delta = cur - prev
+                                if delta > 0:
+                                    # big increase vs previous -> orange, extremely large -> red
+                                    return Text(f"{cur:.3g}", style="red" if delta > abs(prev) * 2 else "orange3")
+                            return Text(f"{cur:.3g}")
+
+                        # Gather row fields
+                        ts = record.get("timestamp")
+                        ts_short = ts[11:19] if isinstance(ts, str) and len(ts) >= 19 else "--:--:--"
+                        step_id = _fmt(record.get("step"))
+                        env_id = _fmt(record.get("env_id"))
+                        ep_id = _fmt(record.get("episode_id"))
+                        pv = record.get("portfolio_value")
+                        ddv = record.get("drawdown_pct")
+                        tier = _fmt(record.get("tier"))
+                        td_flag = bool(record.get("trading_disabled"))
+                        prot = record.get("protection_event")
+                        reward_val = record.get("reward")
+                        # Rolling average of reward for magnitude-based coloring
+                        avg_reward = getattr(self, "_reward_avg", None)
+                        try:
+                            if isinstance(reward_val, (int, float)):
+                                if avg_reward is None:
+                                    avg_reward = float(reward_val)
+                                else:
+                                    # EMA with smoothing factor
+                                    beta = 0.1
+                                    avg_reward = (1 - beta) * float(avg_reward) + beta * float(reward_val)
+                                setattr(self, "_reward_avg", avg_reward)
+                        except Exception:
+                            pass
+                        sizer_f = record.get("sizer_final")
+                        sizer_r = record.get("sizer_reason")
+                        trades_step = record.get("num_trades_step")
+                        trades_cum = record.get("cum_num_trades")
+                        winrate = record.get("winrate")
+                        sharpe = record.get("metrics_sharpe")
+                        ppo = info.get("ppo_metrics", {}) if isinstance(info, dict) else {}
+                        pol_loss = ppo.get("policy_loss")
+                        val_loss = ppo.get("value_loss")
+                        prev_pol_loss = getattr(self, "_prev_policy_loss", None)
+                        prev_val_loss = getattr(self, "_prev_value_loss", None)
+                        self._prev_policy_loss = pol_loss
+                        self._prev_value_loss = val_loss
+
+                        # Build compact live table
+                        from rich import box
+                        table = self._rich_table(
+                            title=f"Step {self.current_step} - {self._get_safe_timestamp()}",
+                            box=box.SIMPLE,
+                            show_header=True,
+                            header_style="bold magenta",
+                            show_lines=True,
+                            title_justify="left",
+                            expand=False
+                        )
+                        table.add_column("t", justify="left")
+                        table.add_column("step", justify="right")
+                        table.add_column("env", justify="right")
+                        table.add_column("ep", justify="right")
+                        table.add_column("pv", justify="right")
+                        table.add_column("dd%", justify="right")
+                        table.add_column("tier", justify="center")
+                        table.add_column("TD", justify="center")
+                        table.add_column("prot", justify="left")
+                        table.add_column("reward", justify="right")
+                        table.add_column("sizer", justify="right")
+                        table.add_column("trades", justify="right")
+                        table.add_column("winrate", justify="right")
+                        table.add_column("sharpe", justify="right")
+                        table.add_column("polL", justify="right")
+                        table.add_column("valL", justify="right")
+                        table.add_column("tags", justify="left")
+
+                        row_style = "bold white on red" if td_flag else None
+                        table.add_row(
+                            Text(ts_short),
+                            Text(str(step_id)),
+                            Text(str(env_id)),
+                            Text(str(ep_id)),
+                            Text(_fmt(pv)),
+                            _dd_cell(ddv),
+                            Text(str(tier)),
+                            Text("T" if td_flag else "F"),
+                            _prot_cell(prot),
+                            _reward_cell(reward_val, avg_reward),
+                            _reason_cell(_fmt(sizer_r)) if sizer_r else Text(_fmt(sizer_f)),
+                            Text(f"{_fmt(trades_step)}|{_fmt(trades_cum)}"),
+                            _winrate_cell(winrate),
+                            Text(_fmt(sharpe)),
+                            _loss_cell(pol_loss, prev_pol_loss),
+                            _loss_cell(val_loss, prev_val_loss),
+                            Text("".join(event_tags)),
+                            style=row_style,
+                        )
+                        self._rich_console.print(table)
+
             if self.shared_buffer is not None:
                 experience = {
                     "state": current_observation,
                     "action": action,
                     "reward": float(reward),
-                    "next_state": next_observation,
+                    "next_state": current_observation,
                     "done": terminated or truncated,
                     "info": info,
                     "timestamp": self._get_safe_timestamp() or str(self.current_step),
@@ -632,7 +1251,7 @@ class MultiAssetChunkedEnv(gym.Env):
                 }
                 self.shared_buffer.add(experience)
 
-            return next_observation, float(reward), terminated, truncated, info
+            return current_observation, float(reward), terminated, truncated, info
 
         except Exception as e:
             logger.error(f"Error in step(): {str(e)}", exc_info=True)
@@ -681,213 +1300,48 @@ class MultiAssetChunkedEnv(gym.Env):
         except Exception as e:
             logger.warning(f"Failed to update DBE state: {e}")
 
-    def _execute_trades(
-        self, action: np.ndarray, dbe_modulation: Dict[str, Any] = None
-    ) -> None:
-        """Execute trades based on the continuous action vector with improved validation and risk management.
+    def _check_array(self, name: str, arr: np.ndarray) -> bool:
+        """Vérifie la présence de NaN/Inf dans un tableau et enregistre un rapport détaillé.
 
         Args:
-            action: Array of action values between -1 and 1 for each asset
-            dbe_modulation: Optional dictionary of dynamic behavior engine parameters
+            name: Nom de la variable pour les logs
+            arr: Tableau NumPy à vérifier
 
-        Raises:
-            RuntimeError: If environment is not initialized
-            ValueError: If action dimensions are invalid
+        Returns:
+            bool: True si le tableau est valide, False sinon
         """
-        if not hasattr(self, "_is_initialized") or not self._is_initialized:
-            raise RuntimeError("Environment not initialized. Call reset() first.")
+        if not isinstance(arr, np.ndarray):
+            self.logger.warning(f"{name} is not a numpy array, got {type(arr)}")
+            return True
 
-        logger.info(f"[TRADE] Starting trade execution for step {self.current_step}")
+        has_nan = np.any(np.isnan(arr))
+        has_inf = np.any(np.isinf(arr))
 
-        # Initialize trades executed counter
-        trades_executed = 0
+        if has_nan or has_inf:
+            issues = []
+            if has_nan:
+                issues.append("NaN")
+            if has_inf:
+                issues.append("Inf")
 
-        # Validate action dimensions
-        if len(action) != len(self.assets):
-            error_msg = f"Action dimension {len(action)} does not match number of assets {len(self.assets)}"
-            logger.error(error_msg)
-            raise ValueError(error_msg)
-
-        try:
-            # Get current market data
-            current_prices = self._get_current_prices()
-
-            # Validate market data
-            if not self._validate_market_data(current_prices):
-                logger.error("Invalid market data, skipping trade execution")
-                return
-
-            # Get current portfolio state
-            portfolio_metrics = self.portfolio.get_metrics()
-            cash_before = portfolio_metrics.get("cash", 0.0)
-            portfolio_value_before = self.portfolio.portfolio_value
-            current_drawdown = self.portfolio.calculate_drawdown()
-            current_leverage = self.portfolio.get_leverage()
-
-            # Log current state
-            logger.info(
-                f"[PORTFOLIO] Before trades - "
-                f"Value: ${portfolio_value_before:.2f}, "
-                f"Cash: ${cash_before:.2f}, "
-                f"Leverage: {current_leverage:.2f}x, "
-                f"Drawdown: {current_drawdown*100:.2f}%"
+            self.logger.error(
+                f"Invalid values detected in {name} at step {self.current_step}: {' and '.join(issues)}"
             )
 
-            # Log current prices and actions
-            logger.info(
-                f"[MARKET] Current prices: {', '.join([f'{a}: ${p:.2f}' for a, p in current_prices.items()])}"
-            )
-            logger.info(f"[ACTION] Raw actions: {dict(zip(self.assets, action))}")
+            # Enregistrement du contexte
+            try:
+                dump_path = os.path.join(
+                    os.getcwd(),
+                    f"nan_dump_{name}_step{self.current_step}.npz"
+                )
+                np.savez(dump_path, arr=arr)
+                self.logger.info(f"Dumped {name} state to {dump_path}")
+            except Exception as e:
+                self.logger.error(f"Failed to dump {name} state: {e}")
 
-            # Log open positions
-            open_positions = [
-                (asset, pos)
-                for asset, pos in self.portfolio.positions.items()
-                if hasattr(pos, "is_open") and pos.is_open
-            ]
+            return False
 
-            if open_positions:
-                logger.info("[TRADE] Current open positions:")
-                for asset, pos in open_positions:
-                    current_price = current_prices.get(asset, 0.0)
-                    pnl_pct = (
-                        ((current_price / pos.entry_price) - 1) * 100
-                        if hasattr(pos, "entry_price") and pos.entry_price > 0
-                        else 0
-                    )
-                    logger.info(
-                        f"  - {asset}: {pos.size:.6f} @ ${pos.entry_price:.2f} "
-                        f"(Current: ${current_price:.2f}, P&L: {pnl_pct:+.2f}%)"
-                    )
-            else:
-                logger.info("[TRADE] No open positions")
-
-            # Handle DBE modulation
-            dbe_modulation = dbe_modulation or {}
-            if dbe_modulation:
-                logger.debug(f"DBE modulation: {dbe_modulation}")
-
-            # Get trading parameters from config with defaults
-            trading_config = self.config.get("trading", {})
-            risk_config = trading_config.get("risk_management", {})
-
-            base_sl = risk_config.get("base_stop_loss", 0.02)
-            base_tp = risk_config.get("base_take_profit", 0.05)
-            risk_per_trade = risk_config.get("risk_per_trade", 0.01)
-
-            # Adjust risk based on drawdown (more conservative with higher drawdown)
-            risk_multiplier = max(
-                0.1, 1.0 - current_drawdown
-            )  # Reduce risk as drawdown increases
-
-            # Process each asset
-            for i, (asset, action_value) in enumerate(zip(self.assets, action)):
-                try:
-                    action_value = float(np.clip(action_value, -1.0, 1.0))
-                    price = current_prices.get(asset)
-
-                    if price is None or price <= 0:
-                        logger.warning(f"Invalid price {price} for {asset}, skipping")
-                        continue
-
-                    # Get or create position
-                    position = self.portfolio.positions.get(asset)
-
-                    # Determine action type
-                    if action_value > 0.1:  # BUY
-                        if position and position.is_open:
-                            logger.debug(
-                                f"[ORDER] Position in {asset} already open, holding"
-                            )
-                            continue
-
-                        # Calculate position size with risk management
-                        position_size = self.portfolio.calculate_position_size(
-                            price=price,
-                            risk_per_trade=risk_per_trade,
-                            account_risk_multiplier=risk_multiplier,
-                        )
-
-                        if position_size > 0:
-                            logger.info(
-                                f"[ORDER] Opening position in {asset}: {position_size:.6f} @ ${price:.2f}"
-                            )
-                            self.order_manager.open_position(
-                                portfolio=self.portfolio,
-                                asset=asset,
-                                price=price,
-                                size=position_size,
-                                stop_loss=price * (1 - base_sl),
-                                take_profit=price * (1 + base_tp),
-                            )
-                            trades_executed += 1
-                            self.last_trade_step = self.current_step
-
-                    elif action_value < -0.1:  # SELL
-                        if not position or not position.is_open:
-                            logger.debug(f"[ORDER] No position in {asset} to close")
-                            continue
-
-                        logger.info(
-                            f"[ORDER] Closing position in {asset} at ${price:.2f}"
-                        )
-                        self.order_manager.close_position(
-                            portfolio=self.portfolio, asset=asset, price=price
-                        )
-                        trades_executed += 1
-                        self.last_trade_step = self.current_step
-
-                    # No action for values between -0.1 and 0.1 (HOLD)
-
-                except Exception as e:
-                    logger.error(
-                        f"Error processing trade for {asset}: {str(e)}", exc_info=True
-                    )
-
-            # Update portfolio metrics after trades
-            self.portfolio.update_market_price(current_prices)
-            rebalance_result = self.portfolio.rebalance(current_prices)
-
-            # Log portfolio state after trades
-            portfolio_metrics = self.portfolio.get_metrics()
-            cash_after = portfolio_metrics.get("cash", 0.0)
-            portfolio_value_after = self.portfolio.portfolio_value
-
-            logger.info(
-                f"[PORTFOLIO] After trades - "
-                f"Trades executed: {trades_executed}, "
-                f"Cash: ${cash_after:.2f} (Δ${cash_after - cash_before:+.2f}), "
-                f"Portfolio Value: ${portfolio_value_after:.2f} (Δ${portfolio_value_after - portfolio_value_before:+.2f})"
-            )
-
-            # Log detailed position information
-            if hasattr(self.portfolio, "positions"):
-                open_positions = [
-                    asset
-                    for asset, pos in self.portfolio.positions.items()
-                    if hasattr(pos, "is_open") and pos.is_open
-                ]
-                if open_positions:
-                    logger.info(
-                        f"[POSITIONS] Open positions: {', '.join(open_positions)}"
-                    )
-                    for asset in open_positions:
-                        pos = self.portfolio.positions[asset]
-                        current_price = current_prices.get(asset, 0.0)
-                        portfolio_metrics = self.portfolio.get_metrics()
-                        position_info = (
-                            f"  - {asset}: {pos.size:.4f} @ ${pos.entry_price:.2f} "
-                            f"(Current: ${current_price:.2f}, "
-                            f"P&L: ${portfolio_metrics.get('unrealized_pnl', 0):.2f}, "
-                            f"Return: {portfolio_metrics.get('total_return_pct', 0):.2f}%)"
-                        )
-                        logger.info(position_info)
-                else:
-                    logger.info("[POSITIONS] No open positions")
-
-        except Exception as e:
-            logger.error(f"Critical error in _execute_trades: {str(e)}", exc_info=True)
-            raise
+        return True
 
     def _get_current_prices(self) -> Dict[str, float]:
         """Get the current prices for all assets with caching."""
@@ -1346,18 +1800,98 @@ class MultiAssetChunkedEnv(gym.Env):
                 reward_config.get("action_smoothness_penalty", 0.1) * action_diff
             )
 
-        # Calcul de la récompense totale
-        reward = (
-            base_reward
-            - risk_penalty
-            - transaction_penalty
-            - concentration_penalty
-            - action_smoothness_penalty
+        # Calcul de la récompense finale avec toutes les pénalités
+        base_reward = returns * return_scale
+        total_reward = base_reward - (
+            risk_penalty +
+            transaction_penalty +
+            concentration_penalty +
+            action_smoothness_penalty
         )
 
-        # Mise à jour des états pour la prochaine itération
+        # Mise à jour des métriques
+        self.episode_reward += total_reward
+
+        # Mettre à jour les valeurs pour la prochaine itération
         self._last_portfolio_value = portfolio_metrics.get("total_value", 0.0)
         self._last_action = action.copy()
+
+        return total_reward
+
+    def _save_checkpoint(self) -> Dict[str, Any]:
+        """Sauvegarde l'état actuel de l'environnement et du portefeuille.
+
+        Returns:
+            Dict contenant l'état sauvegardé
+        """
+        return {
+            'timestamp': datetime.now().isoformat(),
+            'portfolio_state': self.portfolio.get_state(),
+            'env_state': {
+                'current_step': self.current_step,
+                'current_chunk': self.current_chunk,
+                'episode_count': self.episode_count,
+                'episode_reward': self.episode_reward,
+                'best_portfolio_value': self.best_portfolio_value
+            },
+            'tier_info': {
+                'current_tier': self.current_tier['name'] if self.current_tier else None,
+                'episodes_in_tier': self.episodes_in_tier,
+                'last_tier_change_step': self.last_tier_change_step
+            }
+        }
+
+    def _load_checkpoint_on_demotion(self) -> bool:
+        """Charge un point de contrôle précédent en cas de rétrogradation.
+
+        Returns:
+            bool: True si le chargement a réussi, False sinon
+        """
+        if not hasattr(self, 'checkpoint_history') or not self.checkpoint_history:
+            logger.warning("No checkpoint history available for demotion")
+            return False
+
+        try:
+            # Charger le dernier checkpoint
+            last_checkpoint = self.checkpoint_history[-1]
+
+            # Restaurer l'état du portefeuille
+            if 'portfolio_state' in last_checkpoint:
+                self.portfolio.set_state(last_checkpoint['portfolio_state'])
+
+            # Restaurer l'état de l'environnement
+            if 'env_state' in last_checkpoint:
+                env_state = last_checkpoint['env_state']
+                self.current_step = env_state.get('current_step', 0)
+                self.current_chunk = env_state.get('current_chunk', 0)
+                self.episode_count = env_state.get('episode_count', 0)
+                self.episode_reward = env_state.get('episode_reward', 0.0)
+                self.best_portfolio_value = env_state.get(
+                    'best_portfolio_value',
+                    self.portfolio.get_total_value()
+                )
+
+            # Restaurer les informations de palier
+            if 'tier_info' in last_checkpoint:
+                tier_info = last_checkpoint['tier_info']
+                self.current_tier = next(
+                    (t for t in self.tiers if t['name'] == tier_info.get('current_tier')),
+                    self.tiers[0] if self.tiers else None
+                )
+                self.episodes_in_tier = tier_info.get('episodes_in_tier', 0)
+                self.last_tier_change_step = tier_info.get('last_tier_change_step', 0)
+
+            logger.info("Successfully loaded checkpoint after demotion")
+
+            # Recharger les données du chunk actuel si nécessaire
+            if hasattr(self, 'current_chunk'):
+                self.current_data = self.data_loader.load_chunk(self.current_chunk)
+
+            return True
+
+        except Exception as e:
+            logger.error(f"Failed to load checkpoint: {e}")
+            return False
 
         # Journalisation des composantes de la récompense
         self._last_reward_components = {
@@ -1366,10 +1900,94 @@ class MultiAssetChunkedEnv(gym.Env):
             "transaction_penalty": float(transaction_penalty),
             "concentration_penalty": float(concentration_penalty),
             "action_smoothness_penalty": float(action_smoothness_penalty),
-            "total_reward": float(reward),
+            "total_reward": float(reward)
         }
 
         return float(reward)
+
+    def _execute_trades(self, action: np.ndarray, dbe_modulation: Dict[str, float]) -> float:
+        """
+        Exécute les trades en fonction des actions du modèle et de la modulation DBE.
+
+        Args:
+            action: Vecteur d'actions normalisées [-1, 1] pour chaque actif
+            dbe_modulation: Dictionnaire de modulation du DBE
+
+        Returns:
+            float: PnL réalisé lors de cette étape
+        """
+        if not hasattr(self, 'portfolio_manager'):
+            self.logger.error("Portfolio manager non initialisé")
+            return 0.0
+
+        # Récupérer les prix actuels
+        try:
+            current_prices = self._get_current_prices()
+            if not current_prices or not self._validate_market_data(current_prices):
+                self.logger.warning("Données de marché invalides, aucun trade exécuté")
+                return 0.0
+        except Exception as e:
+            self.logger.error(f"Erreur lors de la récupération des prix: {str(e)}")
+            return 0.0
+
+        realized_pnl = 0.0
+
+        # Parcourir chaque actif et son action correspondante
+        for i, (asset, price) in enumerate(current_prices.items()):
+            if i >= len(action):
+                break
+
+            action_value = action[i]
+            position = self.portfolio_manager.positions.get(asset)
+
+            # Appliquer la modulation DBE si disponible
+            if dbe_modulation and 'risk_multiplier' in dbe_modulation:
+                action_value *= dbe_modulation['risk_multiplier']
+                action_value = np.clip(action_value, -1.0, 1.0)
+
+            try:
+                # Décision de trading basée sur la valeur d'action
+                if action_value > 0.1:  # Acheter
+                    if position and position.is_open:
+                        continue  # Position déjà ouverte
+
+                    # Calculer la taille de la position basée sur le risque
+                    risk_per_trade = 0.01  # 1% de risque par trade
+                    stop_loss_pct = 0.02   # 2% de stop loss
+
+                    # Calculer la taille de la position
+                    position_size = self.portfolio_manager.calculate_position_size(
+                        price=price,
+                        stop_loss_pct=stop_loss_pct,
+                        risk_per_trade=risk_per_trade,
+                        account_risk_multiplier=1.0
+                    )
+
+                    # Ouvrir la position
+                    if position_size > 0:
+                        self.portfolio_manager.open_position(asset, price, position_size)
+
+                elif action_value < -0.1:  # Vendre
+                    if position and position.is_open:
+                        # Fermer la position existante
+                        pnl = self.portfolio_manager.close_position(asset, price)
+                        if pnl is not None:
+                            realized_pnl += pnl
+
+            except Exception as e:
+                self.logger.error(
+                    f"Erreur lors de l'exécution du trade pour {asset}: {str(e)}"
+                )
+                self._log_trade_error(asset, action_value, price, str(e))
+
+        # Mettre à jour la valeur du portefeuille
+        self.portfolio_manager.update_market_price(current_prices)
+
+        # Vérifier les ordres de protection
+        self.portfolio_manager.check_protection_limits(current_prices)
+        self.portfolio_manager.check_protection_orders(current_prices)
+
+        return realized_pnl
 
     def _get_info(self) -> Dict[str, Any]:
         """

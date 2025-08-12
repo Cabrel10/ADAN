@@ -28,6 +28,7 @@ python-dateutil>=2.8.0
 pytz>=2024.1
 fastapi>=0.100.0
 uvicorn[standard]>=0.22.0
+pyfiglet>=0.7.0
 
 # ===================================
 # Interface de trading avancée (TradingView/MetaTrader-like)

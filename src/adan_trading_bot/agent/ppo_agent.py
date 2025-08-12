@@ -1,225 +1,510 @@
-"""
-PPO agent implementation for the ADAN trading bot.
-"""
+"""Module implémentant un agent PPO pour le trading algorithmique."""
+import logging
 import os
+import time
+from pathlib import Path
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple, Union
+
 import numpy as np
+import torch
+from gym import spaces
 from stable_baselines3 import PPO
 from stable_baselines3.common.callbacks import BaseCallback
-from ..common.utils import get_logger, get_path, ensure_dir_exists
-from .feature_extractors import CustomCNNFeatureExtractor
+from stable_baselines3.common.policies import ActorCriticPolicy
+from stable_baselines3.common.type_aliases import MaybeCallback, Schedule
 
-logger = get_logger()
+# Suppress unused imports for type checking
+if TYPE_CHECKING:
+    from stable_baselines3.common.vec_env import VecEnv  # noqa: F401
 
-def create_ppo_agent(env, config, tensorboard_log=None):
+
+class CustomPPOPolicy(ActorCriticPolicy):
     """
-    Create a PPO agent for the trading environment.
-    
-    Args:
-        env: Trading environment.
-        config: Configuration dictionary.
-        tensorboard_log: Path for tensorboard logs.
-        
-    Returns:
-        PPO: Configured PPO agent.
+    Politique personnalisée pour PPO avec vérification des NaN/Inf et journalisation.
     """
-    agent_config = config.get('agent', {}) # This is the agent_config.yaml content
-    
-    # PPO hyperparameters are expected under agent_config['ppo']
-    # Policy architecture/kwargs are expected under agent_config['policy']
-    
-    ppo_params_from_config = agent_config.get('ppo', {})
-    policy_arch_config = agent_config.get('policy', {})
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        # Sera mis à jour par l'agent
+        self._num_timesteps = 0
 
-    # Learning rate: agent_config['ppo'] or agent_config['policy'] or agent_config root
-    learning_rate = ppo_params_from_config.get('learning_rate',
-                    policy_arch_config.get('learning_rate',
-                    agent_config.get('learning_rate', 2.5e-4)))
+    def forward(
+        self,
+        obs: torch.Tensor,
+        deterministic: bool = False
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """
+        Passe avant avec vérification des NaN/Inf.
+        """
+        # Appel à la méthode forward du parent
+        actions, values, log_prob = super().forward(obs, deterministic)
 
-    # PPO specific parameters from agent_config['ppo'] or agent_config root
-    n_steps = ppo_params_from_config.get('n_steps', agent_config.get('n_steps', 2048))
-    batch_size = ppo_params_from_config.get('batch_size', agent_config.get('batch_size', 64))
-    n_epochs = ppo_params_from_config.get('n_epochs', agent_config.get('n_epochs', 10))
-    gamma = ppo_params_from_config.get('gamma', agent_config.get('gamma', 0.99))
-    gae_lambda = ppo_params_from_config.get('gae_lambda', agent_config.get('gae_lambda', 0.95))
-    clip_range = ppo_params_from_config.get('clip_range', agent_config.get('clip_range', 0.2))
-    clip_range_vf = ppo_params_from_config.get('clip_range_vf', agent_config.get('clip_range_vf', None))
-    ent_coef = ppo_params_from_config.get('ent_coef', agent_config.get('ent_coef', 0.01))
-    vf_coef = ppo_params_from_config.get('vf_coef', agent_config.get('vf_coef', 0.5))
-    max_grad_norm = ppo_params_from_config.get('max_grad_norm', agent_config.get('max_grad_norm', 0.5))
-    
-    # Préparer les policy_kwargs pour SB3
-    policy_kwargs = {}
-    
-    # 1. Architecture du réseau (net_arch)
-    # Priorité : policy_kwargs > policy > network
-    if 'policy_kwargs' in agent_config and 'net_arch' in agent_config['policy_kwargs']:
-        policy_kwargs['net_arch'] = agent_config['policy_kwargs']['net_arch']
-    elif 'net_arch' in policy_config:
-        policy_kwargs['net_arch'] = policy_config['net_arch']
-    elif 'network' in config:
-        network_config = config['network']
-        # Vérifier si nous avons des architectures séparées pour policy et value
-        if 'policy_net_arch' in network_config and 'value_net_arch' in network_config:
-            policy_kwargs['net_arch'] = [
-                dict(
-                    pi=network_config['policy_net_arch'],
-                    vf=network_config['value_net_arch']
+        # Vérification des NaN/Inf dans les sorties
+        tensors_to_check = [
+            ("features", self.features_extractor(obs)
+             if hasattr(self, 'features_extractor') else None),
+            ("logits", self.action_net(obs)
+             if hasattr(self, 'action_net') else None),
+            ("value", values),
+            ("actions", actions),
+            ("log_prob", log_prob)
+        ]
+
+        for name, tensor in tensors_to_check:
+            if tensor is None:
+                continue
+
+            if torch.isnan(tensor).any() or torch.isinf(tensor).any():
+                logger.error(
+                    f"Policy produced NaN/Inf in {name} at step "
+                    f"(num_timesteps {getattr(self, '_num_timesteps', 'N/A')})"
                 )
-            ]
-        elif 'policy_net_arch' in network_config:
-            policy_kwargs['net_arch'] = network_config['policy_net_arch']
-        else:
-            # Architecture par défaut si rien n'est spécifié
-            policy_kwargs['net_arch'] = [dict(pi=[128, 64], vf=[128, 64])]
+
+                # Sauvegarde des tenseurs pour débogage
+                try:
+                    os.makedirs("nan_debug", exist_ok=True)
+                    timestamp = int(time.time())
+                    np.savez(
+                        f"nan_debug/policy_nan_{name}_{timestamp}.npz",
+                        arr=tensor.detach().cpu().numpy(),
+                        obs=obs.detach().cpu().numpy() if hasattr(obs, 'detach') else obs
+                    )
+                    logger.info(f"Saved debug data to nan_debug/policy_nan_{name}_{timestamp}.npz")
+                except Exception as e:
+                    logger.error(f"Failed to save debug data: {e}")
+
+                # Nettoyage pour éviter les plantages
+                tensor = torch.nan_to_num(tensor, nan=0.0, posinf=1e6, neginf=-1e6)
+
+        return actions, values, log_prob
+
+from ..common.utils import (
+    ensure_dir_exists,
+    get_logger,
+    get_path,
+    safe_serialize,
+    sanitize_ppo_params,
+)
+from ..models.feature_extractor import CustomCNNFeatureExtractor
+
+logger = get_logger(__name__)
+
+def _validate_param(
+    value: Any,
+    name: str,
+    min_val: Optional[float] = None,
+    max_val: Optional[float] = None,
+    default: Optional[float] = None,
+) -> float:
+    """Valide et nettoie un paramètre numérique.
+
+    Args:
+        value: Valeur à valider
+        name: Nom du paramètre pour les messages d'erreur
+        min_val: Valeur minimale autorisée (inclusive)
+        max_val: Valeur maximale autorisée (inclusive)
+        default: Valeur par défaut si la validation échoue
+
+    Returns:
+        float: La valeur validée ou la valeur par défaut
+    """
+    if value is None and default is not None:
+        return float(default)
+    if value is None:
+        raise ValueError(f"{name} cannot be None and no default provided")
+    try:
+        value_float = float(value)
+        if not np.isfinite(value_float):
+            raise ValueError(f"{name} must be a finite number")
+        if min_val is not None and value_float < min_val:
+            logger.warning(
+                "%s (%s) is below minimum value (%s), using %s",
+                name, value_float, min_val, min_val
+            )
+            return float(min_val)
+        if max_val is not None and value_float > max_val:
+            logger.warning(
+                "%s (%s) is above maximum value (%s), using %s",
+                name, value_float, max_val, max_val
+            )
+            return float(max_val)
+        return value_float
+    except (TypeError, ValueError) as e:
+        if default is not None:
+            logger.warning(
+                "Invalid %s: %s. Using default: %s",
+                name, str(e), default
+            )
+            return float(default)
+        raise ValueError(f"Invalid {name}: {e}")
+
+
+
+def _safe_numpy(x: Any) -> Optional[np.ndarray]:
+    """Convert input to numpy array safely, handling various types and NaN/Inf values.
+
+    Args:
+        x: Input to convert (tensor, numpy array, or other)
+    Returns:
+        Numpy array with NaN/Inf values replaced, or None if conversion fails
+    """
+    if x is None:
+        return None
+    try:
+        if isinstance(x, (list, tuple)):
+            x = np.array(x)
+        elif torch.is_tensor(x):
+            x = x.detach().cpu().numpy()
+        elif not isinstance(x, np.ndarray):
+            x = np.array([x])
+        # Replace NaN and Inf with finite values
+        if (np.issubdtype(x.dtype, np.floating) or
+                np.issubdtype(x.dtype, np.complexfloating)):
+            x = np.nan_to_num(x, nan=0.0, posinf=1e6, neginf=-1e6)
+        return x
+    except Exception as e:
+        logger.warning("Failed to convert to numpy: %s", str(e))
+        return None
+
+class NaNMonitorCallback(BaseCallback):
+    """Callback to monitor and debug NaN/Inf values during training.
+    This callback will:
+    1. Check for NaN/Inf in observations, actions, rewards, and model outputs
+    2. Save a snapshot of the training state when NaN/Inf is detected
+    3. Optionally stop training when an issue is found
+    """
+    def __init__(self, save_dir: Union[str, Path], verbose: int = 1, stop_on_nan: bool = False):
+        """Initialize the NaN monitor callback.
+        Args:
+            save_dir: Directory to save debug snapshots
+            verbose: Verbosity level (0: no output, 1: warnings, 2: debug info)
+            stop_on_nan: Whether to stop training when NaN is detected
+        """
+        super().__init__(verbose)
+        self.save_dir = Path(save_dir)
+        self.stop_on_nan = stop_on_nan
+        self.save_dir.mkdir(parents=True, exist_ok=True)
+        # Track NaN sources for better error reporting
+        self.nan_sources = set()
+
+    def _check_tensor(self, name: str, tensor: torch.Tensor, check_finite: bool = True) -> bool:
+        """Vérifie un tenseur pour les valeurs NaN/Inf.
+
+        Args:
+            name: Nom du tenseur pour les logs
+            tensor: Tenseur à vérifier
+            check_finite: Si True, vérifie aussi les valeurs infinies
+
+        Returns:
+            bool: True si le tenseur est valide, False sinon
+        """
+        if not isinstance(tensor, torch.Tensor):
+            self.logger.warning(
+                f"{name} is not a torch.Tensor, got {type(tensor)}"
+            )
+            return True
+        has_nan = torch.isnan(tensor).any().item()
+        has_inf = torch.isinf(tensor).any().item() if check_finite else False
+        if has_nan or has_inf:
+            issues = []
+            if has_nan:
+                issues.append("NaN")
+            if has_inf:
+                issues.append("Inf")
+            self.logger.error(
+                f"Invalid values in {name} at step {self.num_timesteps}: "
+                f"{' and '.join(issues)}"
+            )
+            try:
+                os.makedirs("nan_debug", exist_ok=True)
+                dump_path = os.path.join(
+                    "nan_debug", f"{name}_step{self.num_timesteps}.pt"
+                )
+                torch.save({
+                    'tensor': tensor,
+                    'step': self.num_timesteps,
+                    'name': name
+                }, dump_path)
+                self.logger.info(
+                    f"Dumped {name} state to {dump_path}"
+                )
+            except Exception as e:
+                self.logger.error(
+                    f"Failed to dump {name} state: {e}"
+                )
+            return False
+        return True
+
+    def _save_debug_snapshot(self, timestep: int) -> None:
+        """Sauvegarde un instantané de débogage lorsqu'une valeur NaN/Inf est détectée.
+        Args:
+            timestep: Numéro du pas de temps actuel
+        """
+        try:
+            timestamp = time.strftime("%Y%m%d-%H%M%S")
+            filename = f"nan_debug_{timestamp}_step{timestep}.npz"
+            filepath = os.path.join(self.save_dir, filename)
+            # Préparer les données à sauvegarder
+            data = {
+                'timestep': timestep,
+                'nan_sources': list(self.nan_sources)
+            }
+            # Ajouter les tenseurs disponibles
+            for name in ['obs', 'actions', 'rewards', 'values', 'log_probs']:
+                tensor = self.locals.get(name)
+                tensor_np = _safe_numpy(tensor)
+                if tensor_np is not None:
+                    data[name] = tensor_np
+            # Sauvegarder dans un fichier
+            np.savez_compressed(filepath, **data)
+            if self.verbose > 0:
+                logger.warning(
+                    "NaN/Inf detected in %s. Saved debug snapshot to %s",
+                    ', '.join(self.nan_sources),
+                    filepath
+                )
+        except Exception as e:
+            logger.error("Failed to save debug snapshot: %s", e)
+
+    def _on_step(self) -> bool:
+        """Called at each training step to check for NaN/Inf values."""
+        # Reset nan sources for this step
+        self.nan_sources = set()
+        # Check tensors in locals
+        for name in ['obs', 'actions', 'rewards', 'values', 'log_probs']:
+            tensor = self.locals.get(name)
+            self._check_tensor(name, tensor)
+        # Check model parameters and gradients
+        if hasattr(self.model, 'policy'):
+            for name, param in self.model.policy.named_parameters():
+                if param.grad is not None:
+                    if self._check_tensor(f"grad_{name}", param.grad):
+                        self.nan_sources.add(f"gradient {name}")
+                if self._check_tensor(f"param_{name}", param):
+                    self.nan_sources.add(f"parameter {name}")
+        # If we found any issues, handle them
+        if self.nan_sources:
+            # Get infos from vectorized envs if available
+            infos = self.locals.get('infos', [])
+            if not isinstance(infos, (list, tuple)):
+                infos = [infos]
+            # Add NaN info to environment infos for logging
+            for info in infos:
+                if isinstance(info, dict):
+                    info['nan_detected'] = True
+                    info['nan_sources'] = list(self.nan_sources)
+            # Save debug information
+            self._save_snapshot(infos)
+            # Optionally stop training
+            if self.stop_on_nan:
+                logger.error(f"Stopping training due to NaN/Inf in {', '.join(self.nan_sources)}")
+                return False
+        return True
+
+class LearningRateMonitor(BaseCallback):
+    """Callback pour surveiller les taux d'apprentissage pendant l'entraînement."""
+
+    def __init__(self, verbose: int = 0):
+        """Initialise le callback de monitoring du taux d'apprentissage.
+
+        Args:
+            verbose: Niveau de verbosité (0: pas de sortie, 1: avertissements, 2: debug)
+        """
+        super(LearningRateMonitor, self).__init__(verbose)
+
+    def _on_step(self) -> bool:
+        """Appelé à chaque étape d'entraînement pour logger le taux d'apprentissage.
+
+        Returns:
+            bool: Toujours True pour continuer l'entraînement
+        """
+        if self.n_calls % 100 == 0 and hasattr(self.model, 'policy') and \
+           hasattr(self.model.policy, 'optimizer'):
+            for i, g in enumerate(self.model.policy.optimizer.param_groups):
+                logger.debug("LR group %d: %f", i, g['lr'])
+        return True
+
+
+def create_ppo_agent(
+    env: VecEnv,
+    config: Dict[str, Any],
+    policy_kwargs: Optional[Dict[str, Any]] = None,
+    verbose: int = 1,
+    device: str = "auto",
+) -> PPO:
+    """Create and configure a PPO agent with enhanced stability features.
+
+    Args:
+        env: The training environment
+        config: Configuration dictionary containing agent parameters
+        policy_kwargs: Additional arguments to pass to the policy
+        verbose: Verbosity level (0: no output, 1: training info, 2: debug)
+        device: Device to run on ('cpu', 'cuda', 'auto')
+
+    Returns:
+        PPO: Configured PPO agent instance with enhanced stability
+    """
+    # Default policy kwargs with stability enhancements
+    if policy_kwargs is None:
+        policy_kwargs = {
+            "net_arch": {
+                "pi": [256, 256],  # Smaller network for policy
+                "vf": [256, 256],  # Separate value function network
+            },
+            "activation_fn": torch.nn.LeakyReLU,  # More stable than ReLU
+            "ortho_init": True,  # Orthogonal initialization
+            "log_std_init": -0.5,  # Start with lower std for more stable exploration
+            "use_sde": True,  # State-dependent exploration
+            "features_extractor_class": None,  # Use default
+            "features_extractor_kwargs": {},
+            "share_features_extractor": False,  # Separate feature extractors for policy and value
+            "normalize_images": True,  # Normalize images
+            "optimizer_class": torch.optim.Adam,  # Default optimizer
+            "optimizer_kwargs": {"eps": 1e-5},  # Add epsilon for numerical stability
+            "squash_output": False
+        }
+    # Use our custom policy class
+    policy_kwargs["policy_class"] = CustomPPOPolicy
+
+    # Get agent config with conservative defaults for stability
+    agent_config = config.get("agent", {})
+    ppo_config = agent_config.get("ppo", {})
+
+    # Validate and sanitize all PPO parameters
+    def get_ppo_param(name: str, min_val: Optional[float] = None,
+                     max_val: Optional[float] = None,
+                     default: Optional[float] = None) -> float:
+        """Helper function to validate and sanitize PPO parameters.
+
+        Args:
+            name: Parameter name for error messages
+            min_val: Minimum allowed value (inclusive)
+            max_val: Maximum allowed value (inclusive)
+            default: Default value if validation fails
+
+        Returns:
+            float: Validated parameter value
+        """
+        return _validate_param(
+            ppo_config.get(name),
+            name=name,
+            min_val=min_val,
+            max_val=max_val,
+            default=default
+        )
+    # Learning rate warmup and scheduling with validation
+    base_learning_rate = get_ppo_param("learning_rate", 1e-7, 1e-2, 1e-4)
+    if isinstance(base_learning_rate, (int, float)):
+        # Linear schedule from 1e-5 to learning_rate over first 10% of training
+        def learning_rate_schedule(progress_remaining):
+            warmup_start = 1e-5
+            warmup_end = float(base_learning_rate)
+            progress = 1 - min(progress_remaining, 0.9) / 0.9
+            return warmup_start + (warmup_end - warmup_start) * progress
+        learning_rate = learning_rate_schedule
+    # Clip range annealing with validation
+    clip_range_val = get_ppo_param("clip_range", 0.01, 0.3, 0.1)
+    if isinstance(clip_range_val, (int, float)):
+        # Anneal clip range from initial value to half over training
+        initial_clip = min(0.2, clip_range_val * 2)
+        def clip_range_schedule(progress_remaining):
+            return initial_clip * (0.5 + 0.5 * progress_remaining)
+        clip_range = clip_range_schedule
     else:
-        # Architecture par défaut si rien n'est spécifié
-        policy_kwargs['net_arch'] = [dict(pi=[128, 64], vf=[128, 64])]
-    
-    # 2. Fonction d'activation
-    # Priorité : policy_kwargs > policy > network
-    activation_fn = None
-    if 'policy_kwargs' in agent_config and 'activation_fn' in agent_config['policy_kwargs']:
-        activation_fn = agent_config['policy_kwargs']['activation_fn']
-    elif 'activation_fn' in policy_config:
-        activation_fn = policy_config['activation_fn']
-    elif 'network' in config and 'activation_fn' in config['network']:
-        activation_fn = config['network']['activation_fn']
-    
-    # Convertir la chaîne d'activation en fonction PyTorch si nécessaire
-    if activation_fn is not None:
-        if isinstance(activation_fn, str):
-            import torch as th
-            if activation_fn.lower() == 'relu':
-                policy_kwargs['activation_fn'] = th.nn.ReLU
-            elif activation_fn.lower() == 'tanh':
-                policy_kwargs['activation_fn'] = th.nn.Tanh
-            elif activation_fn.lower() == 'elu':
-                policy_kwargs['activation_fn'] = th.nn.ELU
-            elif activation_fn.lower() == 'leaky_relu':
-                policy_kwargs['activation_fn'] = th.nn.LeakyReLU
-        else:
-            policy_kwargs['activation_fn'] = activation_fn
-    
-    # 3. Extracteur de caractéristiques (feature extractor)
-    # Configurer l'extracteur de caractéristiques CNN
-    policy_kwargs['features_extractor_class'] = CustomCNNFeatureExtractor
-    
-    # Récupérer les kwargs de l'extracteur de caractéristiques
-    features_extractor_kwargs = {}
-    
-    # Récupérer la configuration CNN depuis data_config
-    data_config = config.get('data', {})
-    cnn_config = data_config.get('cnn_config', {})
-    
-    # Configurer les dimensions de l'extracteur de caractéristiques
-    features_dim = cnn_config.get('features_dim', 64)
-    features_extractor_kwargs['features_dim'] = features_dim
-    
-    # Récupérer le nombre de canaux d'entrée
-    num_input_channels = cnn_config.get('num_input_channels', 1)
-    features_extractor_kwargs['num_input_channels'] = num_input_channels
-    
-    # Récupérer la configuration CNN complète
-    if cnn_config:
-        features_extractor_kwargs['cnn_config'] = cnn_config
-    
-    # Fusionner avec les kwargs existants si présents
-    if 'features_extractor_kwargs' in agent_config:
-        # Priorité aux configurations explicites
-        agent_features_kwargs = agent_config['features_extractor_kwargs']
-        features_extractor_kwargs.update(agent_features_kwargs)
-    
-    # Définir les kwargs finaux
-    policy_kwargs['features_extractor_kwargs'] = features_extractor_kwargs
-    
-    # Journaliser les paramètres de l'extracteur pour débogage
-    logger.info(f"CNN features extractor configuration:")
-    logger.info(f"  - features_dim: {features_extractor_kwargs.get('features_dim')}")
-    logger.info(f"  - num_input_channels: {features_extractor_kwargs.get('num_input_channels')}")
-    
-    # Journaliser les paramètres de policy_kwargs pour débogage
-    logger.info(f"Using policy_kwargs: {policy_kwargs}")
-    
-    # Set tensorboard log path if not provided
-    if tensorboard_log is None:
-        tensorboard_log = os.path.join(get_path('reports'), 'tensorboard_logs')
-        ensure_dir_exists(tensorboard_log)
-    
+        clip_range = clip_range_val
     # Get policy type from config
     policy_type = agent_config.get('policy_type', 'MultiInputPolicy')
-    
-    # Create the agent
-    agent = PPO(
-        policy=policy_type,
-        env=env,
-        learning_rate=learning_rate,
-        n_steps=n_steps,
-        batch_size=batch_size,
-        n_epochs=n_epochs,
-        gamma=gamma,
-        gae_lambda=gae_lambda,
-        clip_range=clip_range,
-        clip_range_vf=clip_range_vf,
-        ent_coef=ent_coef,
-        vf_coef=vf_coef,
-        max_grad_norm=max_grad_norm,
-        tensorboard_log=tensorboard_log,
-        policy_kwargs=policy_kwargs,
-        verbose=1
+    # Create PPO parameters with validation
+    ppo_params = {
+        "policy": policy_kwargs.get("policy", "MlpPolicy"),
+        "env": env,
+        "learning_rate": learning_rate,
+        "n_steps": get_ppo_param("n_steps", 1, 2048, 2048),
+        "batch_size": get_ppo_param("batch_size", 1, None, 64),
+        "n_epochs": get_ppo_param("n_epochs", 1, 50, 10),
+        "gamma": get_ppo_param("gamma", 0.8, 0.9999, 0.99),
+        "gae_lambda": get_ppo_param("gae_lambda", 0.9, 1.0, 0.95),
+        "ent_coef": get_ppo_param("ent_coef", 0.0, 0.5, 0.0),
+        "vf_coef": get_ppo_param("vf_coef", 0.1, 1.0, 0.5),
+        "max_grad_norm": get_ppo_param("max_grad_norm", 0.1, 5.0, 0.5),
+        "sde_sample_freq": get_ppo_param("sde_sample_freq", -1, 128, -1),
+        "target_kl": ppo_config.get("target_kl"),
+        "tensorboard_log": os.path.join(get_path('reports'), 'tensorboard_logs'),
+        "policy_kwargs": {
+            "net_arch": {
+                "pi": ppo_config.get("policy_net_arch", [64, 64]),
+                "vf": ppo_config.get("value_net_arch", [64, 64])
+            },
+            "activation_fn": th.nn.ReLU,
+            "ortho_init": ppo_config.get("ortho_init", True),
+            "share_features_extractor": ppo_config.get("share_features_extractor", True)
+        },
+        "verbose": 1,
+        "device": device,
+        # Additional stability parameters
+        "create_eval_env": False,  # Don't create separate env for evaluation
+        "monitor_wrapper": True,  # Use Monitor wrapper by default
+        "stats_window_size": 100,  # Larger window for stable statistics
+    }
+    # Sanitize all PPO parameters before agent creation
+    sanitized_params = sanitize_ppo_params(ppo_params)
+    # Log the sanitized parameters for debugging
+    logger.debug("Sanitized PPO parameters:")
+    for key, value in sanitized_params.items():
+        if key not in ['policy_kwargs', 'env']:  # Skip large objects in logs
+            logger.debug(f"  {key}: {value}")
+    # Create and return the PPO agent with sanitized parameters
+    agent = PPO(**sanitized_params)
+    # Add NaN checks and gradient clipping callbacks
+    agent._setup_model()
+    if hasattr(agent, 'policy'):
+        # Enable gradient clipping in the optimizer
+        for param_group in agent.policy.optimizer.param_groups:
+            if 'max_grad_norm' not in param_group:
+                param_group['max_grad_norm'] = 0.5  # Default gradient clipping
+    logger.info(
+        "Created PPO agent with learning_rate=%s, "
+        "batch_size=%s, n_epochs=%s",
+        learning_rate, ppo_params['batch_size'], ppo_params['n_epochs']
     )
-    
-    logger.info(f"Created PPO agent with learning_rate={learning_rate}, batch_size={batch_size}, n_epochs={n_epochs}")
-    
     return agent
-
 def save_agent(agent, save_path):
     """
     Save a trained agent.
-    
     Args:
         agent: Trained agent.
         save_path: Path to save the agent.
-        
     Returns:
         str: Path where the agent was saved.
     """
     # Ensure directory exists
     ensure_dir_exists(os.path.dirname(save_path))
-    
     # Save the agent (PPO n'accepte pas l'argument save_replay_buffer)
     agent.save(save_path)
-    logger.info(f"Agent saved to {save_path}")
-    
+    logger.info("Agent saved to %s", save_path)
     return save_path
-
 def load_agent(load_path, env=None):
     """
     Load a trained agent.
-    
     Args:
         load_path: Path to load the agent from.
         env: Environment to use with the loaded agent.
-        
     Returns:
         PPO: Loaded agent.
     """
     try:
         agent = PPO.load(load_path, env=env)
-        logger.info(f"Agent loaded from {load_path}")
+        logger.info("Agent loaded from %s", load_path)
         return agent
     except Exception as e:
-        logger.error(f"Error loading agent from {load_path}: {e}")
+        logger.error("Error loading agent from %s: %s", load_path, e)
         raise
-
 class TradingCallback(BaseCallback):
     """
     Callback for saving the agent during training.
     """
-    
     def __init__(self, check_freq, save_path, verbose=1):
         """
         Initialize the callback.
-        
         Args:
             check_freq: Frequency to check for saving.
             save_path: Path to save the agent.
@@ -229,7 +514,6 @@ class TradingCallback(BaseCallback):
         self.check_freq = check_freq
         self.save_path = save_path
         self.best_mean_reward = -np.inf
-    
     def _init_callback(self):
         """
         Initialize the callback.
@@ -237,11 +521,9 @@ class TradingCallback(BaseCallback):
         # Create folder if needed
         if self.save_path is not None:
             ensure_dir_exists(os.path.dirname(self.save_path))
-    
     def _on_step(self):
         """
         Called at each step of training.
-        
         Returns:
             bool: Whether to continue training.
         """
@@ -254,18 +536,15 @@ class TradingCallback(BaseCallback):
                     latest_values = self.model.logger.name_to_value
                     if 'rollout/ep_rew_mean' in latest_values:
                         mean_reward = latest_values['rollout/ep_rew_mean']
-                
                 # Méthode 2: Fallback - calculer manuellement si ep_info_buffer existe
                 if mean_reward == -np.inf and hasattr(self.model, 'ep_info_buffer') and self.model.ep_info_buffer:
                     rewards = [ep_info["r"] for ep_info in self.model.ep_info_buffer]
                     if rewards:
                         mean_reward = np.mean(rewards)
-                
                 if mean_reward != -np.inf:
                     if self.verbose > 0:
                         logger.info(f"Num timesteps: {self.num_timesteps}")
                         logger.info(f"Mean reward: {mean_reward:.2f}")
-                    
                     # Save if better than previous best
                     if mean_reward > self.best_mean_reward:
                         self.best_mean_reward = mean_reward
@@ -277,5 +556,4 @@ class TradingCallback(BaseCallback):
                 import traceback
                 logger.warning(f"Erreur lors de la récupération des métriques SB3: {e}")
                 logger.warning(f"Trace: {traceback.format_exc()}")
-        
         return True

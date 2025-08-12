@@ -174,10 +174,34 @@ def create_envs(
         )
     ])
 
-    # Normalize observations if requested
+    # Normalize observations and rewards with improved stability settings
     if config.normalize:
-        train_env = VecNormalize(train_env, norm_obs=True, norm_reward=True)
-        eval_env = VecNormalize(eval_env, norm_obs=True, norm_reward=True)
+        train_env = VecNormalize(
+            train_env,
+            norm_obs=True,
+            norm_reward=True,
+            clip_obs=10.0,  # Clip observations to prevent extreme values
+            clip_reward=10.0,  # Clip rewards to prevent extreme updates
+            gamma=config.gamma,  # Use the same gamma as in training
+            norm_obs_keys=None,  # Normalize all observations
+            training=True  # Track running statistics during training
+        )
+
+        # Use the same normalization parameters for evaluation
+        eval_env = VecNormalize(
+            eval_env,
+            norm_obs=True,
+            norm_reward=True,
+            clip_obs=10.0,
+            clip_reward=10.0,
+            gamma=config.gamma,
+            norm_obs_keys=None,
+            training=False  # Don't update running stats during evaluation
+        )
+
+        # Sync the observation normalization parameters
+        eval_env.obs_rms = train_env.obs_rms
+        eval_env.ret_rms = train_env.ret_rms
 
     # Add frame stacking if requested
     if config.use_frame_stack:

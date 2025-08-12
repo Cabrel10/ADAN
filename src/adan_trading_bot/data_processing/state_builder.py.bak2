@@ -83,13 +83,13 @@ class StateBuilder:
     def __init__(
         self,
         features_config: Dict[str, List[str]] = None,
-        window_size: int = 100,  # Correspond exactement à la configuration dans config.yaml
+        window_size: int = 20,  # Correspond à la configuration dans config.yaml
         include_portfolio_state: bool = True,
         normalize: bool = True,
         scaler_path: Optional[str] = None,
         adaptive_window: bool = True,
-        min_window_size: int = 50,  # 50% de la taille de fenêtre par défaut (100 -> 50)
-        max_window_size: int = 150,  # 150% de la taille de fenêtre par défaut (100 -> 150)
+        min_window_size: int = 10,  # 50% de la taille de fenêtre par défaut
+        max_window_size: int = 30,  # 150% de la taille de fenêtre par défaut
         memory_config: Optional[Dict[str, Any]] = None,  # Configuration de mémoire
         target_observation_size: Optional[int] = None,
     ):
@@ -242,11 +242,9 @@ class StateBuilder:
         self._col_mappings: Dict[str, Dict[str, str]] = {}
 
         # Initialize scaler cache with LRU behavior
-        self.scaler_cache = {}                # (timeframe, tuple(features)) -> fitted scaler
-        self.scaler_feature_order = {}       # (timeframe, tuple(features)) -> list(features) (order)
-        # stats pour debug / metrics
-        self.scaler_cache_hits = 0
-        self.scaler_cache_misses = 0
+        self._scaler_cache = {}
+        self._scaler_cache_hits = 0
+        self._scaler_cache_misses = 0
         self._max_scaler_cache_size = 100  # Maximum number of scalers to cache
 
         # Initialisation des scalers
@@ -560,19 +558,19 @@ class StateBuilder:
                 data_hash = self._get_data_hash(timeframe_data)
                 cache_key = f"{tf}_{data_hash}"
 
-                if cache_key in self.scaler_cache:
-                    self.scaler_cache_hits += 1
-                    self.scalers[tf] = self.scaler_cache[cache_key]
+                if cache_key in self._scaler_cache:
+                    self._scaler_cache_hits += 1
+                    self.scalers[tf] = self._scaler_cache[cache_key]
                     logger.debug(f"Using cached scaler for {tf}")
                 else:
-                    self.scaler_cache_misses += 1
+                    self._scaler_cache_misses += 1
                     # Fit new scaler
                     self.scalers[tf].fit(timeframe_data)
 
                     # Cache the fitted scaler (LRU eviction)
-                    if len(self.scaler_cache) >= self._max_scaler_cache_size:
-                        del self.scaler_cache[next(iter(self.scaler_cache))]
-                    self.scaler_cache[cache_key] = self.scalers[tf]
+                    if len(self._scaler_cache) >= self._max_scaler_cache_size:
+                        del self._scaler_cache[next(iter(self._scaler_cache))]
+                    self._scaler_cache[cache_key] = self.scalers[tf]
                     logger.info(
                         f"Fitted new scaler for {tf} on {len(timeframe_data)} samples"
                     )
@@ -601,17 +599,17 @@ class StateBuilder:
         # Log cache statistics
         cache_hit_rate = (
             (
-                self.scaler_cache_hits
-                / (self.scaler_cache_hits + self.scaler_cache_misses)
+                self._scaler_cache_hits
+                / (self._scaler_cache_hits + self._scaler_cache_misses)
             )
             * 100
-            if (self.scaler_cache_hits + self.scaler_cache_misses) > 0
+            if (self._scaler_cache_hits + self._scaler_cache_misses) > 0
             else 0
         )
 
         logger.info(
-            f"Scaler cache stats: {len(self.scaler_cache)} cached scalers, "
-            f"{self.scaler_cache_hits} hits, {self.scaler_cache_misses} misses, "
+            f"Scaler cache stats: {len(self._scaler_cache)} cached scalers, "
+            f"{self._scaler_cache_hits} hits, {self._scaler_cache_misses} misses, "
             f"{cache_hit_rate:.1f}% hit rate"
         )
 
@@ -1310,135 +1308,16 @@ class StateBuilder:
             return obs[:, :target_length]
         return obs
 
-    def transform_with_cached_scaler(self, timeframe: str, window_data: pd.DataFrame,
-                                   requested_features: list) -> np.ndarray:
-        """
-        Safely transform data using a cached scaler or fit a new one if needed.
-
-        Args:
-            timeframe: The timeframe for the data
-            window_data: DataFrame containing the data to transform
-            requested_features: List of feature names in the expected order
-
-        Returns:
-            Transformed numpy array with the same number of rows as window_data
-            and number of columns matching requested_features
-        """
-        # Create a copy to avoid SettingWithCopyWarning
-        window = window_data.copy()
-
-        # Canonical feature signature (requested order)
-        feat_sig = tuple(requested_features)
-        key = (timeframe, feat_sig)
-
-        logger.debug("Transform request - Timeframe: %s, Features: %s",
-                    timeframe, feat_sig)
-
-        # Try to find a matching cached scaler
-        if key in self.scaler_cache:
-            scaler = self.scaler_cache[key]
-            expected_features = self.scaler_feature_order[key]
-            logger.debug("Using cached scaler for timeframe %s with signature %s",
-                        timeframe, feat_sig)
-        else:
-            # Fallback: find any scaler for this timeframe
-            candidates = [k for k in self.scaler_cache.keys() if k[0] == timeframe]
-            if candidates:
-                key0 = candidates[0]
-                scaler = self.scaler_cache[key0]
-                expected_features = self.scaler_feature_order[key0]
-                logger.debug("Using scaler cached for different signature %s for timeframe %s",
-                           key0[1], timeframe)
-            else:
-                # No cached scaler found - fit a new one
-                expected_features = requested_features
-                from sklearn.preprocessing import RobustScaler
-                scaler = RobustScaler()
-
-                # Ensure all features exist
-                for f in expected_features:
-                    if f not in window.columns:
-                        window.loc[:, f] = 0.0
-
-                # Fit on the expected features
-                try:
-                    scaler.fit(window[expected_features].values)
-                    self.scaler_cache[key] = scaler
-                    self.scaler_feature_order[key] = expected_features
-                    logger.info("Fitted new scaler for timeframe %s with %d features",
-                              timeframe, len(expected_features))
-                except Exception as e:
-                    logger.error("Failed to fit new scaler for %s: %s",
-                               timeframe, str(e))
-                    # Return zeros as fallback
-                    return np.zeros((len(window), len(expected_features)),
-                                 dtype=np.float32)
-
-        # Ensure all expected features exist in the window
-        for f in expected_features:
-            if f not in window.columns:
-                window.loc[:, f] = 0.0
-
-        # Reindex to the expected order (safe, deterministic)
-        X = window[list(expected_features)].values.astype(np.float32)
-
-        try:
-            Xs = scaler.transform(X)
-            return Xs
-        except Exception as e:
-            logger.error("Scaler transform failed for %s: expected %d features, got %s. Error: %s",
-                        timeframe, len(expected_features), X.shape, str(e))
-            # Fallback: return zeros with correct shape
-            return np.zeros((len(window), len(expected_features)),
-                         dtype=np.float32)
-
     def _build_asset_timeframe_state(self, asset, timeframe, df: pd.DataFrame):
         required = self.features_config[timeframe]
-        # 1) Création d'une copie pour éviter SettingWithCopyWarning
-        df = df.copy()
-        # 2) Ajout des colonnes manquantes à 0.0
-        missing = [f for f in required if f not in df.columns]
-        if missing:
-            df.loc[:, missing] = 0.0
-        # 3) Sélection et ordre garanti
+        # 1) Ajout des colonnes manquantes à 0.0
+        for feat in required:
+            if feat not in df.columns:
+                df[feat] = 0.0
+        # 2) Sélection et ordre garanti
         arr = df[required].to_numpy()
         return arr  # shape = (n_rows, len(required))
 
-    def align_timeframe_dims(self, obs_by_tf: Dict[str, np.ndarray]) -> np.ndarray:
-        """
-        Ensure all timeframe observations have the same number of features by padding or truncating.
-
-        Args:
-            obs_by_tf: Dictionary mapping timeframes to their observation arrays
-
-        Returns:
-            3D numpy array of shape (n_timeframes, window_size, max_features)
-        """
-        if not obs_by_tf:
-            return np.zeros((0, self.window_size, 0), dtype=np.float32)
-
-        # Find maximum number of features across all timeframes
-        max_f = max(arr.shape[1] for arr in obs_by_tf.values())
-        aligned = []
-
-        for tf, arr in obs_by_tf.items():
-            f = arr.shape[1]
-            if f < max_f:
-                # Pad with zeros
-                pad = ((0, 0), (0, max_f - f))
-                arr = np.pad(arr, pad, 'constant', constant_values=0.0)
-                logger.debug("Padded features for %s from %d to %d",
-                           tf, f, max_f)
-            elif f > max_f:
-                # Truncate
-                arr = arr[:, :max_f]
-                logger.debug("Truncated features for %s from %d to %d",
-                           tf, f, max_f)
-
-            aligned.append(arr.astype(np.float32))
-
-        return np.stack(aligned, axis=0)
-
     def build_observation(
         self, current_idx: int, data: Dict[str, Dict[str, pd.DataFrame]]
     ) -> np.ndarray:
@@ -1452,202 +1331,89 @@ class StateBuilder:
         Returns:
             3D numpy array of shape (n_timeframes, window_size, max_features)
         """
-        """
-        Build observations for each timeframe and combine into a 3D array.
-
-        Args:
-            current_idx: Current index in the data
-            data: Dictionary mapping assets to their timeframe data
-
-        Returns:
-            3D numpy array of shape (n_timeframes, window_size, max_features)
-        """
-        logger.debug("Starting to build observation at index %d", current_idx)
-
         observations = {}
-        max_features = max(len(feats) for feats in self.features_config.values())
+        max_features = self.max_features  # Maximum features across all timeframes
 
-        # Process each timeframe
         for tf in self.timeframes:
-            tf_result = self._process_timeframe_data(tf, data, current_idx, max_features)
-            if tf_result:
-                tf_key, obs = tf_result
-                observations[tf_key] = obs
+            try:
+                # Combine data from all assets for the current timeframe
+                asset_dfs = []
+                for asset in data.keys():
+                    if tf in data[asset]:
+                        asset_dfs.append(data[asset][tf])
 
-        # Stack observations along the first axis to create a 3D array
-        try:
-            # Log observation shapes before alignment
-            logger.debug("Observation shapes before alignment:")
-            for tf, obs in observations.items():
-                logger.debug("  %s: %s", tf, obs.shape)
+                if not asset_dfs:
+                    raise KeyError(f"Missing data for timeframe {tf}")
 
-            # Align dimensions across timeframes
-            aligned_obs = self.align_timeframe_dims(observations)
+                # Get features for this timeframe
+                features = self.features_config.get(tf, [])
+                if not features:
+                    raise ValueError(f"No features configured for timeframe {tf}")
 
-            # Ensure we have the correct number of timeframes
-            if len(aligned_obs) != len(self.timeframes):
-                logger.error(
-                    "Mismatch in number of timeframes: expected %d, got %d. "
-                    "Using zeros as fallback.",
-                    len(self.timeframes), len(aligned_obs)
-                )
-                return np.zeros(
-                    (len(self.timeframes), self.window_size, max_features),
-                    dtype=np.float32,
-                )
+                # Concatenate all assets for this timeframe
+                df = pd.concat(asset_dfs, axis=0)
 
-            logger.debug("Built observation with shape: %s", aligned_obs.shape)
-            return aligned_obs
+                # Ensure we have enough data
+                if current_idx < self.window_size:
+                    logger.warning(
+                        f"Current index {current_idx} < window_size {self.window_size} for {tf}. "
+                        "Returning zero-padded observation."
+                    )
+                    observations[tf] = np.zeros(
+                        (self.window_size, max_features), dtype=np.float32
+                    )
+                    continue
 
-        except Exception as e:
-            logger.error("Error stacking observations: %s", str(e), exc_info=True)
-            return np.zeros(
-                (len(self.timeframes), self.window_size, max_features),
-                dtype=np.float32,
-            )
+                # Get the window of data
+                window_data = df.iloc[current_idx - self.window_size : current_idx]
 
-    def _process_timeframe_data(
-        self,
-        tf: str,
-        data: Dict[str, Dict[str, pd.DataFrame]],
-        current_idx: int,
-        max_features: int
-    ) -> Optional[Tuple[str, np.ndarray]]:
-        """Process data for a single timeframe.
+                # Handle missing values
+                if window_data.isnull().values.any():
+                    logger.warning(f"NaN values found in {tf} data, using forward fill then zero fill")
+                    window_data = window_data.ffill().fillna(0)
 
-        Args:
-            tf: Timeframe identifier (e.g., '5m', '1h')
-            data: Dictionary mapping assets to their timeframe data
-            current_idx: Current index in the data
-            max_features: Maximum number of features across all timeframes
+                # Ensure all required features are present
+                for feature in features:
+                    if feature not in window_data.columns:
+                        logger.warning(f"Feature '{feature}' not found in {tf} data, adding zeros")
+                        window_data[feature] = 0.0
 
-        Returns:
-            Tuple of (timeframe, processed_data) or None if processing fails
-        """
-        try:
-            # Combine data from all assets for the current timeframe
-            asset_dfs = []
-            for asset in data:
-                if tf in data[asset]:
-                    asset_dfs.append(data[asset][tf])
-
-            if not asset_dfs:
-                logger.warning("No data found for timeframe %s, using zeros", tf)
-                return tf, np.zeros((self.window_size, max_features), dtype=np.float32)
-
-            # Get features for this timeframe
-            features = self.features_config.get(tf, [])
-            if not features:
-                logger.warning("No features configured for timeframe %s, using zeros", tf)
-                return tf, np.zeros((self.window_size, max_features), dtype=np.float32)
-
-            # Concatenate all assets for this timeframe
-            df = pd.concat(asset_dfs, axis=0)
-
-            # Ensure we have enough data
-            if current_idx < self.window_size:
-                logger.warning(
-                    "Current index %d < window_size %d for %s. Returning zero-padded observation.",
-                    current_idx, self.window_size, tf
-                )
-                return tf, np.zeros((self.window_size, max_features), dtype=np.float32)
-
-            # Get the window of data
-            window_data = df.iloc[current_idx - self.window_size : current_idx].copy()
-
-            # Handle missing values
-            if window_data.isnull().values.any():
-                logger.debug("NaN values found in %s data, using forward fill then zero fill", tf)
-                window_data = window_data.ffill().fillna(0)
-
-            # Log before transform
-            logger.debug("TF=%s before transform shape=%s, features=%s",
-                       tf, window_data.shape, features)
-
-            # Apply normalization if needed
-            if self.normalize:
+                # Select only the required features in the correct order
                 try:
-                    obs = self.transform_with_cached_scaler(tf, window_data, features)
-                except Exception as e:
-                    logger.error("Error in transform_with_cached_scaler for %s: %s",
-                               tf, str(e))
-                    obs = np.zeros((len(window_data), len(features)), dtype=np.float32)
-            else:
-                # Ensure all features are present and in correct order
-                missing = [f for f in features if f not in window_data.columns]
-                if missing:
-                    logger.debug("Adding missing features to %s: %s", tf, missing)
-                    window_data.loc[:, missing] = 0.0
-                obs = window_data[features].values.astype(np.float32)
+                    window_data = window_data[features]
+                except KeyError as e:
+                    logger.error(f"Error selecting features for {tf}: {e}")
+                    logger.error(f"Available columns: {window_data.columns.tolist()}")
+                    logger.error(f"Requested features: {features}")
+                    raise
 
-            logger.debug("TF=%s after transform shape=%s (expected features=%d)",
-                       tf, obs.shape, len(features))
+                # Convert to numpy array
+                obs = window_data.values.astype(np.float32)
 
-            return tf, obs
+                # Apply padding/truncation to ensure consistent feature dimensions
+                obs = self._pad_features(obs, max_features)
 
-        except Exception as e:
-            logger.error("Error processing %s timeframe: %s", tf, str(e), exc_info=True)
-            return tf, np.zeros((self.window_size, max_features), dtype=np.float32)
+                # Normalize if required
+                if self.normalize and tf in self.scalers and self.scalers[tf] is not None:
+                    obs = self.scalers[tf].transform(obs)
 
-    def build_observation(
-        self, current_idx: int, data: Dict[str, Dict[str, pd.DataFrame]]
-    ) -> np.ndarray:
-        """
-        Build observations for each timeframe and combine into a 3D array.
+                observations[tf] = obs
 
-        Args:
-            current_idx: Current index in the data
-            data: Dictionary mapping assets to their timeframe data
-
-        Returns:
-            3D numpy array of shape (n_timeframes, window_size, max_features)
-        """
-        if not data:
-            logger.error("No data provided to build_observation")
-            return np.zeros(
-                (len(self.timeframes), self.window_size, self.max_features),
-                dtype=np.float32,
-            )
-
-        logger.debug("Starting to build observation at index %d", current_idx)
-
-        observations = {}
-        max_features = max(len(feats) for feats in self.features_config.values()) if self.features_config else 0
-
-        # Process each timeframe
-        for tf in self.timeframes:
-            tf_result = self._process_timeframe_data(tf, data, current_idx, max_features)
-            if tf_result:
-                tf_key, obs = tf_result
-                observations[tf_key] = obs
+            except Exception as e:
+                logger.error(f"Error processing {tf} timeframe: {str(e)}")
+                # Return zero array with correct dimensions
+                observations[tf] = np.zeros(
+                    (self.window_size, max_features), dtype=np.float32
+                )
 
         # Stack observations along the first axis to create a 3D array
         try:
-            # Log observation shapes before alignment
-            logger.debug("Observation shapes before alignment:")
-            for tf, obs in observations.items():
-                logger.debug("  %s: %s", tf, obs.shape)
-
-            # Align dimensions across timeframes
-            aligned_obs = self.align_timeframe_dims(observations)
-
-            # Ensure we have the correct number of timeframes
-            if len(aligned_obs) != len(self.timeframes):
-                logger.error(
-                    "Mismatch in number of timeframes: expected %d, got %d. "
-                    "Using zeros as fallback.",
-                    len(self.timeframes), len(aligned_obs)
-                )
-                return np.zeros(
-                    (len(self.timeframes), self.window_size, max_features),
-                    dtype=np.float32,
-                )
-
-            logger.debug("Built observation with shape: %s", aligned_obs.shape)
-            return aligned_obs
-
+            stacked_obs = np.stack([observations[tf] for tf in self.timeframes], axis=0)
+            logger.debug(f"Built observation with shape: {stacked_obs.shape}")
+            return stacked_obs
         except Exception as e:
-            logger.error("Error stacking observations: %s", str(e), exc_info=True)
+            logger.error(f"Error stacking observations: {str(e)}")
+            # Return zero array with correct dimensions
             return np.zeros(
                 (len(self.timeframes), self.window_size, max_features),
                 dtype=np.float32,

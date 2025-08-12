@@ -213,6 +213,9 @@ class PortfolioManager:
             "concentration_limits", {}
         )
 
+        # Trading protection flag (spot mode): when True, no new long trades are allowed
+        self.trading_disabled: bool = False
+
         self.reset()
 
     def get_margin_level(self) -> float:
@@ -369,22 +372,48 @@ class PortfolioManager:
         """Calcule la volatilité des rendements sur une fenêtre glissante.
 
         Args:
-            window: Taille de la fenêtre de calcul
+            window: Taille de la fenêtre de calcul (minimum 2, maximum 252)
 
         Returns:
-            float: Volatilité des rendements sur la fenêtre
+            float: Volatilité annualisée des rendements sur la fenêtre, ou 0.0 si non calculable
         """
-        if len(self.trade_history) < 2:
+        # Validation des entrées
+        window = max(2, min(window, 252))  # Borne la fenêtre entre 2 et 252
+
+        # Vérification des données disponibles
+        if not self.trade_history or len(self.trade_history) < 2:
             return 0.0
 
-        values = np.array(self.trade_history[-window:])
-        if len(values) < 2:
-            return 0.0
+        try:
+            # Conversion en array numpy et vérification des valeurs
+            values = np.array(self.trade_history[-window:], dtype=np.float64)
 
-        returns = np.diff(np.log(values))
-        if len(returns) > 0:
-            return np.std(returns) * np.sqrt(252)
-        return 0.0
+            # Suppression des valeurs non finies (NaN, Inf)
+            values = values[np.isfinite(values)]
+
+            # Vérification après nettoyage
+            if len(values) < 2 or np.any(values <= 0):
+                return 0.0
+
+            # Calcul des rendements logarithmiques avec protection contre les valeurs non positives
+            returns = np.diff(np.log(values))
+
+            # Vérification des rendements calculés
+            if len(returns) < 1 or not np.all(np.isfinite(returns)):
+                return 0.0
+
+            # Calcul de la volatilité annualisée (252 jours de bourse par an)
+            volatility = np.std(returns, ddof=1)  # ddof=1 pour l'estimation non biaisée
+
+            # Protection contre les valeurs aberrantes
+            if not np.isfinite(volatility) or volatility <= 0:
+                return 0.0
+
+            return volatility * np.sqrt(252)  # Annualisation
+
+        except (ValueError, RuntimeWarning, ZeroDivisionError) as e:
+            logger.warning(f"Erreur dans le calcul de la volatilité: {str(e)}")
+            return 0.0
 
     def get_state(self) -> np.ndarray:
         """Return the current portfolio state as a numpy array with 17 dimensions.
@@ -546,22 +575,51 @@ class PortfolioManager:
         self.sharpe_ratio = 0.0
         self.var = 0.0
         self.cvar = 0.0
+        # Re-enable trading after a reset unless overridden by caller
+        self.trading_disabled = False
+
+    def get_current_tier_index(self) -> int:
+        """Retourne l'index du palier actuel dans self.capital_tiers (0-based)."""
+        equity = self.get_portfolio_value()
+        sorted_tiers = sorted(self.capital_tiers, key=lambda x: x["min_capital"])
+
+        for i, tier in enumerate(sorted_tiers):
+            # Si c'est le dernier palier
+            if i == len(sorted_tiers) - 1:
+                if equity >= tier["min_capital"]:
+                    return i
+            else:
+                next_min = sorted_tiers[i + 1]["min_capital"]
+                if tier["min_capital"] <= equity < next_min:
+                    return i
+        return 0
+
+    def get_current_tier_name(self) -> str:
+        """Retourne le nom du palier actuel."""
+        idx = self.get_current_tier_index()
+        return sorted(self.capital_tiers, key=lambda x: x["min_capital"])[idx]["name"]
 
     def get_portfolio_value(self) -> float:
         """
-        Returns the current total portfolio value (cash + open positions).
+        Returns the current total portfolio value (cash + open positions) with numerical safety.
 
         Returns:
-            float: Total portfolio value in quote currency
+            float: Total portfolio value in quote currency, never negative
         """
-        # Calculate total value of open positions
-        positions_value = sum(
-            pos.size * pos.entry_price for pos in self.positions.values() if pos.is_open
-        )
+        try:
+            # Calculate total value of open positions with protection
+            positions_value = 0.0
+            for pos in self.positions.values():
+                if pos.is_open and hasattr(pos, 'size') and hasattr(pos, 'entry_price'):
+                    positions_value = positions_value + float(pos.size) * float(pos.entry_price)
 
-        # Update and return the total portfolio value
-        self.portfolio_value = self.cash + positions_value
-        return self.portfolio_value
+            # Update and return the total portfolio value with protection
+            total_value = float(self.cash) + positions_value
+            self.portfolio_value = max(0.0, total_value)  # Never go below zero
+            return self.portfolio_value
+        except (TypeError, ValueError) as e:
+            logger.error(f"Error calculating portfolio value: {e}")
+            return max(0.0, float(getattr(self, 'cash', 0.0)))  # Fallback to cash if available
 
     def get_leverage(self) -> float:
         """
@@ -658,156 +716,156 @@ class PortfolioManager:
 
     def update_market_price(self, current_prices: Dict[str, float]) -> None:
         """
-        Met à jour la valeur du portefeuille en fonction des prix actuels.
-
-        Cette méthode met à jour la valeur totale du portefeuille (cash + positions)
-        et calcule le PnL non réalisé pour chaque position ouverte.
+        Met à jour la valeur du portefeuille en fonction des prix actuels avec gestion robuste des erreurs.
 
         Args:
             current_prices: Dictionnaire associant les symboles d'actifs à leurs prix actuels.
         """
-        # Vérification du type du paramètre
         if not isinstance(current_prices, dict):
-            logger.warning(
-                "current_prices doit être un dictionnaire. Reçu: %s",
-                type(current_prices),
-            )
+            logger.warning("current_prices doit être un dictionnaire. Reçu: %s", type(current_prices))
             current_prices = {}
 
-        # Sauvegarder l'ancienne valeur du portefeuille pour le calcul des variations
-        previous_portfolio_value = self.portfolio_value
+        try:
+            previous_portfolio_value = float(self.portfolio_value) if hasattr(self, 'portfolio_value') else 0.0
+            self.unrealized_pnl = 0.0
+            total_positions_value = 0.0
+            assets_with_missing_prices = []
 
-        # Réinitialisation des compteurs
-        self.unrealized_pnl = 0.0
-        total_positions_value = 0.0
-        assets_with_missing_prices = []
+            for asset, position in self.positions.items():
+                if not position.is_open:
+                    continue
 
-        # Calcul du PnL non réalisé pour toutes les positions ouvertes
-        for asset, position in self.positions.items():
-            if not position.is_open:
-                continue
+                current_price = current_prices.get(asset)
 
-            current_price = current_prices.get(asset)
+                # Skip invalid prices
+                if not isinstance(current_price, (int, float)) or current_price <= 0:
+                    assets_with_missing_prices.append(asset)
+                    continue
 
-            # Ignorer les prix manquants ou invalides
-            if (
-                current_price is None
-                or not isinstance(current_price, (int, float))
-                or current_price <= 0
-            ):
-                assets_with_missing_prices.append(asset)
-                continue
+                try:
+                    current_price = float(current_price)
+                    entry_value = float(position.size) * float(position.entry_price)
+                    current_value = float(position.size) * current_price
+                    position_pnl = current_value - entry_value
 
-            # Calcul de la valeur actuelle et du PnL de la position
-            position_value = position.size * current_price
-            position_pnl = position_value - (position.size * position.entry_price)
+                    # Update position metrics
+                    self.unrealized_pnl += position_pnl
+                    total_positions_value += current_value
 
-            # Mise à jour des totaux du portefeuille
-            self.unrealized_pnl += position_pnl
-            total_positions_value += position_value
+                    # Update position attributes
+                    position.current_price = current_price
+                    position.current_value = current_value
+                    position.unrealized_pnl = position_pnl
 
-            # Mise à jour des attributs de la position
-            position.current_price = current_price
-            position.current_value = position_value
-            position.unrealized_pnl = position_pnl
-            position.pnl_pct = (
-                (position_pnl / (position.size * position.entry_price)) * 100
-                if position.entry_price > 0
-                else 0.0
-            )
+                    # Safe percentage calculation
+                    if entry_value > 0:
+                        position.pnl_pct = (position_pnl / entry_value) * 100.0
+                    else:
+                        position.pnl_pct = 0.0
 
-            # Journalisation détaillée pour le débogage
-            logger.debug(
-                "[POSITION] %s: %.8f @ %.8f (Val: %.2f USDT, PnL: %.2f USDT, %.2f%%)",
-                asset,
-                position.size,
-                current_price,
-                position_value,
-                position_pnl,
-                position.pnl_pct,
-            )
+                    # Log position details
+                    logger.debug(
+                        "[POSITION] %s: %.8f @ %.8f (Val: %.2f USDT, PnL: %.2f USDT, %.2f%%)",
+                        asset,
+                        position.size,
+                        current_price,
+                        current_value,
+                        position_pnl,
+                        position.pnl_pct,
+                    )
 
-        # Journalisation des actifs avec prix manquants
-        if assets_with_missing_prices:
-            logger.warning(
-                "Prix manquants ou invalides pour %d actifs: %s. "
-                "Ces positions seront ignorées.",
-                len(assets_with_missing_prices),
-                ", ".join(assets_with_missing_prices),
-            )
+                except (TypeError, ValueError) as e:
+                    logger.error(f"Error updating position {asset}: {e}")
+                    continue
 
-        # Mise à jour de la valeur du portefeuille et de l'equity
-        # Utilisation de la somme de la trésorerie et de la valeur totale des positions
-        # plutôt que de se fier uniquement au PnL non réalisé
-        self.portfolio_value = self.cash + total_positions_value
-        self.current_equity = self.portfolio_value
-        self.total_capital = self.portfolio_value
-
-        # Calcul du PnL total (réalisé + non réalisé)
-        total_pnl = self.portfolio_value - self.initial_equity
-
-        # Journalisation des valeurs mises à jour
-        logger.debug(
-            "[PORTFOLIO] Valeur totale: %.2f USDT (Cash: %.2f, Positions: %.2f, PnL: %.2f USDT, %.2f%%)",
-            self.portfolio_value,
-            self.cash,
-            total_positions_value,
-            total_pnl,
-            (total_pnl / self.initial_equity * 100) if self.initial_equity > 0 else 0.0,
-        )
-
-        # Mettre à jour l'historique des trades (limité pour éviter la
-        # surconsommation mémoire)
-        if not hasattr(self, "trade_history") or not self.trade_history:
-            self.trade_history = [self.initial_equity]
-
-        # Conservation uniquement des 1000 dernières entrées
-        if len(self.trade_history) >= 1000:
-            self.trade_history.pop(0)
-
-        self.trade_history.append(self.portfolio_value)
-
-        # Application des taux de financement pour les contrats à terme si
-        # activé
-        if self.futures_enabled:
-            # Logique d'application des taux de financement
-            pass
-
-        # Mise à jour des métriques
-        self.update_metrics()
-
-        # Vérification des ordres de protection (uniquement pour les actifs
-        # avec prix valides)
-        valid_prices = {
-            k: v
-            for k, v in current_prices.items()
-            if v is not None and isinstance(v, (int, float)) and v > 0
-        }
-
-        if valid_prices:
-            protection_triggered = self.check_protection_limits(valid_prices)
-            if protection_triggered:
-                # Réinitialisation des métriques après action de protection
-                self.unrealized_pnl = 0.0
-                self.portfolio_value = self.cash
-                self.current_equity = self.cash
-                self.total_capital = self.cash
-
-                # Journalisation de l'événement de protection
-                current_drawdown = self.initial_equity - self.portfolio_value
-                drawdown_pct = (
-                    (current_drawdown / self.initial_equity) * 100
-                    if self.initial_equity > 0
-                    else 0
+            # Log assets with missing prices
+            if assets_with_missing_prices:
+                logger.warning(
+                    "Prix manquants ou invalides pour %d actifs: %s. "
+                    "Ces positions seront ignorées.",
+                    len(assets_with_missing_prices),
+                    ", ".join(assets_with_missing_prices),
                 )
-                logger.critical(
-                    "[PROTECTION] Seuil atteint. Valeur: %.2f USDT "
-                    "(Initial: %.2f USDT, Drawdown: %.1f%%)",
+
+            # Update portfolio metrics
+            self.portfolio_value = max(0.0, float(self.cash) + total_positions_value)
+            self.current_equity = self.portfolio_value
+            self.total_capital = self.portfolio_value
+
+            # Calculate total PnL with protection
+            try:
+                total_pnl = self.portfolio_value - float(getattr(self, 'initial_equity', 0.0))
+                pnl_pct = (total_pnl / float(self.initial_equity) * 100) if float(self.initial_equity) > 0 else 0.0
+                logger.debug(
+                    "[PORTFOLIO] Valeur totale: %.2f USDT (Cash: %.2f, Positions: %.2f, PnL: %.2f USDT, %.2f%%)",
                     self.portfolio_value,
-                    self.initial_equity,
-                    drawdown_pct,
+                    float(self.cash),
+                    total_positions_value,
+                    total_pnl,
+                    pnl_pct,
                 )
-        elif any(pos.is_open for pos in self.positions.values()):
+            except (TypeError, ValueError) as e:
+                logger.error(f"Error calculating portfolio PnL: {e}")
+
+            # Update trade history (limit to 1000 entries)
+            if not hasattr(self, "trade_history"):
+                self.trade_history = [max(0.0, float(getattr(self, 'initial_equity', 0.0)))]
+
+            self.trade_history.append(self.portfolio_value)
+            if len(self.trade_history) > 1000:
+                self.trade_history.pop(0)
+
+            # Apply funding rates if futures are enabled
+            if getattr(self, 'futures_enabled', False):
+                # Funding rate logic would go here
+                pass
+
+            # Update metrics
+            self.update_metrics()
+
+            # Check protection limits with valid prices
+            valid_prices = {
+                k: float(v) for k, v in current_prices.items()
+                if isinstance(v, (int, float)) and v > 0
+            }
+
+            if valid_prices:
+                protection_triggered = self.check_protection_limits(valid_prices)
+                if protection_triggered:
+                    # Reset metrics after protection action
+                    self.unrealized_pnl = 0.0
+                    self.portfolio_value = max(0.0, float(self.cash))
+                    self.current_equity = self.portfolio_value
+                    self.total_capital = self.portfolio_value
+                    logger.warning("Protection limits triggered - reset portfolio metrics")
+
+        except Exception as e:
+            logger.critical(
+                "[CRITICAL] Erreur lors de la mise à jour des prix du marché: %s",
+                str(e),
+                exc_info=True
+            )
+            # Ensure portfolio value is always valid
+            self.portfolio_value = max(0.0, float(getattr(self, 'cash', 0.0)))
+            self.current_equity = self.portfolio_value
+            self.total_capital = self.portfolio_value
+
+            # Calculate drawdown for logging
+            try:
+                current_drawdown = float(getattr(self, 'initial_equity', 0.0)) - self.portfolio_value
+                initial_equity = float(getattr(self, 'initial_equity', 1.0))
+                drawdown_pct = (current_drawdown / initial_equity * 100) if initial_equity > 0 else 0.0
+                logger.warning(
+                    "Protection triggered - Portfolio: %.2f USDT, Drawdown: %.2f USDT (%.2f%%)",
+                    self.portfolio_value,
+                    current_drawdown,
+                    drawdown_pct
+                )
+            except (TypeError, ValueError) as e:
+                logger.error("Erreur lors du calcul du drawdown: %s", str(e))
+
+        # Vérifier les ordres de protection si des positions sont ouvertes
+        if any(pos.is_open for pos in self.positions.values()) and not valid_prices:
             logger.warning(
                 "Impossible de vérifier les ordres de protection: "
                 "aucun prix valide disponible"
@@ -877,17 +935,17 @@ class PortfolioManager:
                     self.portfolio_value,
                 )
 
-                # Si pas de positions ouvertes et pas de futures, on retourne True
-                if not self.futures_enabled and not any(
-                    p.is_open for p in self.positions.values()
-                ):
-                    logger.warning(
-                        "[WARNING] Drawdown critique atteint mais aucune position "
-                        "ouverte à fermer. Veuillez vérifier la stratégie de trading."
-                    )
+                if not self.futures_enabled:
+                    # Spot mode: disable new buy trades, do NOT force-close positions
+                    if not self.trading_disabled:
+                        logger.warning(
+                            "[PROTECTION] Spot mode: Disabling new BUY trades due to drawdown breach."
+                        )
+                    self.trading_disabled = True
+                    # Keep positions open; environment should respect this via validation
                     return True
 
-                # Fermer toutes les positions
+                # Futures/margin mode: proceed with liquidation as before
                 positions_closed = False
                 for asset in list(self.positions.keys()):
                     current_price = current_prices.get(asset)
@@ -901,20 +959,18 @@ class PortfolioManager:
                         positions_closed = True
                     else:
                         logger.error(
-                            "[ERROR] Impossible de fermer la position %s: "
-                            "prix manquant",
+                            "[ERROR] Impossible de fermer la position %s: prix manquant",
                             asset,
                         )
 
-                # Mettre à jour les métriques
-                if positions_closed or not self.futures_enabled:
+                # Mettre à jour les métriques (futures)
+                if positions_closed:
                     self.unrealized_pnl = 0.0
                     self.total_capital = self.cash
                     self.portfolio_value = self.cash
                     self.current_equity = self.cash
                     logger.info(
-                        "[STATUS] Portefeuille après fermeture: %.2f USDT "
-                        "(Cash: %.2f USDT)",
+                        "[STATUS] Portefeuille après fermeture: %.2f USDT (Cash: %.2f USDT)",
                         self.portfolio_value,
                         self.cash,
                     )
@@ -1016,8 +1072,24 @@ class PortfolioManager:
             size: La taille de la position à ouvrir.
 
         Returns:
-            True si la position a été ouverte avec succès, False sinon.
+            bool: True si la position a été ouverte avec succès, False sinon.
         """
+        # Protection: in spot mode, block new BUY orders when trading is disabled
+        if not self.futures_enabled and self.trading_disabled and size > 0:
+            logger.warning(
+                "[PROTECTION] open_position blocked: trading disabled for BUY orders (drawdown breach). %s size=%.8f @ %.8f",
+                asset,
+                size,
+                price,
+            )
+            # Standardized guard log for easy grep during integration runs
+            logger.warning(
+                "[GUARD] Rejecting BUY due to trading_disabled (reason=spot_drawdown) asset=%s size=%.8f price=%.8f",
+                asset,
+                size,
+                price,
+            )
+            return False
         # Vérifier si une position est déjà ouverte pour cet actif
         if self.positions[asset].is_open:
             logger.warning(
@@ -1303,59 +1375,192 @@ class PortfolioManager:
         # Return gross PnL (without commission) as expected by the tests
         return trade_pnl
 
-    def update_metrics(self):
+    def update_metrics(self) -> None:
         """
-        Met à jour les métriques du portefeuille.
+        Met à jour les métriques du portefeuille de manière robuste.
 
-        Cette méthode calcule et met à jour diverses métriques de performance
-        comme le drawdown, le ratio de Sharpe, et d'autres indicateurs clés.
+        Cette méthode calcule et met à jour les métriques de performance clés
+        comme le drawdown et le ratio de Sharpe, avec une gestion robuste des erreurs
+        et une stabilité numérique améliorée.
+
+        La méthode est conçue pour être tolérante aux erreurs et ne jamais lever d'exception.
         """
-        # Convertir l'historique des trades en tableau numpy pour les calculs
-        history_array = np.array(self.trade_history)
+        # Valeurs par défaut sécurisées
+        self.drawdown = 0.0
+        self.sharpe_ratio = 0.0
 
-        # Calculer le drawdown
-        if len(history_array) > 0:
-            peak = np.maximum.accumulate(history_array)
-            self.drawdown = (
-                (history_array[-1] - peak[-1]) / peak[-1] if peak[-1] > 0 else 0.0
+        try:
+            # Vérification de l'historique
+            if not hasattr(self, 'trade_history') or not self.trade_history:
+                logger.debug("Aucun historique de trades disponible pour le calcul des métriques")
+                return
+
+            # Conversion en tableau numpy avec gestion des erreurs
+            try:
+                history_array = np.asarray(self.trade_history, dtype=np.float64)
+                if history_array.size == 0:
+                    return
+            except (TypeError, ValueError) as e:
+                logger.error("Erreur lors de la conversion de l'historique: %s", str(e))
+                return
+
+            # 1. Calcul du drawdown
+            self._update_drawdown_metrics(history_array)
+
+            # 2. Calcul des métriques de rendement et risque
+            self._update_return_metrics(history_array)
+
+        except Exception as e:
+            logger.error(
+                "Erreur critique dans update_metrics: %s",
+                str(e),
+                exc_info=True
             )
-        else:
+            # En cas d'erreur, on conserve les valeurs par défaut
+            self.drawdown = 0.0
+            self.sharpe_ratio = 0.0
+
+    def _update_drawdown_metrics(self, history_array: np.ndarray) -> None:
+        """Met à jour les métriques de drawdown de manière robuste."""
+        try:
+            if len(history_array) < 2:
+                return
+
+            # Calcul des valeurs cumulées maximales avec protection numérique
+            with np.errstate(divide='ignore', invalid='ignore'):
+                # Remplacement des valeurs non finies par 0
+                clean_history = np.nan_to_num(history_array, nan=0.0, posinf=0.0, neginf=0.0)
+                cummax = np.maximum.accumulate(clean_history)
+
+                # Calcul du drawdown avec protection contre division par zéro
+                mask = cummax > 1e-10  # Évite les divisions par des valeurs très petites
+                drawdowns = np.zeros_like(clean_history)
+                drawdowns[mask] = (cummax[mask] - clean_history[mask]) / cummax[mask]
+
+                # Calcul du drawdown maximum, limité à 100%
+                self.drawdown = float(np.clip(np.max(drawdowns), 0.0, 1.0))
+
+        except Exception as e:
+            logger.error("Erreur dans _update_drawdown_metrics: %s", str(e))
             self.drawdown = 0.0
 
-        # Calculer le ratio de Sharpe
-        if len(history_array) > 1:
-            returns = (history_array[1:] - history_array[:-1]) / history_array[:-1]
-            if np.std(returns) > 0:
-                # Ratio de Sharpe annualisé
-                self.sharpe_ratio = np.mean(returns) / np.std(returns) * np.sqrt(252)
-            else:
-                self.sharpe_ratio = 0.0
-        else:
+    def _update_return_metrics(self, history_array: np.ndarray) -> None:
+        """Calcule les métriques de rendement (Sharpe ratio, etc.) de manière robuste."""
+        try:
+            if len(history_array) < 2:
+                return
+
+            # Nettoyage des données
+            clean_history = np.nan_to_num(history_array, nan=0.0, posinf=0.0, neginf=0.0)
+
+            # Calcul des retours journaliers en pourcentage
+            prev_values = clean_history[:-1]
+            next_values = clean_history[1:]
+
+            with np.errstate(divide='ignore', invalid='ignore'):
+                # Calcul des rendements avec protection contre division par zéro
+                valid_mask = prev_values > 1e-10  # Évite les divisions par des valeurs très petites
+                returns = np.zeros_like(prev_values)
+                returns[valid_mask] = (next_values[valid_mask] - prev_values[valid_mask]) / prev_values[valid_mask]
+
+                # Suppression des valeurs aberrantes
+                returns = returns[np.isfinite(returns)]
+
+                # Calcul du ratio de Sharpe avec des conditions de protection
+                if len(returns) >= 2:  # Au moins 2 points pour avoir une variance non nulle
+                    returns_std = np.std(returns)
+                    if returns_std > 1e-10:  # Évite la division par zéro
+                        sharpe = np.mean(returns) / returns_std * np.sqrt(252)  # Annualisation
+                        self.sharpe_ratio = float(np.clip(sharpe, -10.0, 10.0))  # Bornes raisonnables
+                    else:
+                        self.sharpe_ratio = 0.0
+                else:
+                    self.sharpe_ratio = 0.0
+
+        except Exception as e:
+            logger.error("Erreur dans _update_return_metrics: %s", str(e))
             self.sharpe_ratio = 0.0
 
         self.calculate_risk_metrics()
 
-    def calculate_risk_metrics(self, confidence_level: float = 0.95):
-        """Calculates Value at Risk (VaR) and Conditional Value at Risk (CVaR)."""
-        if len(self.trade_history) < 2:
-            self.var = 0.0
-            self.cvar = 0.0
+    def calculate_risk_metrics(self, confidence_level: float = 0.95) -> None:
+        """
+        Calcule la Value at Risk (VaR) et la Conditional Value at Risk (CVaR).
+
+        Args:
+            confidence_level: Niveau de confiance pour le calcul du VaR (par défaut: 0.95)
+        """
+        # Initialisation des valeurs par défaut
+        self.var = 0.0
+        self.cvar = 0.0
+
+        # Vérification des conditions minimales
+        if not hasattr(self, 'trade_history') or len(self.trade_history) < 2:
             return
 
-        returns = (
-            np.array(self.trade_history)[1:] - np.array(self.trade_history)[:-1]
-        ) / np.array(self.trade_history)[:-1]
-        sorted_returns = np.sort(returns)
+        try:
+            # Conversion sécurisée en tableau numpy
+            history_array = np.asarray(self.trade_history, dtype=np.float64)
 
-        # Calculate VaR
-        var_index = int(len(sorted_returns) * (1 - confidence_level))
-        self.var = -sorted_returns[var_index]
+            # Vérification du tableau
+            if history_array.size < 2:
+                return
 
-        # Calculate CVaR
-        cvar_returns = sorted_returns[sorted_returns < -self.var]
-        if len(cvar_returns) > 0:
-            self.cvar = -np.mean(cvar_returns)
-        else:
+            # Calcul des retours avec protection
+            prev_values = history_array[:-1]
+            next_values = history_array[1:]
+
+            # Calcul des rendements avec gestion des erreurs numériques
+            with np.errstate(divide='ignore', invalid='ignore'):
+                # Masque pour éviter les divisions par zéro
+                valid_mask = (prev_values > 1e-10) & np.isfinite(prev_values)
+                returns = np.zeros_like(prev_values)
+                returns[valid_mask] = (next_values[valid_mask] - prev_values[valid_mask]) / prev_values[valid_mask]
+
+            # Nettoyage des valeurs non finies
+            returns = returns[np.isfinite(returns)]
+
+            if len(returns) <= 1:  # Pas assez de données pour calculer le risque
+                return
+
+            # Tri des rendements
+            sorted_returns = np.sort(returns)
+
+            # Calcul de l'index pour le VaR avec protection des bornes
+            var_index = int(np.floor(len(sorted_returns) * (1 - confidence_level)))
+            var_index = max(0, min(var_index, len(sorted_returns) - 1))
+
+            # Calcul du VaR (valeur absolue du quantile des pertes)
+            if 0 <= var_index < len(sorted_returns):
+                self.var = float(np.abs(sorted_returns[var_index]))
+
+                # Calcul du CVaR (moyenne des pertes pires que le VaR)
+                if var_index > 0:
+                    cvar_returns = sorted_returns[:var_index]
+                    if len(cvar_returns) > 0:
+                        self.cvar = float(np.abs(np.mean(cvar_returns)))
+                    else:
+                        self.cvar = self.var  # Si pas de pertes pires, on prend le VaR
+                else:
+                    self.cvar = self.var  # Si pas de pertes pires, on prend le VaR
+
+            # Protection contre les valeurs aberrantes
+            self.var = min(self.var, 1.0)  # Ne peut pas dépasser 100%
+            self.cvar = min(self.cvar, 1.0)  # Ne peut pas dépasser 100%
+
+            # Log de débogage
+            logger.debug(
+                "Métriques de risque calculées - VaR: %.4f, CVaR: %.4f (n=%d)",
+                self.var, self.cvar, len(returns)
+            )
+
+        except Exception as e:
+            logger.error(
+                "Erreur dans calculate_risk_metrics: %s",
+                str(e),
+                exc_info=True
+            )
+            # En cas d'erreur, on conserve les valeurs par défaut (0.0)
             self.cvar = 0.0
 
     def get_metrics(self) -> Dict[str, Any]:
@@ -1717,6 +1922,23 @@ class PortfolioManager:
         # Check if price is valid
         if price <= 0:
             logger.warning("Invalid price: %.8f", price)
+            return False
+
+        # If protection is active in spot mode, block only new long entries (buys)
+        if not self.futures_enabled and self.trading_disabled and size > 0:
+            logger.warning(
+                "[PROTECTION] Trading disabled for new BUY orders due to drawdown breach. Request blocked: %s size=%.8f @ %.8f",
+                asset,
+                size,
+                price,
+            )
+            # Standardized guard log for easy grep during integration runs
+            logger.warning(
+                "[GUARD] Rejecting BUY due to trading_disabled (reason=spot_drawdown) asset=%s size=%.8f price=%.8f",
+                asset,
+                size,
+                price,
+            )
             return False
 
         # Check minimum trade size

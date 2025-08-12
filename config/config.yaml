@@ -438,18 +438,31 @@ capital_tiers:
 agent:
   algorithm: "PPO"
   policy: "MultiInputPolicy"
-  # Configuration pour tests initiaux
-  # Pour le débogage
+
+  # Configuration de stabilité
+  learning_rate: 1e-4  # Taux d'apprentissage réduit pour plus de stabilité
+  n_steps: 2048        # Nombre de pas par mise à jour
+  batch_size: 64       # Taille du batch pour les mises à jour
+  n_epochs: 4          # Nombre d'époques par itération (réduit)
+  gamma: 0.99          # Facteur de remise
+  gae_lambda: 0.95     # Paramètre GAE
+  clip_range: 0.1      # Plage de clipping réduite
+  clip_range_vf: 0.1   # Plage de clipping pour la fonction de valeur
+  ent_coef: 0.01       # Coefficient d'entropie pour l'exploration
+  vf_coef: 0.5         # Poids de la fonction de valeur
+  max_grad_norm: 0.5   # Écrêtage des gradients
+  target_kl: 0.03      # Seuil KL pour l'arrêt précoce
+
+  # Configuration du débogage et du suivi
   seed: 42
   verbose: 1
   deterministic_inference: true
   custom_log_freq_rollouts: 10
   eval_freq: 2500
   checkpoint_freq: 5000
-  n_envs: 4  # 4 environnements parallèles comme demandé
-  batch_size: 64  # Taille de batch réduite
-  buffer_size: 100000
-  window_size: 100
+  n_envs: 4            # 4 environnements parallèles
+  buffer_size: 100000   # Taille du buffer de rejeu
+  window_size: 100      # Taille de la fenêtre d'observation
   features_extractor_kwargs:
     cnn_configs:
       "5m":
@@ -544,17 +557,49 @@ training:
 # Configuration des Récompenses
 # ------------------------------------------------------------------------------
 reward_shaping:
+  # Facteurs de façonnage de base
+  risk_factor: 1.0
+  volatility_factor: 1.0
+  drawdown_penalty: 0.1
+  sharpe_factor: 0.5
+
+  # Récompenses et pénalités
   position_reward: 1.0
   commission_reward: -0.1
   slippage_reward: -0.1
-  drawdown_penalty: -1.0
   profit_factor_bonus: 0.5
+
+  # Paramètres de gestion du risque
   risk_reward_ratio: 2.0
   max_position_size: 0.1
   max_order_size: 0.01
   min_order_value_usdt: 10
   commission_pct: 0.001
   slippage_pct: 0.001
+
+  # Récompenses et pénalités pour les paliers
+  tier_rewards:
+    promotion_bonus: 50.0       # Récompense pour la montée de palier
+    demotion_penalty: -20.0     # Pénalité pour la descente de palier
+    checkpoint_on_promotion: true  # Créer un checkpoint à chaque promotion
+    checkpoint_dir: "/home/morningstar/Documents/trading/bot/models/rl_agents/checkpoints"
+
+    # Paramètres de progression entre paliers
+    min_episodes_for_promotion: 5  # Nombre minimum d'épisodes avant de pouvoir monter de palier
+    min_profit_for_promotion: 0.1  # Profit minimum requis (en pourcentage) pour la promotion
+
+    # Récompenses basées sur la performance par palier
+    tier_performance_multipliers:
+      - tier: "Micro Capital"
+        multiplier: 1.0
+      - tier: "Small Capital"
+        multiplier: 1.2
+      - tier: "Medium Capital"
+        multiplier: 1.5
+      - tier: "High Capital"
+        multiplier: 2.0
+      - tier: "Enterprise"
+        multiplier: 2.5
 
   # Configuration du Logging
   # ------------------------------------------------------------------------------
