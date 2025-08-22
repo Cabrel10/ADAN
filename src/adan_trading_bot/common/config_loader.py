@@ -176,14 +176,20 @@ class ConfigLoader:
         return current
 
     @classmethod
-    def _resolve_part(cls, part: str, config: Dict[str, Any], full_path: str, root_config: Optional[Dict[str, Any]] = None) -> Any:
-        """
-        Resolve a single part of a path against the config.
+    def _resolve_part(
+        cls,
+        part: str,
+        config: Dict[str, Any],
+        full_path: str,
+        root_config: Optional[Dict[str, Any]] = None
+    ) -> Any:
+        """Resolve a single part of a path against the config.
         
         Args:
             part: The part to resolve (e.g., 'paths' or 'base_dir')
             config: The current config level
             full_path: The full path being resolved (for error messages)
+            root_config: The root config for cross-references
             
         Returns:
             The resolved value
@@ -193,64 +199,264 @@ class ConfigLoader:
         """
         debug = True
         if debug:
-            print(f"[DEBUG] Resolving part: '{part}' in path: '{full_path}'")
-            print(f"[DEBUG] Available keys at this level: {list(config.keys())}")
+            print(f"[DEBUG] Resolving part: '{part}' in context: {full_path}")
         
-        # 1. Try to resolve as a direct environment variable
+        # 1. Try resolving as environment variable with default
+        resolved = cls._resolve_env_or_default(part, root_config or config)
+        if resolved is not None:
+            if debug:
+                print(f"[DEBUG] Resolved with default: '{part}' -> '{resolved}'")
+            return resolved
+        
+        # 2. Check if part is a direct environment variable
         if part in os.environ:
             value = os.environ[part]
             if debug:
-                print(f"[DEBUG] Found environment variable '{part}': {value}")
+                print(f"[DEBUG] Found env var '{part}': {value}")
             return value
         
-        # 2. Try direct lookup in current config
+        # 3. Try direct lookup in current config
         if part in config:
             value = config[part]
             if debug:
                 print(f"[DEBUG] Found direct key '{part}' in config")
             return str(value) if not isinstance(value, (dict, list)) else value
         
-        # 3. If part contains dots, try to resolve as a nested path
+        # 4. Handle nested paths (with dots)
         if '.' in part:
-            # Always use root_config for nested path resolution
-            root = root_config if root_config is not None else config
-            nested_value = cls._get_nested_value(root, part)
+            return cls._resolve_nested_path(part, config, full_path, root_config)
+            
+        # If we get here, we couldn't resolve the part
+        if debug:
+            print(f"[ERROR] Failed to resolve part: '{part}' in path: '{full_path}'")
+            print(f"[ERROR] Available keys: {list(config.keys())}")
+        raise ValueError(f"Undefined variable path in config: {part} (at {full_path})")
+        
+    @classmethod
+    def _resolve_nested_path(
+        cls,
+        path: str,
+        config: Dict[str, Any],
+        full_path: str,
+        root_config: Optional[Dict[str, Any]]
+    ) -> Any:
+        """Resolve a nested path (with dots) by resolving each part."""
+        debug = True
+        root = root_config if root_config is not None else config
+        
+        # First try direct nested lookup
+        try:
+            nested_value = cls._get_nested_value(root, path)
             if nested_value is not None:
                 if debug:
-                    print(f"[DEBUG] Resolved nested path '{part}' from root: {nested_value}")
-                return str(nested_value) if not isinstance(nested_value, (dict, list)) else nested_value
-            # If direct resolution failed, try to resolve each part from root
-            parts = part.split('.')
-            resolved_parts = []
-            for p in parts:
-                resolved = cls._resolve_part(p, root, f"{full_path}.{p}", root)
-                resolved_parts.append(str(resolved))
-            result = '.'.join(resolved_parts)
-            if debug:
-                print(f"[DEBUG] Resolved path part by part from root: '{part}' -> '{result}'")
-            return result
+                    msg = f"[DEBUG] Resolved nested path '{path}': {nested_value}"
+                    print(msg)
+                if isinstance(nested_value, (dict, list)):
+                    return nested_value
+                return str(nested_value)
+        except (KeyError, AttributeError):
+            pass
         
-        # 4. Try to find the part in any level of the config
-        found_value = cls._find_in_dict(config, part)
-        if found_value is not None:
-            if debug:
-                print(f"[DEBUG] Found part '{part}' in nested config: {found_value}")
-            return str(found_value) if not isinstance(found_value, (dict, list)) else found_value
+        # If direct lookup failed, resolve each part
+        parts = path.split('.')
+        resolved_parts = []
         
-        # 5. If we have a full path with dots, try to resolve it from the root
-        if '.' in full_path:
+        for i, part in enumerate(parts):
+            current_path = '.'.join(parts[:i+1])
             try:
-                parts = full_path.split('.')
-                current = config
+                # Try to resolve each part
+                resolved = cls._resolve_part(
+                    part,
+                    root,
+                    f"{full_path}.{current_path}",
+                    root
+                )
+                if debug:
+                    print(f"[DEBUG] Resolved part '{part}': {resolved}")
+                
+                # If resolution failed, try to get default value
+                if resolved == part and part not in os.environ:
+                    resolved = cls._resolve_env_or_default(part, root) or part
+                    
+                resolved_parts.append(str(resolved))
+            except Exception as e:
+                print(f"[ERROR] Error resolving part '{part}': {e}")
+                raise
+        
+        result = '.'.join(resolved_parts)
+        if debug:
+            print(f"[DEBUG] Resolved path: '{path}' -> '{result}'")
+        return result
+        
+    @classmethod
+    def _resolve_env_or_default(cls, part, root_config):
+        """Resolve environment variable with default value in format VAR:-default.
+        
+        Args:
+            part: The part to resolve (e.g., 'VAR:-default' or 'VAR:-${OTHER_VAR:-default}')
+            root_config: The root config for cross-references
+            
+        Returns:
+            The resolved value or None if no match found
+        """
+        import os
+        import re
+        
+        # Debug flag
+        debug = True
+        
+        if debug:
+            print(f"[DEBUG] _resolve_env_or_default - part: {part}")
+        
+        # Check if part matches VAR:-default pattern
+        m = re.match(r'^([A-Za-z0-9_]+):-((?:.|\s)*)$', part)
+        if m:
+            var = m.group(1)
+            default = m.group(2).strip("'\"")  # Remove quotes if present
+            
+            if debug:
+                print(f"[DEBUG] Matched VAR:-default pattern - var: {var}, default: {default}")
+            
+            # First try to get from environment variables
+            env_val = os.environ.get(var)
+            if env_val is not None:
+                if debug:
+                    print(f"[DEBUG] Found in environment: {var}={env_val}")
+                return env_val
+            
+            # If not in environment, try to resolve as config path
+            try:
+                config_val = cls._get_nested_value(root_config, var)
+                if config_val is not None:
+                    if debug:
+                        print(f"[DEBUG] Found in config: {var}={config_val}")
+                    return config_val
+            except (KeyError, AttributeError):
+                pass  # Continue to use default value
+            
+            # Process default value (which might contain nested variables)
+            if default:
+                if debug:
+                    print(f"[DEBUG] Processing default value: {default}")
+                
+                # If default contains another variable, try to resolve it
+                if '${' in default or ':-' in default:
+                    try:
+                        # Create a temporary config with the default value
+                        temp_config = {'temp': default}
+                        resolved = cls.resolve_env_vars(
+                            temp_config, 
+                            root_config=root_config
+                        )
+                        result = resolved['temp']
+                        if debug:
+                            print(f"[DEBUG] Resolved default value: {default} -> {result}")
+                        return result
+                    except Exception as e:
+                        msg = f"Could not resolve default value '{default}': {e}"
+                        print(f"[WARNING] {msg}")
+                        return default
+                return default
+            return ""  # Return empty string if no default value
+                
+        # Check for nested variables in the part (e.g., ${VAR:-default} or ${VAR})
+        if '${' in part and '}' in part:
+            if debug:
+                print(f"[DEBUG] Found nested variable in part: {part}")
+            try:
+                # Handle the case where part is already a variable reference
+                if part.startswith('${') and part.endswith('}'):
+                    # Extract the inner part (without ${ and })
+                    inner = part[2:-1]
+                    # Try to resolve it as a simple variable first
+                    if inner in os.environ:
+                        return os.environ[inner]
+                    # Then try to resolve with defaults
+                    return cls._resolve_env_or_default(inner, root_config) or part
+                else:
+                    # For more complex strings with embedded variables
+                    temp_config = {'temp': part}
+                    resolved = cls.resolve_env_vars(
+                        temp_config,
+                        root_config=root_config
+                    )
+                    result = str(resolved['temp'])
+                    if debug:
+                        print(f"[DEBUG] Resolved nested variable: {part} -> {result}")
+                    return result
+            except Exception as e:
+                msg = f"Could not resolve nested variable '{part}': {e}"
+                print(f"[WARNING] {msg}")
+                return part  # Return original part if resolution fails
+        
+        # If no match, return None to let normal processing continue
+        if debug:
+            print(f"[DEBUG] No match found for part: {part}")
+        return None
+
+    @classmethod
+    def _resolve_part(cls, part: str, config: Dict[str, Any], full_path: str, root_config: Optional[Dict[str, Any]] = None):
+        """
+        Resolve a single part of a path against the config.
+        
+        Args:
+            part: The part to resolve (e.g., 'paths' or 'base_dir')
+            config: The current config level
+            full_path: The full path being resolved (for error messages)
+            root_config: The root config for cross-references
+            
+        Returns:
+            The resolved value
+            
+        Raises:
+            ValueError: If the part cannot be resolved
+        """
+        debug = True  # Set to True to enable debug output
+        
+        if debug:
+            print(f"[DEBUG] Resolving part: '{part}' at path: '{full_path}'")
+            print(f"[DEBUG] Available keys: {list(config.keys())}")
+        
+        # Try to resolve as environment variable with default value first
+        env_or_default = cls._resolve_env_or_default(part, root_config or config)
+        if env_or_default is not None:
+            if debug:
+                print(f"[DEBUG] Resolved environment variable with default '{part}': {env_or_default}")
+            return env_or_default
+        
+        # First try direct lookup
+        if part in config:
+            if debug:
+                print(f"[DEBUG] Found direct match for '{part}': {config[part]}")
+            return config[part]
+            
+        # Try to resolve as environment variable
+        env_val = os.environ.get(part)
+        if env_val is not None:
+            if debug:
+                print(f"[DEBUG] Found environment variable '{part}': {env_val}")
+            return env_val
+            
+        # Try to resolve as a nested path (e.g., 'paths.base_dir')
+        if '.' in part:
+            parts = part.split('.')
+            current = config
+            try:
                 for p in parts:
                     if isinstance(current, dict) and p in current:
                         current = current[p]
                     else:
-                        break
-                else:
-                    if debug:
-                        print(f"[DEBUG] Resolved full path from context: '{full_path}': {current}")
-                    return str(current) if not isinstance(current, (dict, list)) else current
+                        # If we can't find the path, try to resolve each part
+                        resolved_part = cls._resolve_part(p, root_config or config, f"{full_path}.{p}", root_config)
+                        if resolved_part != p:  # Only update if we actually resolved something
+                            current = resolved_part
+                        else:
+                            raise KeyError(p)
+                            
+                # If we get here, we successfully resolved the full path
+                if debug:
+                    print(f"[DEBUG] Resolved full path from context: '{full_path}': {current}")
+                return str(current) if not isinstance(current, (dict, list)) else current
             except (KeyError, TypeError) as e:
                 if debug:
                     print(f"[DEBUG] Error resolving from context: {e}")
@@ -261,7 +467,7 @@ class ConfigLoader:
             print(f"[ERROR] Failed to resolve part: '{part}' in path: '{full_path}'")
             print(f"[ERROR] Available keys at this level: {list(config.keys())}")
         raise ValueError(f"Undefined variable path in config: {part} (at {full_path})")
-    
+        
     @classmethod
     def _find_in_dict(cls, d: Dict[str, Any], target_key: str):
         """
@@ -274,20 +480,15 @@ class ConfigLoader:
         Returns:
             The value if found, None otherwise
         """
-        if not isinstance(d, dict):
-            return None
-            
-        # Check current level
         if target_key in d:
             return d[target_key]
             
-        # Recursively check nested dictionaries
-        for key, value in d.items():
-            if isinstance(value, dict):
-                found = cls._find_in_dict(value, target_key)
-                if found is not None:
-                    return found
-        
+        for k, v in d.items():
+            if isinstance(v, dict):
+                result = cls._find_in_dict(v, target_key)
+                if result is not None:
+                    return result
+                    
         return None
 
     @classmethod

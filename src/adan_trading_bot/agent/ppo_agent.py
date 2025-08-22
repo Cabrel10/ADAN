@@ -84,7 +84,7 @@ from ..common.utils import (
     safe_serialize,
     sanitize_ppo_params,
 )
-from ..models.feature_extractor import CustomCNNFeatureExtractor
+from .feature_extractors import CustomCNNFeatureExtractor
 
 logger = get_logger(__name__)
 
@@ -345,54 +345,62 @@ def create_ppo_agent(
     """
     # Default policy kwargs with stability enhancements
     if policy_kwargs is None:
-        policy_kwargs = {
-            "net_arch": {
-                "pi": [256, 256],  # Smaller network for policy
-                "vf": [256, 256],  # Separate value function network
-            },
-            "activation_fn": torch.nn.LeakyReLU,  # More stable than ReLU
-            "ortho_init": True,  # Orthogonal initialization
-            "log_std_init": -0.5,  # Start with lower std for more stable exploration
-            "use_sde": True,  # State-dependent exploration
-            "features_extractor_class": None,  # Use default
-            "features_extractor_kwargs": {},
-            "share_features_extractor": False,  # Separate feature extractors for policy and value
-            "normalize_images": True,  # Normalize images
-            "optimizer_class": torch.optim.Adam,  # Default optimizer
-            "optimizer_kwargs": {"eps": 1e-5},  # Add epsilon for numerical stability
-            "squash_output": False
-        }
-    # Use our custom policy class
-    policy_kwargs["policy_class"] = CustomPPOPolicy
-
+        policy_kwargs = {}
     # Get agent config with conservative defaults for stability
     agent_config = config.get("agent", {})
     ppo_config = agent_config.get("ppo", {})
+    fx_kwargs_cfg = agent_config.get("features_extractor_kwargs", {})
 
-    # Validate and sanitize all PPO parameters
-    def get_ppo_param(name: str, min_val: Optional[float] = None,
-                     max_val: Optional[float] = None,
-                     default: Optional[float] = None) -> float:
-        """Helper function to validate and sanitize PPO parameters.
+    # Features extractor configuration
+    features_dim = int(agent_config.get("features_dim", 256))
+    # Pass through cnn_config from YAML if present
+    cnn_config = fx_kwargs_cfg if isinstance(fx_kwargs_cfg, dict) else {}
+    num_input_channels = int(cnn_config.get("input_channels", 3))
 
-        Args:
-            name: Parameter name for error messages
-            min_val: Minimum allowed value (inclusive)
-            max_val: Maximum allowed value (inclusive)
-            default: Default value if validation fails
+    # Ensure policy_kwargs carries extractor settings and sharing
+    policy_kwargs.setdefault("net_arch", {
+        "pi": ppo_config.get("policy_net_arch", [256, 256]),
+        "vf": ppo_config.get("value_net_arch", [256, 256]),
+    })
+    policy_kwargs.setdefault("activation_fn", torch.nn.LeakyReLU)
+    policy_kwargs.setdefault("ortho_init", True)
+    policy_kwargs.setdefault("log_std_init", -0.5)
+    policy_kwargs.setdefault("use_sde", True)
+    policy_kwargs["features_extractor_class"] = CustomCNNFeatureExtractor
+    policy_kwargs["features_extractor_kwargs"] = {
+        "features_dim": features_dim,
+        "num_input_channels": num_input_channels,
+        "cnn_config": cnn_config,
+    }
+    # Unifier: un seul extracteur partagé pour acteur & critique
+    policy_kwargs["share_features_extractor"] = True
+    policy_kwargs.setdefault("optimizer_class", torch.optim.Adam)
+    policy_kwargs.setdefault("optimizer_kwargs", {"eps": 1e-5})
+    policy_kwargs.setdefault("squash_output", False)
 
-        Returns:
-            float: Validated parameter value
-        """
-        return _validate_param(
-            ppo_config.get(name),
-            name=name,
-            min_val=min_val,
-            max_val=max_val,
-            default=default
-        )
+    # Get policy type from config (default to MultiInputPolicy for Dict obs)
+    policy_type = agent_config.get('policy_type', None)
+    if policy_type is None:
+        try:
+            from gym import spaces as _spaces
+            if hasattr(env, 'observation_space') and isinstance(env.observation_space, _spaces.Dict):
+                policy_type = 'MultiInputPolicy'
+            else:
+                policy_type = 'MlpPolicy'
+        except Exception:
+            policy_type = 'MultiInputPolicy'
+
+    # Use our custom policy class
+    policy_kwargs["policy_class"] = CustomPPOPolicy
+
     # Learning rate warmup and scheduling with validation
-    base_learning_rate = get_ppo_param("learning_rate", 1e-7, 1e-2, 1e-4)
+    base_learning_rate = _validate_param(
+        ppo_config.get("learning_rate"),
+        name="learning_rate",
+        min_val=1e-7,
+        max_val=1e-2,
+        default=1e-4
+    )
     if isinstance(base_learning_rate, (int, float)):
         # Linear schedule from 1e-5 to learning_rate over first 10% of training
         def learning_rate_schedule(progress_remaining):
@@ -402,7 +410,13 @@ def create_ppo_agent(
             return warmup_start + (warmup_end - warmup_start) * progress
         learning_rate = learning_rate_schedule
     # Clip range annealing with validation
-    clip_range_val = get_ppo_param("clip_range", 0.01, 0.3, 0.1)
+    clip_range_val = _validate_param(
+        ppo_config.get("clip_range"),
+        name="clip_range",
+        min_val=0.01,
+        max_val=0.3,
+        default=0.1
+    )
     if isinstance(clip_range_val, (int, float)):
         # Anneal clip range from initial value to half over training
         initial_clip = min(0.2, clip_range_val * 2)
@@ -411,33 +425,78 @@ def create_ppo_agent(
         clip_range = clip_range_schedule
     else:
         clip_range = clip_range_val
-    # Get policy type from config
-    policy_type = agent_config.get('policy_type', 'MultiInputPolicy')
+
     # Create PPO parameters with validation
     ppo_params = {
-        "policy": policy_kwargs.get("policy", "MlpPolicy"),
+        "policy": policy_type,
         "env": env,
         "learning_rate": learning_rate,
-        "n_steps": get_ppo_param("n_steps", 1, 2048, 2048),
-        "batch_size": get_ppo_param("batch_size", 1, None, 64),
-        "n_epochs": get_ppo_param("n_epochs", 1, 50, 10),
-        "gamma": get_ppo_param("gamma", 0.8, 0.9999, 0.99),
-        "gae_lambda": get_ppo_param("gae_lambda", 0.9, 1.0, 0.95),
-        "ent_coef": get_ppo_param("ent_coef", 0.0, 0.5, 0.0),
-        "vf_coef": get_ppo_param("vf_coef", 0.1, 1.0, 0.5),
-        "max_grad_norm": get_ppo_param("max_grad_norm", 0.1, 5.0, 0.5),
-        "sde_sample_freq": get_ppo_param("sde_sample_freq", -1, 128, -1),
+        "n_steps": _validate_param(
+            ppo_config.get("n_steps"),
+            name="n_steps",
+            min_val=1,
+            max_val=None,
+            default=2048
+        ),
+        "batch_size": _validate_param(
+            ppo_config.get("batch_size"),
+            name="batch_size",
+            min_val=1,
+            max_val=None,
+            default=64
+        ),
+        "n_epochs": _validate_param(
+            ppo_config.get("n_epochs"),
+            name="n_epochs",
+            min_val=1,
+            max_val=50,
+            default=10
+        ),
+        "gamma": _validate_param(
+            ppo_config.get("gamma"),
+            name="gamma",
+            min_val=0.8,
+            max_val=0.9999,
+            default=0.99
+        ),
+        "gae_lambda": _validate_param(
+            ppo_config.get("gae_lambda"),
+            name="gae_lambda",
+            min_val=0.9,
+            max_val=1.0,
+            default=0.95
+        ),
+        "ent_coef": _validate_param(
+            ppo_config.get("ent_coef"),
+            name="ent_coef",
+            min_val=0.0,
+            max_val=0.5,
+            default=0.0
+        ),
+        "vf_coef": _validate_param(
+            ppo_config.get("vf_coef"),
+            name="vf_coef",
+            min_val=0.1,
+            max_val=1.0,
+            default=0.5
+        ),
+        "max_grad_norm": _validate_param(
+            ppo_config.get("max_grad_norm"),
+            name="max_grad_norm",
+            min_val=0.1,
+            max_val=5.0,
+            default=0.5
+        ),
+        "sde_sample_freq": _validate_param(
+            ppo_config.get("sde_sample_freq"),
+            name="sde_sample_freq",
+            min_val=-1,
+            max_val=128,
+            default=-1
+        ),
         "target_kl": ppo_config.get("target_kl"),
         "tensorboard_log": os.path.join(get_path('reports'), 'tensorboard_logs'),
-        "policy_kwargs": {
-            "net_arch": {
-                "pi": ppo_config.get("policy_net_arch", [64, 64]),
-                "vf": ppo_config.get("value_net_arch", [64, 64])
-            },
-            "activation_fn": th.nn.ReLU,
-            "ortho_init": ppo_config.get("ortho_init", True),
-            "share_features_extractor": ppo_config.get("share_features_extractor", True)
-        },
+        "policy_kwargs": policy_kwargs,
         "verbose": 1,
         "device": device,
         # Additional stability parameters
@@ -467,6 +526,7 @@ def create_ppo_agent(
         learning_rate, ppo_params['batch_size'], ppo_params['n_epochs']
     )
     return agent
+
 def save_agent(agent, save_path):
     """
     Save a trained agent.
@@ -482,6 +542,7 @@ def save_agent(agent, save_path):
     agent.save(save_path)
     logger.info("Agent saved to %s", save_path)
     return save_path
+
 def load_agent(load_path, env=None):
     """
     Load a trained agent.
@@ -498,6 +559,7 @@ def load_agent(load_path, env=None):
     except Exception as e:
         logger.error("Error loading agent from %s: %s", load_path, e)
         raise
+
 class TradingCallback(BaseCallback):
     """
     Callback for saving the agent during training.
@@ -514,6 +576,7 @@ class TradingCallback(BaseCallback):
         self.check_freq = check_freq
         self.save_path = save_path
         self.best_mean_reward = -np.inf
+
     def _init_callback(self):
         """
         Initialize the callback.
@@ -521,6 +584,7 @@ class TradingCallback(BaseCallback):
         # Create folder if needed
         if self.save_path is not None:
             ensure_dir_exists(os.path.dirname(self.save_path))
+
     def _on_step(self):
         """
         Called at each step of training.

@@ -35,6 +35,10 @@ class RewardCalculator:
         self.inaction_penalty = self.config.get('inaction_penalty', -0.0001)
         self.clipping_range = self.config.get('reward_clipping_range', [-5.0, 5.0])
         
+        # Commission and profit threshold parameters
+        self.commission_penalty = self.config.get('commission_penalty', 1.5)  # Multiplier for commission penalty
+        self.min_profit_multiplier = self.config.get('min_profit_multiplier', 3.0)  # Minimum profit multiple of commission
+        
         # Chunk-based reward parameters
         self.optimal_trade_bonus = self.config.get('optimal_trade_bonus', 1.0)
         self.performance_threshold = self.config.get('performance_threshold', 0.8)  # 80% of optimal
@@ -49,6 +53,11 @@ class RewardCalculator:
         # Episode tracking for detailed logging
         self.current_episode_rewards = []
         self.current_episode_id = 0
+        
+        # DBE (Dynamic Budgeting Engine) parameters
+        self.winrate = 0.5  # Will be updated based on performance
+        self.drawdown = 0.0  # Will be updated based on portfolio metrics
+        self.risk_level = 0.3  # Initial risk level (0.1 to 1.0)
 
         logger.info("RewardCalculator initialized with chunk-based rewards and detailed logging.")
 
@@ -72,9 +81,21 @@ class RewardCalculator:
         """
         # Base reward components
         reward = 0.0
-
+        
+        # Get commission from portfolio metrics
+        commission = portfolio_metrics.get('total_commission', 0.0)
+        
+        # Apply commission penalty (reduces reward based on commission paid)
+        commission_penalty = self.commission_penalty * abs(commission)
+        
+        # Check if trade meets minimum profit threshold
+        if trade_pnl > 0 and commission > 0 and trade_pnl < (self.min_profit_multiplier * commission):
+            # Penalize trades that don't meet minimum profit threshold
+            reward -= (self.min_profit_multiplier * commission - trade_pnl) * 2
+            logger.debug(f"Trade PnL ({trade_pnl:.4f}) below minimum threshold (3x commission = {3*commission:.4f})")
+        
         # Reward for realized PnL (when trades are closed)
-        reward += trade_pnl * self.pnl_multiplier
+        reward += (trade_pnl - commission_penalty) * self.pnl_multiplier
 
         # Small penalty for inaction to encourage trading when opportunities exist
         if action == 0:  # Hold action
@@ -142,10 +163,26 @@ class RewardCalculator:
                 'threshold': self.performance_threshold
             })
         
+        # Update DBE parameters based on performance
+        self._update_dbe_parameters(portfolio_metrics)
+        
+        # Log DBE metrics
+        logger.info(
+            f"DBE ADAPT | Winrate: {self.winrate:.2%} | "
+            f"Drawdown: {self.drawdown:.2%} | "
+            f"Risk Level: {self.risk_level:.2f}"
+        )
+        
         # Log detailed reward calculation
         self.reward_logger.log_reward_calculation({
             'total_reward': reward,
             'components': reward_components,
+            'dbe_metrics': {
+                'winrate': self.winrate,
+                'drawdown': self.drawdown,
+                'risk_level': self.risk_level,
+                'commission_penalty': commission_penalty
+            },
             'metadata': {
                 'action': action,
                 'trade_pnl': trade_pnl,
@@ -165,6 +202,37 @@ class RewardCalculator:
 
         return float(reward)
     
+    def _update_dbe_parameters(self, portfolio_metrics: Dict[str, Any]) -> None:
+        """
+        Update DBE (Dynamic Budgeting Engine) parameters based on portfolio performance.
+        
+        Args:
+            portfolio_metrics: Current portfolio metrics including winrate, drawdown, etc.
+        """
+        # Update winrate and drawdown from portfolio metrics
+        self.winrate = portfolio_metrics.get('win_rate', self.winrate)
+        self.drawdown = portfolio_metrics.get('drawdown', self.drawdown)
+        
+        # Get cash utilization (0.0 to 1.0)
+        cash_utilization = portfolio_metrics.get('cash_utilization', 0.0)
+        
+        # Calculate dynamic risk adjustment
+        # Risk increases with higher winrate, lower drawdown, and higher cash utilization
+        self.risk_level = max(0.1, min(1.0, 
+            self.winrate * (1.0 - min(0.5, self.drawdown)) * (0.5 + cash_utilization * 0.5)
+        ))
+        
+        # Update max position size based on risk level
+        if 'max_position_size_pct' in portfolio_metrics:
+            portfolio_metrics['max_position_size_pct'] *= self.risk_level
+            
+        logger.debug(
+            f"DBE UPDATE | Winrate: {self.winrate:.2%} | "
+            f"Drawdown: {self.drawdown:.2%} | "
+            f"Cash Util: {cash_utilization:.2%} | "
+            f"New Risk: {self.risk_level:.3f}"
+        )
+
     def finalize_episode(self) -> None:
         """
         Finalise l'épisode actuel et log les métriques d'épisode.

@@ -48,6 +48,55 @@ INVALID_NO_CAPITAL = "INVALID_NO_CAPITAL"
 INVALID_MAX_POSITIONS = "INVALID_MAX_POSITIONS"
 INVALID_NO_POSITION = "INVALID_NO_POSITION"
 
+# Chunk and window configuration
+DEFAULT_CHUNK_SIZES = {
+    '5m': 2048,   # >> window_size=100
+    '1h': 1024,
+    '4h': 512
+}
+DEFAULT_WINDOW_SIZE = 100
+
+# Position sizing tiers (capital in base currency)
+CAPITAL_TIERS = {
+    "Micro": {
+        "min": 11.0, 
+        "max": 30.0, 
+        "max_position_size_pct": 30, 
+        "risk_per_trade_pct": 5.0
+    },
+    "Small": {
+        "min": 30.0, 
+        "max": 100.0, 
+        "max_position_size_pct": 20, 
+        "risk_per_trade_pct": 2.0
+    },
+    "Medium": {
+        "min": 100.0, 
+        "max": 300.0, 
+        "max_position_size_pct": 15, 
+        "risk_per_trade_pct": 1.5
+    },
+    "Large": {
+        "min": 300.0, 
+        "max": float('inf'), 
+        "max_position_size_pct": 10, 
+        "risk_per_trade_pct": 1.0
+    }
+}
+
+# Trading parameters
+DEFAULT_COMMISSION = 0.0002  # 0.02%
+DEFAULT_SLIPPAGE = 0.0005    # 0.05%
+MIN_TRADE_VALUE = 10.0       # Minimum trade value in base currency
+
+# Episode parameters
+MIN_STEPS_PER_EPISODE = 500
+MAX_STEPS_PER_EPISODE = 1000
+
+# Reward parameters
+COMMISSION_PENALTY_WEIGHT = 1.0
+HOLDING_BONUS_PER_STEP = 0.0  # Can be increased to encourage longer holds
+
 # Standard column names
 COL_TIMESTAMP = "timestamp"
 COL_PAIR = "pair"

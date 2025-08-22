@@ -284,6 +284,43 @@ class StateBuilder:
             f"features_per_timeframe={self.nb_features_per_tf}"
         )
 
+    def set_timeframe_config(self, timeframe: str, window_size: int, features: List[str]) -> None:
+        """
+        Configure les paramètres d'un timeframe spécifique.
+        
+        Args:
+            timeframe: Identifiant du timeframe (ex: '5m', '1h', '4h')
+            window_size: Taille de la fenêtre pour ce timeframe
+            features: Liste des noms des features pour ce timeframe
+        """
+        if timeframe not in self.timeframes:
+            logger.warning(f"Tentative de configuration d'un timeframe non pris en charge: {timeframe}")
+            return
+            
+        # Mettre à jour la configuration des features si fournie
+        if features:
+            self.features_config[timeframe] = features
+            self.nb_features_per_tf[timeframe] = len(features)
+            
+        # Mettre à jour la taille de la fenêtre pour ce timeframe
+        if hasattr(self, 'window_sizes'):
+            self.window_sizes[timeframe] = window_size
+        else:
+            self.window_sizes = {tf: self.window_size for tf in self.timeframes}
+            self.window_sizes[timeframe] = window_size
+            
+        # Mettre à jour la taille maximale de fenêtre si nécessaire
+        if window_size > self.window_size:
+            self.window_size = window_size
+            # Mettre à jour la forme d'observation
+            self.observation_shape = (
+                len(self.timeframes),
+                self.window_size,
+                self.max_features,
+            )
+            
+        logger.info(f"Configuration du timeframe {timeframe}: fenêtre={window_size}, features={len(features)}")
+
     def _initialize_memory_metrics(self):
         """
         Initialize memory metrics after configuration.
@@ -1310,6 +1347,209 @@ class StateBuilder:
             return obs[:, :target_length]
         return obs
 
+    def _apply_temporal_transforms(self, df: pd.DataFrame) -> pd.DataFrame:
+        """
+        Apply temporal transformations to the input data based on config.
+        
+        Args:
+            df: Input DataFrame with time series data
+            
+        Returns:
+            DataFrame with additional temporal features
+        """
+        if not hasattr(self, 'config') or not self.config.get('temporal_transforms', {}).get('enabled', True):
+            return df
+            
+        df = df.copy()
+        numeric_cols = df.select_dtypes(include=['float64', 'int64']).columns
+        
+        # 1. Différences premières
+        if 'diffs' in self.config.get('temporal_transforms', {}):
+            for col in self.config['temporal_transforms']['diffs']:
+                if col in df.columns:
+                    df[f'{col}_diff'] = df[col].diff().fillna(0)
+        
+        # 2. Moyennes mobiles
+        if 'rolling_windows' in self.config.get('temporal_transforms', {}):
+            for window in self.config['temporal_transforms']['rolling_windows']:
+                for col in numeric_cols:
+                    df[f'{col}_ma{window}'] = (
+                        df[col]
+                        .rolling(window=window, min_periods=1)
+                        .mean()
+                        .fillna(method='bfill')
+                    )
+        
+        # 3. RSI
+        if self.config.get('temporal_transforms', {}).get('rsi_window'):
+            delta = df['close'].diff()
+            gain = (delta.where(delta > 0, 0)).rolling(
+                window=self.config['temporal_transforms']['rsi_window']
+            ).mean()
+            loss = (-delta.where(delta < 0, 0)).rolling(
+                window=self.config['temporal_transforms']['rsi_window']
+            ).mean()
+            rs = gain / loss
+            df['rsi'] = 100 - (100 / (1 + rs)).fillna(50)  # 50 is neutral RSI
+        
+        # 4. MACD
+        if all(k in self.config.get('temporal_transforms', {}) 
+               for k in ['macd_fast', 'macd_slow', 'macd_signal']):
+            exp1 = df['close'].ewm(
+                span=self.config['temporal_transforms']['macd_fast'],
+                adjust=False
+            ).mean()
+            exp2 = df['close'].ewm(
+                span=self.config['temporal_transforms']['macd_slow'],
+                adjust=False
+            ).mean()
+            df['macd'] = exp1 - exp2
+            df['macd_signal'] = df['macd'].ewm(
+                span=self.config['temporal_transforms']['macd_signal'],
+                adjust=False
+            ).mean()
+        
+        # 5. Bandes de Bollinger
+        if all(k in self.config.get('temporal_transforms', {}) 
+               for k in ['bollinger_window', 'bollinger_std']):
+            window = self.config['temporal_transforms']['bollinger_window']
+            std = self.config['temporal_transforms']['bollinger_std']
+            
+            df['bollinger_mid'] = df['close'].rolling(window=window).mean()
+            df['bollinger_std'] = df['close'].rolling(window=window).std()
+            df['bollinger_upper'] = df['bollinger_mid'] + (df['bollinger_std'] * std)
+            df['bollinger_lower'] = df['bollinger_mid'] - (df['bollinger_std'] * std)
+        
+        # 6. Volume moyen mobile
+        if 'rolling_windows' in self.config.get('temporal_transforms', {}):
+            for window in self.config['temporal_transforms']['rolling_windows']:
+                if 'volume' in df.columns:
+                    df[f'volume_ma{window}'] = (
+                        df['volume']
+                        .rolling(window=window, min_periods=1)
+                        .mean()
+                        .fillna(method='bfill')
+                    )
+        
+        # Suppression des NaN générés par les indicateurs
+        df = df.bfill().ffill().fillna(0)
+        
+        return df
+
+    def _apply_data_augmentation(self, df: pd.DataFrame) -> pd.DataFrame:
+        """
+        Apply data augmentation to the input data based on config.
+        
+        Args:
+            df: Input DataFrame with time series data
+            
+        Returns:
+            DataFrame with augmented data
+        """
+        if not hasattr(self, 'config') or not self.config.get('data_augmentation', {}).get('enabled', False):
+            return df
+            
+        df = df.copy()
+        config = self.config.get('data_augmentation', {})
+        numeric_cols = df.select_dtypes(include=['float64', 'int64']).columns
+        
+        # 1. Bruit gaussien
+        if config.get('gaussian_noise', {}).get('enabled', True):
+            noise_std = config.get('gaussian_noise', {}).get('std', 0.01)
+            for col in numeric_cols:
+                if col in config.get('gaussian_noise', {}).get('exclude_columns', []):
+                    continue
+                noise = np.random.normal(0, noise_std * df[col].std(), size=len(df))
+                df[col] = df[col] + noise
+        
+        # 2. Time warping (warping temporel)
+        if config.get('time_warping', {}).get('enabled', False):
+            window = config['time_warping'].get('window', 10)
+            sigma = config['time_warping'].get('sigma', 0.2)
+            
+            for i in range(0, len(df) - window, window):
+                window_slice = slice(i, min(i + window, len(df)))
+                warp_factor = np.random.normal(1.0, sigma)
+                
+                for col in numeric_cols:
+                    if col in config.get('time_warping', {}).get('exclude_columns', []):
+                        continue
+                        
+                    # Appliquer un facteur d'échelle aléatoire à la fenêtre
+                    df.iloc[window_slice][col] *= warp_factor
+        
+        # 3. Permutation de fenêtres
+        if config.get('window_permutation', {}).get('enabled', False):
+            window_size = config['window_permutation'].get('window_size', 5)
+            n_permutations = config['window_permutation'].get('n_permutations', 1)
+            
+            for _ in range(n_permutations):
+                if len(df) > 2 * window_size:
+                    start = np.random.randint(0, len(df) - 2 * window_size)
+                    window1 = slice(start, start + window_size)
+                    window2 = slice(start + window_size, start + 2 * window_size)
+                    
+                    for col in numeric_cols:
+                        if col in config.get('window_permutation', {}).get('exclude_columns', []):
+                            continue
+                            
+                        # Échanger les deux fenêtres
+                        temp = df[col].iloc[window1].copy()
+                        df[col].iloc[window1] = df[col].iloc[window2].values
+                        df[col].iloc[window2] = temp.values
+        
+        # 4. Scaling aléatoire
+        if config.get('random_scaling', {}).get('enabled', False):
+            scale_range = config['random_scaling'].get('scale_range', [0.9, 1.1])
+            for col in numeric_cols:
+                if col in config.get('random_scaling', {}).get('exclude_columns', []):
+                    continue
+                    
+                scale = np.random.uniform(scale_range[0], scale_range[1])
+                df[col] = df[col] * scale
+        
+        # 5. Ajout de tendances
+        if config.get('trend_augmentation', {}).get('enabled', False):
+            max_trend = config['trend_augmentation'].get('max_trend', 0.01)
+            for col in numeric_cols:
+                if col in config.get('trend_augmentation', {}).get('exclude_columns', []):
+                    continue
+                    
+                trend = np.linspace(
+                    0, 
+                    np.random.uniform(-max_trend, max_trend) * len(df),
+                    len(df)
+                )
+                df[col] = df[col] * (1 + trend)
+        
+        # 6. Mélange temporel partiel
+        if config.get('partial_shuffle', {}).get('enabled', False):
+            segment_size = config['partial_shuffle'].get('segment_size', 5)
+            for col in numeric_cols:
+                if col in config.get('partial_shuffle', {}).get('exclude_columns', []):
+                    continue
+                    
+                for i in range(0, len(df) - segment_size, segment_size):
+                    segment = df[col].iloc[i:i+segment_size]
+                    if len(segment) == segment_size and np.random.random() < 0.3:  # 30% de chance de mélanger
+                        df[col].iloc[i:i+segment_size] = segment.sample(frac=1).values
+        
+        # 7. Ajout d'impulsions aléatoires
+        if config.get('random_impulses', {}).get('enabled', False):
+            impulse_prob = config['random_impulses'].get('probability', 0.01)
+            max_impulse = config['random_impulses'].get('max_impulse', 0.1)
+            
+            for col in numeric_cols:
+                if col in config.get('random_impulses', {}).get('exclude_columns', []):
+                    continue
+                    
+                for i in range(len(df)):
+                    if np.random.random() < impulse_prob:
+                        impulse = np.random.uniform(-max_impulse, max_impulse) * df[col].std()
+                        df[col].iloc[i] += impulse
+        
+        return df
+
     def transform_with_cached_scaler(self, timeframe: str, window_data: pd.DataFrame,
                                    requested_features: list) -> np.ndarray:
         """
@@ -1552,25 +1792,42 @@ class StateBuilder:
                 )
                 return tf, np.zeros((self.window_size, max_features), dtype=np.float32)
 
-            # Get the window of data
-            window_data = df.iloc[current_idx - self.window_size : current_idx].copy()
+            # Get the window of data with some lookahead for indicators
+            lookahead = max(
+                self.config.get('data_processing', {}).get('max_lookahead', 50),
+                50  # default lookahead
+            )
+            window_start = max(0, current_idx - self.window_size - lookahead)
+            window_end = current_idx
+            window_data = df.iloc[window_start:window_end].copy()
 
-            # Handle missing values
+            # 1. Apply temporal transformations (diffs, moving averages, etc.)
+            if hasattr(self, 'config') and self.config.get('temporal_transforms', {}).get('enabled', True):
+                window_data = self._apply_temporal_transforms(window_data)
+
+            # 2. Handle missing values after transformations
             if window_data.isnull().values.any():
-                logger.debug("NaN values found in %s data, using forward fill then zero fill", tf)
-                window_data = window_data.ffill().fillna(0)
+                logger.debug("NaN values found in %s data after transforms, using forward fill then zero fill", tf)
+                window_data = window_data.ffill().bfill().fillna(0)
+
+            # 3. Apply data augmentation if enabled
+            if hasattr(self, 'config') and self.config.get('data_augmentation', {}).get('enabled', False):
+                window_data = self._apply_data_augmentation(window_data)
+
+            # 4. Keep only the requested window size
+            window_data = window_data.iloc[-self.window_size:]
 
             # Log before transform
             logger.debug("TF=%s before transform shape=%s, features=%s",
                        tf, window_data.shape, features)
 
-            # Apply normalization if needed
+            # 5. Apply normalization if needed
             if self.normalize:
                 try:
                     obs = self.transform_with_cached_scaler(tf, window_data, features)
                 except Exception as e:
                     logger.error("Error in transform_with_cached_scaler for %s: %s",
-                               tf, str(e))
+                               tf, str(e), exc_info=True)
                     obs = np.zeros((len(window_data), len(features)), dtype=np.float32)
             else:
                 # Ensure all features are present and in correct order

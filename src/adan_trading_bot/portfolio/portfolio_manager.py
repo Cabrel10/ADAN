@@ -9,7 +9,7 @@ capital, positions, and performance metrics.
 
 import logging
 from datetime import datetime
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 import numpy as np
 
@@ -82,8 +82,10 @@ class PortfolioManager:
         trading_rules_config = self.config.get("trading_rules", {})
 
         # Initialize equity and capital
+        default_balance = 20.0
         self.initial_equity = portfolio_config.get(
-            "initial_balance", environment_config.get("initial_balance", 20.0)
+            "initial_balance", 
+            environment_config.get("initial_balance", default_balance)
         )
         self.initial_capital = self.initial_equity  # For backward compatibility
         self.current_equity = self.initial_equity
@@ -94,17 +96,40 @@ class PortfolioManager:
         self.total_capital = 0.0
 
         # Initialize position tracking
-        self.positions: Dict[str, Position] = {asset: Position() for asset in assets}
+        self.positions: Dict[str, Position] = {
+            asset: Position() for asset in assets
+        }
         self.trade_history: List[Dict[str, Any]] = []
         self.trade_log: List[Dict[str, Any]] = []  # Initialize trade log
+        
+        # Surveillance mode state
+        self._surveillance_mode = False  # Indique si le mode surveillance est actif
+        self._surveillance_start_step = None  # Étape à laquelle le mode surveillance a été activé
+        self._chunk_start_step = 0  # Étape de début du chunk actuel
+        self._survived_chunks = 0  # Nombre de chunks passés en mode surveillance
+        self._recovery_threshold = 11.0  # Seuil de récupération (11 USDT)
+        self._last_surveillance_warning = 0  # Dernier avertissement de surveillance émis
+        
+        # Nouveaux états pour la surveillance améliorée
+        self._critical_chunk_count = 0  # Nombre de chunks critiques consécutifs
+        self.surveillance_chunk_start_balance = 0.0  # Solde au début du chunk de surveillance
+        self._emergency_reset_count = 0  # Compteur de réinitialisations d'urgence
+        self._surveillance_entry_count = 0  # Nombre d'entrées en mode surveillance
+        self._surveillance_success_count = 0  # Nombre de récupérations réussies
+        self._surveillance_failure_count = 0  # Nombre d'échecs de récupération
 
         # Initialize chunk-based tracking
         self.chunk_pnl: Dict[int, Dict[str, float]] = {}
         self.current_chunk_id = 0
         self.chunk_start_equity = self.initial_equity
+        
+        # Initialize step tracking
+        self.current_step = 0
 
         # Trading rules configuration
-        self.futures_enabled = trading_rules_config.get("futures_enabled", False)
+        self.futures_enabled = trading_rules_config.get(
+            "futures_enabled", False
+        )
         self.leverage = trading_rules_config.get("leverage", 1)
 
         # Commission and fees
@@ -113,11 +138,17 @@ class PortfolioManager:
                 "futures_commission_pct", 0.0
             )
         else:
-            self.commission_pct = trading_rules_config.get("commission_pct", 0.0)
+            self.commission_pct = trading_rules_config.get(
+                "commission_pct", 0.0
+            )
 
         # Position sizing rules
-        self.min_trade_size = trading_rules_config.get("min_trade_size", 0.0001)
-        self.min_notional_value = trading_rules_config.get("min_notional_value", 10.0)
+        self.min_trade_size = trading_rules_config.get(
+            "min_trade_size", 0.0001
+        )
+        self.min_notional_value = trading_rules_config.get(
+            "min_notional_value", 10.0
+        )
         self.max_notional_value = trading_rules_config.get(
             "max_notional_value", 100000.0
         )
@@ -149,28 +180,36 @@ class PortfolioManager:
             "risk_per_trade_pct",
             "max_drawdown_pct",
             "leverage",
+            "max_concurrent_positions",
         }
 
         # 4. Valider chaque tier
         valid_tiers = []
         for i, tier in enumerate(self.capital_tiers):
             if not isinstance(tier, dict):
-                logger.warning(
-                    "Le tier %d n'est pas un dictionnaire et sera ignoré: %s", i, tier
-                )
+                msg = f"Le tier {i} n'est pas un dictionnaire et sera ignoré: {tier}"
+                logger.warning(msg)
                 continue
 
             # Vérifier les clés requises
             missing_keys = REQUIRED_KEYS - tier.keys()
             if missing_keys:
-                logger.warning(
-                    "Le tier %d manque des clés requises %s et sera ignoré: %s",
-                    i,
-                    missing_keys,
-                    tier,
+                msg = (
+                    f"Le tier {i} manque des clés requises {missing_keys} "
+                    f"et sera ignoré: {tier}"
                 )
+                logger.warning(msg)
                 continue
 
+            # Vérifier que max_concurrent_positions est un entier positif
+            max_pos = tier.get("max_concurrent_positions")
+            if not isinstance(max_pos, int) or max_pos <= 0:
+                msg = (
+                    f"Tier {i}: max_concurrent_positions invalide ({max_pos}). "
+                    "Valeur par défaut: 1"
+                )
+                logger.warning(msg)
+                tier["max_concurrent_positions"] = 1
             valid_tiers.append(tier)
 
         # 5. Trier les tiers par min_capital croissant
@@ -178,15 +217,15 @@ class PortfolioManager:
 
         # 6. Vérifier la continuité des paliers
         for i in range(1, len(valid_tiers)):
-            if valid_tiers[i - 1]["min_capital"] >= valid_tiers[i]["min_capital"]:
-                logger.error(
+            prev_tier = valid_tiers[i - 1]
+            curr_tier = valid_tiers[i]
+            if prev_tier["min_capital"] >= curr_tier["min_capital"]:
+                msg = (
                     "Les paliers de capital doivent être en ordre croissant. "
-                    "Palier %d (%s) a un min_capital >= au palier %d (%s)",
-                    i - 1,
-                    valid_tiers[i - 1]["name"],
-                    i,
-                    valid_tiers[i]["name"],
+                    f"Palier {i-1} ({prev_tier['name']}) a un min_capital "
+                    f">= au palier {i} ({curr_tier['name']})"
                 )
+                logger.error(msg)
                 valid_tiers = []
                 break
 
@@ -194,17 +233,19 @@ class PortfolioManager:
         self.capital_tiers = valid_tiers
 
         if not self.capital_tiers:
-            logger.error(
+            msg = (
                 "Aucun palier de capital valide n'a été trouvé. "
                 "Veuillez vérifier votre configuration."
             )
+            logger.error(msg)
         else:
+            tier_info = ", ".join(
+                f"{t['name']} ({t['min_capital']}+)" for t in self.capital_tiers
+            )
             logger.info(
                 "%d paliers de capital chargés avec succès: %s",
                 len(self.capital_tiers),
-                ", ".join(
-                    [f"{t['name']} ({t['min_capital']}+)" for t in self.capital_tiers]
-                ),
+                tier_info,
             )
 
         # Position sizing configuration
@@ -310,13 +351,17 @@ class PortfolioManager:
         stop_loss_pct: float = 0.02,
         risk_per_trade: float = 0.01,
         account_risk_multiplier: float = 1.0,
+        expected_return_pct: float = 0.0,  # Rendement attendu en pourcentage
+        min_profit_margin: float = 1.5,    # Marge de profit minimale (1.5x la commission)
     ) -> float:
         """
         Calcule la taille de position en fonction du risque, du stop loss et des limites de position.
 
-        La taille de la position est déterminée par la plus petite des deux valeurs suivantes :
-        1. Taille basée sur le risque (risque_max / (prix * stop_loss_pct))
+        La taille de la position est déterminée par les facteurs suivants :
+        1. Limite du nombre de positions simultanées (max_concurrent_positions)
         2. Taille maximale autorisée par le palier (max_position_size_pct)
+        3. Taille basée sur le risque (risque_max / (prix * stop_loss_pct))
+        4. Capital disponible (en tenant compte des commissions et d'un buffer)
 
         Args:
             price: Prix actif
@@ -325,49 +370,125 @@ class PortfolioManager:
             account_risk_multiplier: Multiplicateur de risque (défini par le DBE)
 
         Returns:
-            float: Taille de position en unités de l'actif
+            float: Taille de position en unités de l'actif, ou 0 si les conditions ne sont pas remplies
         """
         if price <= 0 or stop_loss_pct <= 0:
             return 0.0
 
-        tier = self.get_active_tier()
+        try:
+            # Récupérer le palier actif
+            tier = self.get_active_tier()
+            
+            # Compter les positions ouvertes
+            current_open = sum(1 for pos in self.positions.values() if pos.is_open)
+            
+            # Vérifier la limite de positions simultanées
+            if current_open >= tier.get('max_concurrent_positions', 1):
+                logger.info(
+                    "[POSITION SIZE] Limite de positions atteinte (%d/%d)",
+                    current_open, tier['max_concurrent_positions']
+                )
+                return 0.0
 
-        # 1. Calcul du montant à risquer (% du capital défini dans le palier)
-        risk_amount = self.portfolio_value * (tier["risk_per_trade_pct"] / 100.0)
+            # Calculer la taille basée sur le risque
+            risk_amount = self.portfolio_value * (tier["risk_per_trade_pct"] / 100.0)
+            risk_amount *= account_risk_multiplier
+            risk_based_size = risk_amount / (price * stop_loss_pct)
 
-        # 2. Application du multiplicateur de risque du DBE
-        risk_amount *= account_risk_multiplier
+            # Calculer la taille maximale autorisée par le palier
+            max_position_value = self.portfolio_value * (tier["max_position_size_pct"] / 100.0)
+            max_position_size = max_position_value / price
 
-        # 3. Calcul de la taille de position basée sur le risque
-        risk_based_size = risk_amount / (price * stop_loss_pct)
+            # Prendre la plus petite des deux tailles basées sur le risque et la limite du palier
+            target_size = min(risk_based_size, max_position_size)
+            
+            # Calculer le capital disponible en tenant compte d'un buffer de sécurité
+            buffer = max(
+                self.commission_pct * 2,  # Au moins 2x la commission
+                0.02 * self.portfolio_value  # Ou 2% du portefeuille, selon le plus grand
+            )
+            available_cash = max(0.0, self.get_available_capital() - buffer)
+            
+            # Calculer la taille finale en fonction du cash disponible
+            affordable_size = available_cash / price
+            position_size = min(target_size, affordable_size)
 
-        # 4. Calcul de la taille maximale autorisée par le palier
-        max_position_value = self.portfolio_value * (
-            tier["max_position_size_pct"] / 100.0
-        )
-        max_position_size = max_position_value / price
-
-        # 5. Prendre la plus petite des deux tailles (risque ou taille max)
-        position_size = min(risk_based_size, max_position_size)
-
-        # 6. Vérifier la taille minimale de trade
-        min_trade_size = self.min_trade_size
-        if position_size > 0 and position_size < min_trade_size:
-            position_size = min_trade_size
-            logger.warning(
-                f"Taille de position {position_size} inférieure au minimum autorisé "
-                f"({min_trade_size}). Ajustement à {min_trade_size}"
+            # Vérifier la taille minimale de trade
+            if position_size > 0 and position_size < self.min_trade_size:
+                logger.info(
+                    "[POSITION SIZE] Taille de position (%.8f) inférieure au minimum (%.8f)",
+                    position_size, self.min_trade_size
+                )
+                return 0.0
+                
+            # Vérifier si le profit attendu couvre les commissions avec une marge
+            commission = position_size * price * self.commission_pct
+            min_acceptable_profit = commission * min_profit_margin
+            expected_profit = position_size * price * (expected_return_pct / 100.0)
+            
+            if expected_return_pct > 0 and expected_profit < min_acceptable_profit:
+                logger.info(
+                    "[POSITION SIZE] Profit attendu (%.4f) < marge minimale (%.4f) pour commission (%.4f)",
+                    expected_profit, min_acceptable_profit, commission
+                )
+                return 0.0
+                
+            # Journalisation détaillée
+            logger.debug(
+                "[POSITION SIZE] Calcul terminé - Taille: %.8f (Max: %.8f, Risque: %.8f, "
+                "Disponible: %.8f, Comm: %.4f, Profit min: %.4f, Profit attendu: %.4f)",
+                position_size, max_position_size, risk_based_size, affordable_size,
+                commission, min_acceptable_profit, expected_profit if expected_return_pct > 0 else 0.0
             )
 
-        # 7. Journalisation détaillée
-        logger.info(
-            f"[POSITION_SIZE] Risk: {tier['risk_per_trade_pct']}% of {self.portfolio_value:.2f} = {risk_amount:.4f} | "
-            f"SL: {stop_loss_pct*100:.2f}% | RiskBasedSize: {risk_based_size:.8f} | "
-            f"MaxSize: {max_position_size:.8f} | FinalSize: {position_size:.8f} ({position_size * price:.2f} USDT)"
-        )
+            return position_size
+            
+        except Exception as e:
+            logger.error(
+                "Erreur lors du calcul de la taille de position: %s", 
+                str(e), 
+                exc_info=True
+            )
+            return 0.0
 
-        return position_size
-
+    def calculate_commission(self, notional_value: float) -> float:
+        """
+        Calcule la commission pour une valeur notionnelle donnée.
+        
+        Args:
+            notional_value: La valeur notionnelle de la transaction
+            
+        Returns:
+            float: Le montant de la commission
+        """
+        return notional_value * self.commission_pct
+        
+    def is_profitable_after_commissions(
+        self, 
+        notional_value: float, 
+        expected_return_pct: float,
+        min_profit_margin: float = 1.5
+    ) -> bool:
+        """
+        Vérifie si une transaction est rentable après prise en compte des commissions.
+        
+        Args:
+            notional_value: La valeur notionnelle de la transaction
+            expected_return_pct: Le rendement attendu en pourcentage
+            min_profit_margin: La marge de profit minimale par rapport aux commissions
+            
+        Returns:
+            bool: True si la transaction est rentable, False sinon
+        """
+        if expected_return_pct <= 0:
+            return False
+            
+        commission = self.calculate_commission(notional_value)
+        expected_profit = notional_value * (expected_return_pct / 100.0)
+        min_acceptable_profit = commission * min_profit_margin
+        
+        return expected_profit >= min_acceptable_profit
+        
     def _calculate_volatility(self, window: int = 20) -> float:
         """Calcule la volatilité des rendements sur une fenêtre glissante.
 
@@ -519,64 +640,337 @@ class PortfolioManager:
 
         return state
 
-    def reset(self, new_epoch: bool = False) -> None:
+    def _enter_surveillance_mode(self, current_step: int) -> None:
         """
-        Reset the portfolio to its initial state.
+        Active le mode surveillance avec le suivi amélioré.
+        
+        Args:
+            current_step: L'étape actuelle de l'environnement
+        """
+        if not self._surveillance_mode:
+            self._surveillance_mode = True
+            self._surveillance_start_step = current_step
+            self._chunk_start_step = current_step
+            self._survived_chunks = 0
+            self._critical_chunk_count += 1
+            self._surveillance_entry_count += 1
+            self.surveillance_chunk_start_balance = self.get_portfolio_value()
+            
+            logger.warning(
+                "⚠️ ENTERING SURVEILLANCE MODE - Portfolio value: %.2f, Start balance: %.2f, Critical chunks: %d",
+                self.get_portfolio_value(),
+                self.surveillance_chunk_start_balance,
+                self._critical_chunk_count
+            )
+
+    def _check_surveillance_status(self, current_step: int) -> bool:
+        """
+        Vérifie l'état de surveillance et met à jour les compteurs.
+        
+        Args:
+            current_step: L'étape actuelle de l'environnement
+            
+        Returns:
+            bool: True si un reset complet est nécessaire, False sinon
+        """
+        current_value = self.get_portfolio_value()
+        is_critical = current_value <= self._recovery_threshold
+        
+        # Vérifier si on entre ou sort du mode surveillance
+        if is_critical and not self._surveillance_mode:
+            self._enter_surveillance_mode(current_step)
+        elif not is_critical and self._surveillance_mode:
+            self._exit_surveillance_mode(recovered=True)
+            
+        # Vérifier si on a dépassé le nombre maximal de chunks en surveillance
+        if self._surveillance_mode and self._survived_chunks >= 2:
+            logger.warning(
+                "[SURVEILLANCE] Maximum chunks in surveillance reached. "
+                "Forcing reset on next step."
+            )
+            self._exit_surveillance_mode(recovered=False)
+            return True
+            
+        return False
+        
+    def check_emergency_condition(self, current_step: int) -> bool:
+        """
+        Vérifie les conditions d'urgence nécessitant un reset immédiat.
+        
+        Args:
+            current_step: L'étape actuelle de l'environnement
+            
+        Returns:
+            bool: True si un reset d'urgence est nécessaire, False sinon
+        """
+        if not self.config.get("enable_surveillance_mode", True):
+            return False
+            
+        current_value = self.get_portfolio_value()
+        emergency_threshold = self.config.get("emergency_drawdown_threshold", 0.8)  # 80% de drawdown
+        
+        # Vérifier le drawdown d'urgence
+        if current_value <= (self.initial_equity * (1 - emergency_threshold)):
+            self._emergency_reset_count += 1
+            logger.critical(
+                "🚨 EMERGENCY RESET - Drawdown %.2f%% exceeds threshold (%.2f%%). Current: %.2f, Initial: %.2f",
+                (1 - current_value / self.initial_equity) * 100,
+                emergency_threshold * 100,
+                current_value,
+                self.initial_equity
+            )
+            return True
+            
+        return False
+        
+    def get_surveillance_metrics(self) -> Dict[str, Any]:
+        """
+        Récupère les métriques de surveillance actuelles.
+        
+        Returns:
+            Dict[str, Any]: Dictionnaire contenant les métriques de surveillance
+        """
+        return {
+            "in_surveillance": self._surveillance_mode,
+            "critical_chunk_count": self._critical_chunk_count,
+            "surveillance_entry_count": self._surveillance_entry_count,
+            "surveillance_success_count": self._surveillance_success_count,
+            "surveillance_failure_count": self._surveillance_failure_count,
+            "emergency_reset_count": self._emergency_reset_count,
+            "current_balance": self.get_portfolio_value(),
+            "surveillance_start_balance": self.surveillance_chunk_start_balance if self._surveillance_mode else 0.0,
+        }
+
+    def _exit_surveillance_mode(self, recovered: bool = True) -> None:
+        """
+        Désactive le mode surveillance et met à jour les compteurs.
+        
+        Args:
+            recovered: Si True, indique une récupération réussie
+        """
+        if not self._surveillance_mode:
+            return
+            
+        self._surveillance_mode = False
+        self._surveillance_start_step = None
+        
+        if recovered:
+            self._surveillance_success_count += 1
+            logger.info(
+                "✅ SURVEILLANCE RECOVERY - Portfolio recovered to %.2f (from %.2f)",
+                self.get_portfolio_value(),
+                self.surveillance_chunk_start_balance
+            )
+        else:
+            self._surveillance_failure_count += 1
+            logger.warning(
+                "❌ SURVEILLANCE FAILED - Portfolio remained at %.2f (started at %.2f)",
+                self.get_portfolio_value(),
+                self.surveillance_chunk_start_balance
+            )
+            
+        self._survived_chunks = 0
+        self.surveillance_chunk_start_balance = 0.0
+
+    def _soft_reset_epoch_state(self) -> None:
+        """
+        Réinitialise l'état pour un nouvel 'epoch' sans toucher au capital.
+        Ferme les positions (en les sortant au prix courant mais sans modifier capital_total_usdt),
+        remet à zéro timers/counters, etc.
+        """
+        # Sauvegarder le capital actuel
+        current_capital = self.get_portfolio_value()
+        
+        # Fermer toutes les positions sans enregistrer le PnL
+        for asset, position in list(self.positions.items()):
+            if position.is_open:
+                try:
+                    # Fermer la position sans enregistrer le PnL
+                    self.close_position(asset, position.entry_price)
+                    logger.debug("Soft-closing position for %s during epoch reset", asset)
+                except Exception as e:
+                    logger.error("Error soft-closing position %s: %s", asset, str(e))
+        
+        # Réinitialiser les compteurs et états
+        self._reset_metrics()
+        
+        # Rétablir le capital initial (sans toucher au capital total)
+        self.cash = current_capital
+        self.portfolio_value = current_capital
+        self.current_equity = current_capital
+        self.peak_equity = current_capital
+        
+        # Incrémenter le compteur de chunks en surveillance si nécessaire
+        if self._surveillance_mode:
+            self._survived_chunks += 1
+            logger.info(
+                "[SURVEILLANCE] Soft reset - Survived chunks: %d/2, Current value: %.2f",
+                self._survived_chunks, current_capital
+            )
+
+    def reset(self, new_epoch: bool = False, force_reset: bool = False, min_capital_before_reset: float = None) -> bool:
+        """
+        Reset the portfolio based on the current state and reset rules.
+
+        Reset Rules:
+        1. If force_reset is True or new_epoch is True: Full reset to initial equity
+        2. If portfolio value <= min_capital_before_reset: Full reset to initial equity
+        3. If portfolio value > min_capital_before_reset: Soft reset (preserve capital)
+        4. If in surveillance mode: Apply special rules
 
         Args:
-            new_epoch: If True, resets to initial equity. If False, keeps current portfolio value.
+            new_epoch: If True, forces a full reset to initial equity.
+            force_reset: If True, forces a full reset regardless of other conditions.
+            min_capital_before_reset: Threshold below which a full reset is performed.
+                                     If None, uses the value from config or default (11.0).
+
+        Returns:
+            bool: True if a full reset was performed, False otherwise.
         """
         # Get configuration sections
         portfolio_config = self.config.get("portfolio", {})
         environment_config = self.config.get("environment", {})
+        
+        # Get current portfolio value
+        current_value = self.get_portfolio_value()
+        
+        # Get min_capital_before_reset from config if not provided
+        if min_capital_before_reset is None:
+            min_capital_before_reset = environment_config.get("min_capital_before_reset", 11.0)
+        
+        # Log the current state for debugging
+        logger.debug(
+            "[RESET] Current value: %.2f, New epoch: %s, Force reset: %s, Min capital: %.2f, Surveillance: %s",
+            current_value, new_epoch, force_reset, min_capital_before_reset, self._surveillance_mode
+        )
 
-        # Close all open positions
+        # Vérifier si on est en mode surveillance et mettre à jour l'état
+        needs_reset = self._check_surveillance_status(self.current_step)
+        
+        # Fermer toutes les positions ouvertes avant de réinitialiser
         for asset in list(self.positions.keys()):
             if self.positions[asset].is_open:
-                logger.debug("Closing position for %s during reset", asset)
+                logger.debug("Fermeture de la position pour %s avant réinitialisation", asset)
                 self.close_position(asset, self.positions[asset].entry_price)
 
-        if new_epoch:
-            # Full reset to initial equity - use the same logic as in __init__
-            self.initial_equity = portfolio_config.get(
-                "initial_balance", environment_config.get("initial_balance", 20.0)
+        # Règle 1: Réinitialisation forcée (nouvelle époque ou force_reset=True)
+        if force_reset or new_epoch:
+            logger.warning(
+                "[FULL RESET] Réinitialisation forcée demandée - Réinitialisation au capital initial"
             )
-            self.initial_capital = self.initial_equity  # For backward compatibility
-            self.cash = self.initial_equity
-            self.portfolio_value = self.initial_equity
-            self.current_equity = self.initial_equity
-            self.peak_equity = self.initial_equity
-
-            # Reset trade history and metrics
-            self.trade_history = [self.initial_equity]
-            self.trade_log = []
-
-            logger.info(
-                "New epoch - Portfolio reset to initial equity: %.2f",
-                self.initial_equity,
+            return self._perform_full_reset(portfolio_config, environment_config)
+        
+        # Règle 4: Gestion du mode surveillance
+        if self._surveillance_mode:
+            logger.warning(
+                "[SURVEILLANCE] Valeur du portefeuille: %.2f, Chunks survécus: %d/2",
+                current_value, self._survived_chunks
             )
-        else:
-            # Keep current portfolio value but reset positions and metrics
-            current_value = self.get_portfolio_value()
-            self.cash = current_value
-            self.portfolio_value = current_value
-            self.current_equity = current_value
-            self.peak_equity = current_value
-
-            logger.debug(
-                "Chunk reset - Portfolio value maintained at: %.2f", current_value
+            
+            # Si on a survécu assez de chunks et qu'on est au-dessus du seuil, on sort du mode surveillance
+            if self._survived_chunks >= 2 and current_value > min_capital_before_reset:
+                logger.info("[SURVEILLANCE] Sortie du mode surveillance - Récupération réussie")
+                self._exit_surveillance_mode(recovered=True)
+                # On continue avec un soft reset
+                self._perform_soft_reset(current_value)
+                return False
+            else:
+                # On reste en mode surveillance avec un soft reset
+                self._soft_reset_epoch_state()
+                return False
+        
+        # Règle 2: Si la valeur est en dessous du seuil -> FULL RESET
+        if current_value <= min_capital_before_reset:
+            logger.warning(
+                "[FULL RESET] Valeur du portefeuille %.2f <= %.2f - Réinitialisation au capital initial",
+                current_value, min_capital_before_reset
             )
-
-        # Always reset these metrics
+            return self._perform_full_reset(portfolio_config, environment_config)
+        
+        # Règle 3: Si la valeur est au-dessus du seuil -> SOFT RESET
+        logger.info(
+            "[SOFT RESET] Valeur du portefeuille %.2f > %.2f - Réinitialisation douce",
+            current_value, min_capital_before_reset
+        )
+        self._perform_soft_reset(current_value)
+        return False
+    
+    def _perform_full_reset(self, portfolio_config: dict, environment_config: dict) -> bool:
+        """
+        Effectue une réinitialisation complète du portefeuille au capital initial.
+        
+        Args:
+            portfolio_config: Configuration du portefeuille
+            environment_config: Configuration de l'environnement
+            
+        Returns:
+            bool: Toujours True pour indiquer qu'un full reset a été effectué
+        """
+        # Réinitialisation complète au capital initial
+        self.initial_equity = portfolio_config.get(
+            "initial_balance", environment_config.get("initial_balance", 20.0)
+        )
+        self.initial_capital = self.initial_equity
+        self.cash = self.initial_equity
+        self.portfolio_value = self.initial_equity
+        self.current_equity = self.initial_equity
+        self.peak_equity = self.initial_equity
+        self.trade_history = [self.initial_equity]
+        self.trade_log = []
+        
+        # Réinitialisation de l'état de surveillance
+        self._surveillance_mode = False
+        self._surveillance_start_step = None
+        self._survived_chunks = 0
+        self.surveillance_chunk_start_balance = 0.0
+        
+        # Réinitialisation des métriques
+        self._reset_metrics()
+        
+        logger.warning(
+            "[FULL RESET] Portefeuille réinitialisé au capital initial: %.2f",
+            self.initial_equity
+        )
+        
+        return True
+    
+    def _perform_soft_reset(self, current_value: float) -> None:
+        """
+        Effectue une réinitialisation douce du portefeuille en préservant le capital actuel.
+        
+        Args:
+            current_value: Valeur actuelle du portefeuille
+        """
+        # Sauvegarder le capital actuel
+        self.cash = current_value
+        self.portfolio_value = current_value
+        self.current_equity = current_value
+        self.peak_equity = max(self.peak_equity, current_value)
+        
+        # Réinitialiser les métriques sans toucher au capital
+        self._reset_metrics()
+        
+        # Mettre à jour l'historique des trades
+        self.trade_history.append(current_value)
+        
+        logger.debug(
+            "[SOFT RESET] État du portefeuille réinitialisé avec une valeur de %.2f",
+            current_value
+        )
+            
+    def _reset_metrics(self):
+        """Reset all portfolio metrics to their initial state."""
         self.unrealized_pnl = 0.0
         self.realized_pnl = 0.0
         self.trade_count = 0
+        self.win_count = 0
+        self.loss_count = 0
         self.drawdown = 0.0
         self.sharpe_ratio = 0.0
         self.var = 0.0
         self.cvar = 0.0
-        # Re-enable trading after a reset unless overridden by caller
         self.trading_disabled = False
+        self.peak_equity = self.initial_equity
 
     def get_current_tier_index(self) -> int:
         """Retourne l'index du palier actuel dans self.capital_tiers (0-based)."""
@@ -1772,24 +2166,78 @@ class PortfolioManager:
         # Consider bankrupt if capital is less than 1% of initial capital
         return self.total_capital < (self.initial_capital * 0.01)
 
-    def start_new_chunk(self) -> None:
+    def start_new_chunk(self, chunk_id: Optional[str] = None) -> None:
         """
         Call this method when starting to process a new chunk of data.
         This will finalize the previous chunk's PnL and start tracking a new chunk.
+        
+        Args:
+            chunk_id: Optional identifier for the chunk (for logging purposes)
         """
+        # Vérifier les conditions d'urgence avant de commencer un nouveau chunk
+        if self.check_emergency_condition(self.current_step):
+            logger.critical(
+                "[EMERGENCY] Emergency condition detected before starting chunk %s. "
+                "Reset will be triggered.", 
+                chunk_id or str(self.current_chunk_id + 1)
+            )
+            # Le reset sera géré par l'appelant
+            return
+        
+        # Vérifier l'état de surveillance et mettre à jour en conséquence
+        needs_reset = self._check_surveillance_status(self.current_step)
+        
+        # Si un reset est nécessaire, il sera géré par l'appelant via la méthode reset()
+        if needs_reset:
+            logger.warning(
+                "[SURVEILLANCE] Maximum chunks in surveillance reached for chunk %s. "
+                "Forcing reset on next step.",
+                chunk_id or str(self.current_chunk_id)
+            )
+            return
+        
         # Finalize the previous chunk's PnL if this isn't the first chunk
         if self.current_chunk_id > 0:
             self._finalize_chunk_pnl()
-
+            
+            # Vérifier la récupération à la fin du chunk en mode surveillance
+            if self._surveillance_mode:
+                current_value = self.get_portfolio_value()
+                if current_value > self._recovery_threshold:
+                    logger.info(
+                        "[SURVEILLANCE] Recovery during chunk %s: end_balance=%.2f > threshold=%.2f. "
+                        "Surveillance cleared.",
+                        chunk_id or str(self.current_chunk_id),
+                        current_value,
+                        self._recovery_threshold
+                    )
+                    self._exit_surveillance_mode(recovered=True)
+        
         # Start a new chunk
         self.current_chunk_id += 1
         self.chunk_start_equity = self.total_capital
         self.trade_count = 0  # Reset trade count for the new chunk
-        logger.info(
-            "Started tracking new chunk %d with starting equity: $%.2f",
-            self.current_chunk_id,
-            self.chunk_start_equity,
-        )
+        
+        # Log chunk start with surveillance info if applicable
+        chunk_info = f"{chunk_id} (#{self.current_chunk_id})" if chunk_id else f"{self.current_chunk_id}"
+        log_msg = f"🔄 Starting chunk {chunk_info} with starting equity: ${self.chunk_start_equity:.2f}"
+        
+        if self._surveillance_mode:
+            max_chunks = self.config.get("surveillance_chunk_allowance", 2)
+            log_msg += f" [SURVEILLANCE MODE: {self._survived_chunks}/{max_chunks} chunks]"
+            
+            # Avertissement si on approche de la limite de chunks en surveillance
+            remaining_chunks = max(0, max_chunks - self._survived_chunks)
+            if remaining_chunks <= 1:
+                logger.warning(
+                    "[SURVEILLANCE] Only %d chunk(s) remaining in surveillance mode before forced reset. "
+                    "Current value: %.2f, Start value: %.2f",
+                    remaining_chunks,
+                    self.get_portfolio_value(),
+                    self.surveillance_chunk_start_balance
+                )
+        
+        logger.info(log_msg)
 
     def _finalize_chunk_pnl(self) -> None:
         """Calculate and store the PnL for the current chunk."""
@@ -1901,7 +2349,13 @@ class PortfolioManager:
         self.update_metrics()
         logger.info("Portfolio rebalancing completed.")
 
-    def validate_position(self, asset: str, size: float, price: float) -> bool:
+    def validate_position(
+        self, 
+        asset: str, 
+        size: float, 
+        price: float, 
+        expected_return_pct: float = 0.0
+    ) -> bool:
         """
         Validates if a position can be opened with the given parameters.
 
@@ -1910,135 +2364,138 @@ class PortfolioManager:
         2. If the position meets minimum/maximum size requirements
         3. If there's sufficient available capital including commissions
         4. If concentration limits are respected
+        5. If the trade is profitable after commissions
 
         Args:
             asset: Asset symbol
             size: Size of the position (positive for long, negative for short)
             price: Entry price
+            expected_return_pct: Expected return percentage for profitability check
 
         Returns:
             bool: True if the position is valid, False otherwise
         """
         # Check if price is valid
         if price <= 0:
-            logger.warning("Invalid price: %.8f", price)
+            logger.warning("[VALIDATION] Invalid price: %.8f", price)
             return False
 
         # If protection is active in spot mode, block only new long entries (buys)
         if not self.futures_enabled and self.trading_disabled and size > 0:
             logger.warning(
-                "[PROTECTION] Trading disabled for new BUY orders due to drawdown breach. Request blocked: %s size=%.8f @ %.8f",
-                asset,
-                size,
-                price,
-            )
-            # Standardized guard log for easy grep during integration runs
-            logger.warning(
-                "[GUARD] Rejecting BUY due to trading_disabled (reason=spot_drawdown) asset=%s size=%.8f price=%.8f",
-                asset,
-                size,
-                price,
+                "[VALIDATION] Trading disabled for new BUY orders due to drawdown breach. "
+                "Request blocked: %s size=%.8f @ %.8f",
+                asset, size, price
             )
             return False
 
         # Check minimum trade size
         if abs(size) < self.min_trade_size:
             logger.warning(
-                "Position size (%.8f) is less than minimum trade size (%.8f).",
-                size,
-                self.min_trade_size,
+                "[VALIDATION] Position size (%.8f) is less than minimum trade size (%.8f).",
+                size, self.min_trade_size
             )
             return False
 
+        # Calculate notional value
+        notional_value = abs(size) * price
+        
         # Check against notional value limits
-        notional_value = (
-            abs(size) * price
-        )  # Use absolute value to handle short positions
-
         if notional_value < self.min_notional_value:
             logger.warning(
-                "[VALIDATION] Notional value %.2f < minimum %.2f for %s (size=%.8f @ %.8f)",
-                notional_value,
-                self.min_notional_value,
-                asset,
-                size,
-                price,
+                "[VALIDATION] Notional value (%.2f) is below minimum (%.2f).",
+                notional_value, self.min_notional_value
             )
             return False
-
+            
         if notional_value > self.max_notional_value:
             logger.warning(
-                "[VALIDATION] Notional value %.2f > maximum %.2f for %s (size=%.8f @ %.8f)",
-                notional_value,
-                self.max_notional_value,
-                asset,
-                size,
-                price,
+                "[VALIDATION] Notional value (%.2f) exceeds maximum (%.2f).",
+                notional_value, self.max_notional_value
             )
             return False
-
-        # Calculate required capital including commission
-        position_value = abs(size) * price
-        commission = position_value * self.commission_pct
-
-        # Calculate required margin based on trading mode
-        if self.futures_enabled and self.leverage > 1.0:
-            required_margin = (position_value / self.leverage) + commission
-        else:
-            required_margin = position_value + commission  # Spot trading or no leverage
-
-        # Get available capital using the dedicated method
-        available_capital = self.get_available_capital()
-
+        
+        # Check expected profitability after commissions
+        if expected_return_pct > 0 and not self.is_profitable_after_commissions(
+            notional_value, expected_return_pct
+        ):
+            commission = self.calculate_commission(notional_value)
+            logger.info(
+                "[VALIDATION] Trade not profitable after commissions. "
+                "Expected return: %.2f%%, Commission: %.4f, Notional: %.4f",
+                expected_return_pct, commission, notional_value
+            )
+            return False
+            
         # Check available capital
+        available_capital = self.get_available_capital()
+        required_margin = notional_value * (1 + self.commission_pct)  # Include commission
+        
         if required_margin > available_capital:
-            logger.warning(
-                "[VALIDATION] Insufficient capital for %s: Required=%.2f, Available=%.2f, "
-                "Portfolio=%.2f (size=%.8f @ %.8f, commission=%.4f)",
-                asset,
-                required_margin,
-                available_capital,
-                self.portfolio_value,
-                size,
-                price,
-                commission,
+            logger.info(
+                "[VALIDATION] Insufficient capital. Required: %.4f, Available: %.4f",
+                required_margin, available_capital
             )
             return False
-
-        # Check concentration limits if defined
-        if self.concentration_limits:
-            portfolio_value = self.get_portfolio_value()
-            position_pct = position_value / portfolio_value
-
-            # Check maximum position size
-            max_position_pct = self.concentration_limits.get("max_position_pct", 1.0)
-            if position_pct > max_position_pct:
-                logger.warning(
-                    "[VALIDATION] Position size %.2f%% > max %.2f%% for %s",
-                    position_pct * 100,
-                    max_position_pct * 100,
-                    asset,
+            
+        # Check maximum concurrent positions
+        try:
+            active_tier = self.get_active_tier()
+            max_positions = active_tier.get('max_concurrent_positions', 1)
+            current_positions = sum(1 for pos in self.positions.values() if pos.is_open)
+            
+            # Allow modifying existing position even if limit is reached
+            if (current_positions >= max_positions and 
+                not (asset in self.positions and self.positions[asset].is_open)):
+                logger.info(
+                    "[VALIDATION] Maximum concurrent positions reached (%d/%d). %s",
+                    current_positions, max_positions, asset
                 )
                 return False
-
-            # Check per-asset concentration
-            current_asset_value = 0.0
-            if asset in self.positions and self.positions[asset].is_open:
-                current_asset_value = abs(self.positions[asset].size * price)
-
-            new_asset_value = current_asset_value + position_value
-            max_asset_pct = self.concentration_limits.get("max_asset_pct", 0.5)
-
-            if new_asset_value / portfolio_value > max_asset_pct:
-                logger.warning(
-                    "[VALIDATION] Asset concentration %.2f%% > max %.2f%% for %s",
-                    (new_asset_value / portfolio_value) * 100,
-                    max_asset_pct * 100,
-                    asset,
-                )
-                return False
-
-        return True
+                
+            # Check concentration limits
+            if self.concentration_limits:
+                portfolio_value = self.get_portfolio_value()
+                if portfolio_value > 0:
+                    position_pct = notional_value / portfolio_value
+                    max_position_pct = self.concentration_limits.get("max_position_pct", 1.0)
+                    
+                    if position_pct > max_position_pct:
+                        logger.warning(
+                            "[VALIDATION] Position size (%.2f%%) > maximum allowed (%.2f%%)",
+                            position_pct * 100, max_position_pct * 100
+                        )
+                        return False
+                        
+                    # Check per-asset concentration
+                    current_asset_value = 0.0
+                    if asset in self.positions and self.positions[asset].is_open:
+                        current_asset_value = abs(self.positions[asset].size * price)
+                        
+                    new_asset_value = current_asset_value + notional_value
+                    max_asset_pct = self.concentration_limits.get("max_asset_pct", 0.5)
+                    
+                    if (new_asset_value / portfolio_value) > max_asset_pct:
+                        logger.warning(
+                            "[VALIDATION] Asset concentration (%.2f%%) > maximum allowed (%.2f%%)",
+                            (new_asset_value / portfolio_value) * 100, max_asset_pct * 100
+                        )
+                        return False
+            
+            logger.debug(
+                "[VALIDATION] Position validated - Size: %.8f, Price: %.8f, Notional: %.4f, "
+                "Positions: %d/%d, Capital: %.4f/%.4f",
+                size, price, notional_value, current_positions, max_positions,
+                required_margin, available_capital
+            )
+            return True
+            
+        except Exception as e:
+            logger.error(
+                "[VALIDATION] Error validating position: %s",
+                str(e), exc_info=True
+            )
+            return False
 
     def get_active_tier(self):
         """

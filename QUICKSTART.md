@@ -4,49 +4,59 @@ Ce guide vous aidera à configurer et exécuter ADAN Trading Bot en quelques ét
 
 ## 📋 Prérequis
 
-- **Python 3.8+** - [Télécharger Python](https://www.python.org/downloads/)
-- **pip** - Gestionnaire de paquets Python (inclus avec Python 3.4+)
+- **Python 3.10+** - [Télécharger Python](https://www.python.org/downloads/)
+- **Miniconda/Anaconda** - [Télécharger Miniconda](https://docs.conda.io/en/latest/miniconda.html)
 - **Git** - [Télécharger Git](https://git-scm.com/downloads)
-- **Bibliothèques scientifiques** (recommandé) :
-  - NumPy
-  - pandas
-  - scikit-learn
+- **uv pip** (installation plus rapide des dépendances) :
+  ```bash
+  pip install uv
+  ```
 
 ## 🛠 Installation
 
 ### 1. Cloner le dépôt
 
 ```bash
-git clone https://github.com/votre-utilisateur/adan-trading-bot.git
-cd adan-trading-bot
+git clone https://github.com/Cabrel10/ADAN.git
+cd ADAN
+git checkout stable  # Basculer sur la branche stable
 ```
 
 ### 2. Configuration de l'environnement
 
-#### Créer un environnement virtuel (recommandé)
+#### Créer et activer l'environnement Conda
 
 ```bash
-# Linux/MacOS
-python -m venv venv
-source venv/bin/activate
+# Créer l'environnement
+conda create -n trading_env python=3.10 -y
 
-# Windows
-python -m venv venv
-.\venv\Scripts\activate
+# Activer l'environnement
+conda activate trading_env
 ```
 
-#### Installer les dépendances
+#### Installer les dépendances avec uv pip
 
 ```bash
-pip install -r requirements.txt
+uv pip install -r requirements.txt
 ```
 
 ### 3. Configuration initiale
 
-1. Copiez le fichier de configuration exemple :
+1. Copier les fichiers de configuration :
    ```bash
+   cp .env.example .env
    cp config/config.example.yaml config/config.yaml
    ```
+
+2. Configurer les variables d'environnement (`.env`) :
+   ```ini
+   # Exemple de configuration minimale
+   ADAN_QUIET_AFTER_INIT=1
+   ADAN_RICH_STEP_TABLE=1
+   ADAN_RICH_STEP_EVERY=10
+   ```
+
+3. Configurer le fichier `config/config.yaml` selon vos besoins.
 
 2. Modifiez `config/config.yaml` selon vos besoins :
    - Configurer les paramètres du réseau de neurones
@@ -55,29 +65,46 @@ pip install -r requirements.txt
 
 ## 🚦 Exécution
 
-### Mode développement
+### Mode développement avec affichage détaillé
 
-Pour exécuter en mode développement avec des données de test :
-
-```bash
-python -m src.adan_trading_bot.main --mode=dev
-```
-
-### Mode backtest
-
-Pour exécuter un backtest sur des données historiques :
+Pour exécuter en mode développement avec affichage détaillé des logs :
 
 ```bash
-python -m src.adan_trading_bot.main --mode=backtest --start-date=20230101 --end-date=20231231
+ADAN_QUIET_AFTER_INIT=0 ADAN_RICH_STEP_TABLE=1 \
+python scripts/train_parallel_agents.py --config config/config.yaml
 ```
 
-### Mode live (attention !)
+### Mode production (optimisé)
 
-⚠️ **Utiliser avec précaution en environnement réel**
+Pour exécuter en mode production avec optimisation des performances :
 
 ```bash
-python -m src.adan_trading_bot.main --mode=live --paper-trading
+ADAN_QUIET_AFTER_INIT=1 ADAN_RICH_STEP_EVERY=50 \
+python scripts/train_parallel_agents.py --config config/config.yaml
 ```
+
+### Variables d'environnement utiles
+
+| Variable | Valeur par défaut | Description |
+|----------|------------------|-------------|
+| `ADAN_QUIET_AFTER_INIT` | `1` | Active le mode silencieux après l'initialisation |
+| `ADAN_RICH_STEP_TABLE` | `1` | Active l'affichage du tableau de suivi Rich |
+| `ADAN_RICH_STEP_EVERY` | `10` | Fréquence d'affichage du tableau (en pas) |
+| `ADAN_JSONL_EVERY` | `100` | Fréquence d'écriture des logs au format JSONL |
+
+### Surveillance des performances
+
+Pour surveiller les performances en temps réel :
+
+1. Dans un premier terminal, lancez TensorBoard :
+   ```bash
+   tensorboard --logdir=./tensorboard_logs
+   ```
+
+2. Dans un deuxième terminal, lancez l'entraînement :
+   ```bash
+   python scripts/train_parallel_agents.py --config config/config.yaml
+   ```
 
 ## 🧪 Tests
 

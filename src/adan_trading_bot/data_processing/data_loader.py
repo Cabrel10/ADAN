@@ -66,8 +66,25 @@ class ChunkedDataLoader:
         # Vérifie que tous les timeframes demandés sont pris en charge
         self._validate_timeframes()
         
-        # Initialise le nombre total de chunks (1 car toutes les données sont chargées en une fois)
-        self.total_chunks = 1
+        # Configuration de la taille des chunks par timeframe
+        # Priorité: worker_config.chunk_sizes > config.data.chunk_sizes > défauts optimisés
+        default_chunk_sizes = {"5m": 5328, "1h": 242, "4h": 111}
+        cfg_chunk_sizes = (
+            (self.worker_config.get("chunk_sizes") or {})
+            or self.config.get("data", {}).get("chunk_sizes", {})
+        )
+        # Conserver uniquement les timeframes demandés, sinon fallback sur défaut
+        self.chunk_sizes = {}
+        for tf in self.timeframes:
+            if isinstance(cfg_chunk_sizes, dict) and tf in cfg_chunk_sizes:
+                self.chunk_sizes[tf] = int(cfg_chunk_sizes[tf])
+            else:
+                # défaut si dispo, sinon utiliser longueur complète (sera bornée plus tard)
+                self.chunk_sizes[tf] = int(default_chunk_sizes.get(tf, 10_000_000))
+
+        # Initialise le nombre total de chunks en fonction des données disponibles
+        self.total_chunks = self._calculate_total_chunks()
+        logger.info(f"Total chunks disponibles: {self.total_chunks}")
 
         logger.info(f"Initialisation du ChunkedDataLoader avec {len(self.assets_list)} actifs et {len(self.timeframes)} timeframes")
         logger.debug(f"Actifs: {self.assets_list}")
@@ -255,6 +272,17 @@ class ChunkedDataLoader:
                     asset, tf = futures[future]
                     try:
                         asset, tf, df = future.result()
+                        # Appliquer la taille de chunk cible par timeframe (prend les dernières lignes)
+                        target_len = int(self.chunk_sizes.get(tf, len(df)))
+                        if target_len <= 0:
+                            target_len = len(df)
+                        if len(df) > target_len:
+                            df = df.iloc[-target_len:].reset_index(drop=True)
+                        else:
+                            # Si les données sont plus courtes que la cible, on log un avertissement
+                            logger.warning(
+                                f"{asset} {tf}: données ({len(df)}) plus courtes que la taille de chunk cible ({target_len})."
+                            )
                         data[asset][tf] = df
                         pbar.update(1)
                         pbar.set_postfix_str(f"{asset} {tf} - {len(df)} lignes")
@@ -263,3 +291,53 @@ class ChunkedDataLoader:
                         raise
         
         return data
+        
+    def _calculate_total_chunks(self) -> int:
+        """
+        Calcule le nombre total de chunks disponibles pour les données chargées.
+        
+        Le calcul est basé sur la taille des données disponibles et la taille des chunks
+        configurée pour chaque timeframe. Le nombre de chunks est déterminé par le timeframe
+        ayant le moins de données par rapport à la taille de ses chunks.
+        
+        Returns:
+            int: Nombre total de chunks disponibles
+        """
+        # Si max_chunks_per_episode est défini dans la configuration, on l'utilise
+        max_chunks = self.config.get('environment', {}).get('max_chunks_per_episode')
+        if max_chunks is not None:
+            return int(max_chunks)
+            
+        # Sinon, on calcule le nombre de chunks en fonction des données disponibles
+        min_chunks = float('inf')
+        
+        # Parcourir tous les actifs et timeframes pour trouver le plus petit nombre de chunks
+        for asset in self.assets_list:
+            for tf in self.timeframes:
+                try:
+                    # Charger les données pour cet actif et ce timeframe
+                    df = self._load_asset_timeframe(asset, tf)
+                    chunk_size = self.chunk_sizes.get(tf, len(df))
+                    
+                    # Calculer le nombre de chunks pour ce timeframe
+                    num_chunks = max(1, len(df) // chunk_size)
+                    
+                    # Prendre le plus petit nombre de chunks parmi tous les timeframes
+                    if num_chunks < min_chunks:
+                        min_chunks = num_chunks
+                        
+                except Exception as e:
+                    logger.warning(
+                        f"Erreur lors du calcul des chunks pour {asset} {tf}: {str(e)}"
+                    )
+                    continue
+        
+        # Si on n'a pas pu déterminer le nombre de chunks, on retourne 1 par défaut
+        if min_chunks == float('inf'):
+            logger.warning(
+                "Impossible de déterminer le nombre de chunks, utilisation de la valeur par défaut (1)"
+            )
+            return 1
+            
+        logger.info(f"Nombre total de chunks calculé : {min_chunks}")
+        return min_chunks
