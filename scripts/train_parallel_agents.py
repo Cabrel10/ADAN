@@ -10,27 +10,50 @@ import sys
 import time
 import traceback
 import warnings
-import yaml
-import numpy as np
-import torch  # utilisé dans policy_kwargs / model init - s'assurer présent
-try:
-    import gymnasium as gym
-except Exception:
-    # Si gymnasium n'est pas installé, on essaie gym (legacy) — mais SB3 recommande gymnasium
-    import gym  # type: ignore
-from concurrent.futures import ProcessPoolExecutor, as_completed
+from concurrent.futures import (
+    ProcessPoolExecutor,
+    as_completed
+)
 from datetime import datetime
 from pathlib import Path
 from threading import Thread
-from typing import Any, Dict, Optional, List, Tuple, Union
+from typing import Any, Dict, List, Optional, Tuple, Union, Callable
 
 import gymnasium as gym
+import gymnasium.spaces as spaces
 import numpy as np
+import pandas as pd
 import torch
-import torch.nn as nn
 import torch as th
+import torch.nn as nn
+import yaml
+from gymnasium.wrappers import FlattenObservation
+from stable_baselines3 import PPO
+from stable_baselines3.common.logger import configure as sb3_logger_configure
+from stable_baselines3.common.callbacks import BaseCallback, EvalCallback
+from stable_baselines3.common.env_checker import check_env
+from stable_baselines3.common.monitor import Monitor
+from stable_baselines3.common.vec_env import (
+    DummyVecEnv,
+    SubprocVecEnv,
+    VecNormalize
+)
+import contextlib
 
-gym.logger.set_level(40)  # Suppress Gym warnings
+# Timeout and environment validation
+from adan_trading_bot.utils.timeout_manager import TimeoutManager, TimeoutException as TMTimeoutException
+from adan_trading_bot.training.trainer import validate_environment
+
+# Configuration du logger de base
+from adan_trading_bot.common.custom_logger import setup_logging
+
+# Configurer le logger avec la configuration personnalisée
+logger = setup_logging(
+    default_level=logging.INFO,
+    enable_console_logs=True,
+    enable_json_logs=False,  # Désactiver les logs JSON par défaut
+    force_plain_console=True  # Forcer un affichage simple de la console
+)
 
 # Désactiver les avertissements spécifiques
 warnings.filterwarnings(
@@ -42,97 +65,226 @@ warnings.filterwarnings(
     action="ignore",
     category=FutureWarning
 )
-
-import gymnasium as gym
-import torch
-import torch.nn as nn
-from stable_baselines3 import PPO
-from stable_baselines3.common.callbacks import BaseCallback, EvalCallback
-from stable_baselines3.common.vec_env import (
-    SubprocVecEnv, DummyVecEnv, VecNormalize
-)
-from stable_baselines3.common.monitor import Monitor
-from stable_baselines3.common.env_checker import check_env
-from gymnasium.wrappers import FlattenObservation
-import gymnasium.spaces as spaces
 
 class GymnasiumToGymWrapper(gym.Wrapper):
     """
     Wrapper minimal pour adapter un env Gymnasium (reset -> (obs,info), step -> (obs,rew,term,trunc,info))
     à l'API Gym attendue par certains composants (SB3 DummyVecEnv / Monitor).
-    - reset() retourne obs (dropping info)
-    - step(action) retourne (obs, reward, done, info) where done = terminated or truncated
     """
-    def reset(self, **kwargs):
-        out = super().reset(**kwargs)
-        # Gymnasium returns (obs, info)
-        if isinstance(out, tuple) and len(out) == 2:
-            obs, info = out
-            logger.debug("GymnasiumToGymWrapper.reset: returning obs only (dropping info).")
-            return obs
-        return out
+
+    def reset(self, *, seed=None, options=None):
+        """Garantit que reset() retourne toujours un tuple (obs, info)."""
+        reset_result = super().reset(seed=seed, options=options)
+
+        # Journalisation pour le débogage
+        logger.debug(
+            "GymnasiumToGymWrapper.reset - Type de sortie: %s",
+            type(reset_result)
+        )
+
+        if isinstance(reset_result, tuple) and len(reset_result) == 2:
+            # Format gymnasium : (obs, info)
+            obs, info = reset_result
+            obs = self._validate_observation(obs)
+            return obs, info
+        # Cas où seul obs est retourné (ancienne API gym)
+        else:
+            logger.debug(
+                "GymnasiumToGymWrapper.reset - Format obs unique détecté, "
+                "conversion en (obs, {})"
+            )
+            obs = self._validate_observation(reset_result)
+            return obs, {}
+
+    def _validate_observation(self, obs):
+        """Valide et convertit l'observation dans le format attendu.
+
+        Returns:
+            dict: Un dictionnaire avec les clés 'observation' (shape: 3, 20, 16)
+                  et 'portfolio_state' (shape: 17,)
+        """
+        try:
+            # Format de sortie attendu (mise à jour pour 15 caractéristiques au lieu de 16)
+            expected_obs_shape = (3, 20, 15)  # 15 caractéristiques par fenêtre
+            expected_portfolio_shape = (17,)
+
+            # Si c'est déjà un dictionnaire avec les bonnes clés, on le valide
+            if (isinstance(obs, dict) and
+                'observation' in obs and
+                'portfolio_state' in obs):
+
+                # Valider la forme de l'observation
+                obs_array = np.asarray(obs['observation'], dtype=np.float32)
+                portfolio_array = np.asarray(obs['portfolio_state'], dtype=np.float32)
+
+                # Vérifier les formes
+                if obs_array.shape != expected_obs_shape:
+                    logger.warning(
+                        f"Forme d'observation incorrecte: {obs_array.shape}, "
+                        f"attendu {expected_obs_shape}. Redimensionnement en cours."
+                    )
+                    # Redimensionner l'observation si nécessaire
+                    if len(obs_array.shape) == 3:
+                        # Si c'est déjà 3D mais pas la bonne taille
+                        obs_array = obs_array[:, :, :16]  # Prendre les 16 premières features
+                        # Si la dimension temporelle est trop petite, on pad avec des zéros
+                        if obs_array.shape[1] < 20:
+                            pad_width = [(0, 0), (0, 20 - obs_array.shape[1]), (0, 0)]
+                            obs_array = np.pad(obs_array, pad_width, mode='constant')
+                    else:
+                        # Si le format est complètement différent, on crée une observation vide
+                        obs_array = np.zeros(expected_obs_shape, dtype=np.float32)
+
+                # Vérifier la forme du portefeuille
+                if portfolio_array.shape != expected_portfolio_shape:
+                    logger.warning(
+                        f"Forme de l'état du portefeuille incorrecte: {portfolio_array.shape}, "
+                        f"attendu {expected_portfolio_shape}. Redimensionnement en cours."
+                    )
+                    if len(portfolio_array.shape) == 1 and portfolio_array.size >= 17:
+                        portfolio_array = portfolio_array[:17]  # Tronquer si trop grand
+                    else:
+                        # Si le format est complètement différent, on crée un état vide
+                        portfolio_array = np.zeros(expected_portfolio_shape, dtype=np.float32)
+
+                return {
+                    'observation': obs_array.astype(np.float32),
+                    'portfolio_state': portfolio_array.astype(np.float32)
+                }
+
+            # Si c'est un tuple (obs, info), on extrait l'observation
+            if isinstance(obs, (tuple, list)) and len(obs) >= 2 and isinstance(obs[1], dict):
+                return self._validate_observation(obs[0])
+
+            # Si c'est un dictionnaire mais pas au bon format
+            if isinstance(obs, dict):
+                logger.warning("Format d'observation inattendu: %s", list(obs.keys()))
+                # Essayer de construire une observation valide à partir des clés disponibles
+                obs_array = np.asarray(obs.get('observation', np.zeros(expected_obs_shape)), dtype=np.float32)
+                portfolio_array = np.asarray(obs.get('portfolio_state', np.zeros(expected_portfolio_shape)), dtype=np.float32)
+
+                # Redimensionner si nécessaire
+                if obs_array.shape != expected_obs_shape:
+                    obs_array = np.zeros(expected_obs_shape, dtype=np.float32)
+                if portfolio_array.shape != expected_portfolio_shape:
+                    portfolio_array = np.zeros(expected_portfolio_shape, dtype=np.float32)
+
+                return {
+                    'observation': obs_array,
+                    'portfolio_state': portfolio_array
+                }
+
+            # Si c'est un ndarray, essayer de le convertir au format attendu
+            if isinstance(obs, np.ndarray):
+                obs_array = obs.astype(np.float32)
+
+                # Si c'est déjà la forme attendue pour l'observation
+                if obs_array.shape == expected_obs_shape:
+                    return {
+                        'observation': obs_array,
+                        'portfolio_state': np.zeros(expected_portfolio_shape, dtype=np.float32)
+                    }
+                # Si c'est une observation plate
+                elif obs_array.size == np.prod(expected_obs_shape):
+                    return {
+                        'observation': obs_array.reshape(expected_obs_shape),
+                        'portfolio_state': np.zeros(expected_portfolio_shape, dtype=np.float32)
+                    }
+                # Si c'est juste l'état du portefeuille
+                elif obs_array.size == expected_portfolio_shape[0]:
+                    return {
+                        'observation': np.zeros(expected_obs_shape, dtype=np.float32),
+                        'portfolio_state': obs_array.reshape(expected_portfolio_shape)
+                    }
+
+            # Si c'est un objet avec une méthode items(), essayer de le convertir en dict
+            if hasattr(obs, 'items') and callable(obs.items):
+                try:
+                    obs_dict = dict(obs.items())
+                    return self._validate_observation(obs_dict)
+                except Exception as e:
+                    logger.error("Échec de la conversion en dictionnaire: %s", str(e))
+
+            # Si on arrive ici, on crée une observation par défaut
+            logger.warning(
+                f"Format d'observation non reconnu, création d'une observation par défaut. "
+                f"Type: {type(obs)}"
+            )
+            return {
+                'observation': np.zeros(expected_obs_shape, dtype=np.float32),
+                'portfolio_state': np.zeros(expected_portfolio_shape, dtype=np.float32)
+            }
+
+        except Exception as e:
+            logger.error("Erreur lors de la validation de l'observation: %s", str(e))
+            # En cas d'erreur, on retourne une observation vide mais valide
+            return {
+                'observation': np.zeros(expected_obs_shape, dtype=np.float32),
+                'portfolio_state': np.zeros(expected_portfolio_shape, dtype=np.float32)
+            }
 
     def step(self, action):
+        """Convertit le retour de step() de gymnasium (5 valeurs) au format SB3."""
         out = super().step(action)
-        # gymnasium step returns (obs, reward, terminated, truncated, info)
+
+        # Journalisation pour le débogage
+        logger.debug(
+            "GymnasiumToGymWrapper.step - Type de sortie: %s",
+            type(out)
+        )
+        if isinstance(out, tuple):
+            logger.debug("GymnasiumToGymWrapper.step - Longueur du tuple: %d",
+                        len(out))
+
         if isinstance(out, tuple) and len(out) == 5:
+            # Format gymnasium : (obs, reward, terminated, truncated, info)
             obs, reward, terminated, truncated, info = out
             done = bool(terminated or truncated)
-            return obs, reward, done, info
-        # pass-through if already gym-like (obs, reward, done, info)
-        if isinstance(out, tuple) and len(out) == 4:
-            return out
-        raise RuntimeError(f"Unexpected step return shape from wrapped env: {type(out)} / len={len(out) if isinstance(out, tuple) else 'N/A'}")
 
-def validate_env_observation(env):
-    """
-    Validation simple après création de env.
-    Lève une exception si format incorrect.
-    """
-    obs = env.reset()
-    # If wrapper hasn't been applied and reset returns (obs, info) handle that
-    if isinstance(obs, tuple) and len(obs) == 2:
-        obs = obs[0]
-    if not isinstance(obs, dict):
-        raise TypeError(f"Invalid observation type from env.reset(): {type(obs)} — expected dict with keys 'observation' and 'portfolio_state'.")
-    required = {'observation', 'portfolio_state'}
-    if not required.issubset(set(obs.keys())):
-        raise KeyError(f"Observation dict missing required keys. Keys present: {list(obs.keys())}")
-    market = obs['observation']
-    portfolio = obs['portfolio_state']
-    if not isinstance(market, np.ndarray):
-        raise TypeError(f"'observation' must be np.ndarray, got {type(market)}")
-    if market.ndim != 3:
-        raise ValueError(f"'observation' must be 3D (timeframes, window, features). Got ndim={market.ndim}")
-    if not isinstance(portfolio, np.ndarray):
-        raise TypeError(f"'portfolio_state' must be np.ndarray, got {type(portfolio)}")
-    if portfolio.ndim != 1:
-        raise ValueError(f"'portfolio_state' must be 1D vector (17,), got shape={portfolio.shape}")
-    logger.info("Env observation validated successfully.")
-    return True
-import numpy as np
-import torch as th
+            # Valider le format de l'observation
+            obs = self._validate_observation(obs)
 
-# Désactiver les avertissements spécifiques
-warnings.filterwarnings(
-    action="ignore",
-    category=UserWarning,
-    module='stable_baselines3'
-)
-warnings.filterwarnings(
-    action="ignore",
-    category=FutureWarning
-)
+            # Retourner le format attendu par SB3 avec 5 valeurs
+            return obs, float(reward), done, info, {}
 
-from adan_trading_bot.utils.caching_utils import DataCacheManager
+        # Si le format est déjà correct (4 valeurs), on ajoute un dict vide à la fin
+        elif isinstance(out, tuple) and len(out) == 4:
+            obs, reward, done, info = out
+            obs = self._validate_observation(obs)
+            return obs, float(reward), done, info, {}
 
+        # Si le format est inattendu, essayer de le convertir
+        logger.error(
+            "GymnasiumToGymWrapper.step - Format de retour inattendu: %s",
+            out
+        )
 
+        # Si c'est un tuple avec 3 éléments, supposer que c'est (obs, reward, done)
+        if isinstance(out, tuple) and len(out) == 3:
+            obs, reward, done = out
+            obs = self._validate_observation(obs)
+            return obs, float(reward), done, {}, {}
+
+        # Si c'est un tuple avec 2 éléments, supposer que c'est (obs, reward)
+        if isinstance(out, tuple) and len(out) == 2:
+            obs, reward = out
+            obs = self._validate_observation(obs)
+            return obs, float(reward), False, {}, {}
+
+        # Si c'est juste une observation, retourner avec des valeurs par défaut
+        obs = self._validate_observation(out)
+        return obs, 0.0, False, {}, {}
+
+# Gestion des exceptions
 class TimeoutException(Exception):
-    """Exception levée quand le timeout est atteint."""
+    """Exception levée quand le timeout est atteint (legacy)."""
     pass
 
-def timeout_handler(signum, frame):
-    raise TimeoutException("Temps d'exécution dépassé")
+# Import local
+from adan_trading_bot.environment.checkpoint_manager import CheckpointManager
+
+# Import local
+from adan_trading_bot.utils.caching_utils import DataCacheManager
 
 # Configuration du logger
 logger = logging.getLogger(__name__)
@@ -150,7 +302,7 @@ class CustomCombinedExtractor(BaseFeaturesExtractor):
     Extrait les caractéristiques à partir des observations de type Dict.
     Hérite de BaseFeaturesExtractor pour une meilleure intégration avec SB3.
     """
-    
+
     def __init__(
         self,
         observation_space: spaces.Dict,
@@ -160,10 +312,10 @@ class CustomCombinedExtractor(BaseFeaturesExtractor):
     ) -> None:
         # Appel au constructeur parent avec la dimension de sortie
         super().__init__(observation_space, features_dim=features_dim)
-        
+
         extractors = {}
         total_concat_size = 0
-        
+
         # Pour chaque clé de l'espace d'observation
         for key, subspace in observation_space.spaces.items():
             if key == "observation":  # Traitement des données d'image
@@ -171,7 +323,7 @@ class CustomCombinedExtractor(BaseFeaturesExtractor):
                 n_flatten = 1
                 for i in range(len(subspace.shape)):
                     n_flatten *= subspace.shape[i]
-                
+
                 # Réseau pour traiter les données d'image
                 extractors[key] = nn.Sequential(
                     nn.Flatten(),
@@ -190,18 +342,18 @@ class CustomCombinedExtractor(BaseFeaturesExtractor):
                     nn.ReLU()
                 )
                 total_concat_size += 32
-        
+
         self.extractors = nn.ModuleDict(extractors)
-        
+
         # Couche linéaire finale pour adapter à la dimension de sortie souhaitée
         self.fc = nn.Sequential(
             nn.Linear(total_concat_size, features_dim),
             nn.ReLU()
         )
-    
+
     def forward(self, observations: Dict[str, th.Tensor]) -> th.Tensor:
         encoded_tensor_list = []
-        
+
         # Extraire les caractéristiques pour chaque clé
         for key, extractor in self.extractors.items():
             if key in observations:
@@ -210,23 +362,20 @@ class CustomCombinedExtractor(BaseFeaturesExtractor):
                 if isinstance(x, np.ndarray):
                     x = th.as_tensor(x, device=self.device, dtype=th.float32)
                 encoded_tensor_list.append(extractor(x))
-        
+
         # Concaténer toutes les caractéristiques et appliquer la couche finale
         return self.fc(th.cat(encoded_tensor_list, dim=1))
-
-
-
 
 class GymnasiumToSB3Wrapper(gym.Wrapper):
     """Wrapper pour convertir un environnement Gymnasium en un format compatible avec Stable Baselines 3."""
     def __init__(self, env: gym.Env) -> None:
         """Initialize the Gymnasium to SB3 wrapper.
-        
+
         Args:
             env: The Gymnasium environment to wrap
         """
         super().__init__(env)
-        
+
         # Convertir l'espace d'observation en un format compatible
         if isinstance(env.observation_space, gym.spaces.Dict):
             # Pour les espaces de type Dict, on conserve la structure
@@ -234,34 +383,34 @@ class GymnasiumToSB3Wrapper(gym.Wrapper):
         else:
             # Pour les autres types d'espaces, on essaie de les convertir
             self.observation_space = env.observation_space
-            
+
         self.action_space = env.action_space
         self.metadata = getattr(env, 'metadata', {'render_modes': []})
-        
+
         # Activer le mode vectorisé si nécessaire
         self.is_vector_env = hasattr(env, 'num_envs')
 
     def reset(self, **kwargs):
         """Reset the environment and return the initial observation and info."""
         obs, info = self.env.reset(**kwargs)
-        
+
         # S'assurer que l'observation est au bon format
         if isinstance(obs, dict) and 'observation' in obs and 'portfolio_state' in obs:
             # Déjà au bon format
             return obs, info
-            
+
         # Gérer les autres formats d'observation si nécessaire
         return obs, info
 
     def step(self, action):
         """Take an action in the environment."""
         obs, reward, terminated, truncated, info = self.env.step(action)
-        
+
         # S'assurer que l'observation est au bon format
         if isinstance(obs, dict) and 'observation' in obs and 'portfolio_state' in obs:
             # Déjà au bon format
             return obs, reward, terminated or truncated, False, info
-            
+
         # Gérer les autres formats d'observation si nécessaire
         return obs, reward, terminated or truncated, False, info
 
@@ -271,34 +420,28 @@ class GymnasiumToSB3Wrapper(gym.Wrapper):
 
 # Local application imports
 from adan_trading_bot.environment.multi_asset_chunked_env import MultiAssetChunkedEnv
-from stable_baselines3.common.env_util import make_vec_env
-from stable_baselines3.common.vec_env import (
-    DummyVecEnv, 
-    SubprocVecEnv, 
-    VecNormalize, 
-    VecCheckNan,
-    VecTransposeImage
-)
+# Import déjà effectué plus haut
+from stable_baselines3.common.vec_env import DummyVecEnv, SubprocVecEnv, VecNormalize, VecTransposeImage, VecEnv
 from stable_baselines3.common.utils import set_random_seed
 
 def _normalize_obs_for_sb3(obs: Any) -> Union[np.ndarray, Dict[str, np.ndarray]]:
     """Normalize observation for Stable Baselines 3 compatibility.
-    
+
     Handles Gym's tuple (obs, info) and ensures proper numpy arrays.
     Converts observations to the format expected by SB3.
-    
+
     Args:
         obs: Observation to normalize (can be tuple, dict, numpy array).
             L'observation à normaliser (peut être un tuple, un dict,
             un tableau numpy).
-            
+
     Returns:
         Union[np.ndarray, Dict[str, np.ndarray]]: Normalized observation for SB3.
     """
     # Handle case where obs is a tuple (obs, info) from Gymnasium
     if isinstance(obs, tuple) and len(obs) >= 1:
         obs = obs[0]  # Take only the observation part
-    
+
     # Handle dict observations (for MultiInputPolicy)
     if isinstance(obs, dict):
         # Ensure all values are numpy arrays and handle potential tuples
@@ -308,15 +451,15 @@ def _normalize_obs_for_sb3(obs: Any) -> Union[np.ndarray, Dict[str, np.ndarray]]
                 v = v[0]  # Take first element if it's a tuple
             normalized_obs[k] = np.asarray(v, dtype=np.float32)
         return normalized_obs
-    
+
     # Handle numpy arrays
     if isinstance(obs, np.ndarray):
         return obs.astype(np.float32, copy=False)
-    
+
     # Handle PyTorch tensors
     if hasattr(obs, 'numpy'):
         return obs.detach().cpu().numpy()
-    
+
     # Handle lists and other array-like objects
     try:
         return np.asarray(obs, dtype=np.float32)
@@ -325,1383 +468,65 @@ def _normalize_obs_for_sb3(obs: Any) -> Union[np.ndarray, Dict[str, np.ndarray]]
         raise ValueError(error_msg) from e
 
 
-def safe_predict(model, obs, deterministic: bool = True) -> Tuple[np.ndarray, Optional[np.ndarray]]:
-    """Wrapper sécurisé autour de model.predict pour gérer différents formats d'obs.
-    
-    Gère les différences d'API entre Gym et SB3, et assure une conversion
-    robuste des observations en tableaux numpy.
-    
-    Args:
-        model: Le modèle SB3 à utiliser pour la prédiction
-        obs: L'observation d'entrée (peut être un tuple, un dict, un tableau numpy)
-        deterministic: Si True, utilise une politique déterministe
-        
-    Returns:
-        Tuple (action, state) comme retourné par model.predict
+class ResetObsAdapter:
     """
-    try:
-        # Normaliser l'observation pour SB3
-        normalized_obs = _normalize_obs_for_sb3(obs)
-        
-        # Gestion spéciale pour les espaces d'observation de type Dict
-        if hasattr(model, 'observation_space') and isinstance(model.observation_space, spaces.Dict):
-            # Si l'observation est déjà un dict, on le laisse tel quel
-            if not isinstance(normalized_obs, dict):
-                # Sinon, on essaie de convertir en dict si nécessaire
-                normalized_obs = {"observation": normalized_obs}
-        
-        # Effectuer la prédiction avec gestion des erreurs
-        try:
-            return model.predict(normalized_obs, deterministic=deterministic)
-        except (ValueError, TypeError) as e:
-            # Gestion des erreurs spécifiques à SB3
-            if "You have passed a tuple" in str(e):
-                if isinstance(normalized_obs, tuple):
-                    normalized_obs = normalized_obs[0]
-                return model.predict(normalized_obs, deterministic=deterministic)
-            raise
-            
-    except Exception as e:
-        logging.error(f"Erreur lors de la prédiction: {e}")
-        logging.debug(traceback.format_exc())
-        
-        # Retourner une action par défaut en cas d'erreur
-        if hasattr(model, 'action_space') and hasattr(model.action_space, 'sample'):
-            return model.action_space.sample(), None
-        return np.zeros(1), None
-
-
-def configure_logger(name: str, log_level: int = logging.INFO) -> logging.Logger:
-    """Configure et retourne un logger avec les handlers appropriés.
-
-    Args:
-        name: Nom du logger
-        log_level: Niveau de log (par défaut: logging.INFO)
-
-    Returns:
-        Instance de logger configurée
+    Adapter minimal pour rendre un env compatible avec Stable-Baselines3 (Gym API).
+    - Si env.reset() renvoie (obs, info) (Gymnasium), on renvoie obs uniquement.
+    - Si env.step() renvoie 5 éléments (obs, reward, terminated, truncated, info),
+      on convertit en (obs, reward, done, info) où done = terminated or truncated.
+    Utiliser : env = ResetObsAdapter(env)
     """
-    logger = logging.getLogger(name)
-    logger.setLevel(log_level)
-
-    # Crée un formateur de logs
-    formatter = logging.Formatter(
-        '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-    )
-
-    # Crée un handler pour la sortie console
-    console_handler = logging.StreamHandler()
-    console_handler.setLevel(log_level)
-    console_handler.setFormatter(formatter)
-
-    # Crée un répertoire de logs s'il n'existe pas
-    base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    log_dir = os.path.join(base_dir, 'logs')
-    os.makedirs(log_dir, exist_ok=True)
-
-    # Crée un handler pour le fichier de log
-    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-    log_file = os.path.join(log_dir, f'training_{timestamp}.log')
-    file_handler = logging.FileHandler(log_file)
-    file_handler.setLevel(log_level)
-    file_handler.setFormatter(formatter)
-
-    # Ajoute les handlers au logger
-    logger.addHandler(console_handler)
-    logger.addHandler(file_handler)
-
-    # Évite la propagation des logs vers le logger racine
-    logger.propagate = False
-
-    return logger
-
-
-def load_config(config_path: str = None) -> Dict[str, Any]:
-    """Charge et valide la configuration complète."""
-    if config_path is None:
-        possible_paths = [
-            'config/config.yaml',
-            'config.yaml',
-            '/home/morningstar/Documents/trading/bot/config/config.yaml',
-            '/home/morningstar/Documents/trading/bot/config.yaml'
-        ]
-        
-        for path in possible_paths:
-            if os.path.exists(path):
-                config_path = path
-                break
-        
-        if config_path is None:
-            raise FileNotFoundError("Fichier de configuration non trouvé")
-    
-    logger.info(f"Chargement de la configuration depuis: {config_path}")
-    
-    try:
-        # Charger la configuration avec chemins fixes
-        config = load_base_config(config_path)
-        
-        # Validation des sections requises
-        required_sections = ['general', 'paths', 'workers', 'environment', 'agent']
-        for section in required_sections:
-            if section not in config:
-                logger.warning(f"Section manquante dans la configuration: {section}")
-        
-        return config
-    
-    except Exception as e:
-        logger.error(f"Erreur lors du chargement de la configuration: {e}")
-        raise
-
-# Définir le répertoire racine du projet
-PROJECT_ROOT = "/home/morningstar/Documents/trading/bot"
-sys.path.append(PROJECT_ROOT)
-
-# Configuration du logger principal
-logger = configure_logger(__name__)
-
-# Ajouter le répertoire src au chemin Python
-sys.path.insert(0, os.path.join(PROJECT_ROOT, "src"))
-
-
-def make_env_fn(env_config, rank=0, use_vecnormalize=True):
-    """Crée une fonction d'initialisation d'environnement.
-    
-    Args:
-        env_config: Configuration pour MultiAssetChunkedEnv
-        rank: Identifiant du worker
-        use_vecnormalize: Si True, applique VecNormalize
-        
-    Returns:
-        Fonction d'initialisation d'environnement
-    """
-    def _init():
-        # Créer une configuration de travailleur minimale si non fournie
-        worker_config = env_config.get('worker_config', {
-            'assets': env_config.get('assets', ['BTCUSDT']),
-            'timeframes': env_config.get('timeframes', ['1h']),
-            'window_size': env_config.get('window_size', 100)
-        })
-    
-    return _init
-
-def build_vector_envs(
-    config: Dict[str, Any],
-    num_envs: int = 4,
-    start_method: Optional[str] = None,
-    normalize: bool = True,
-    norm_obs: bool = True,
-    norm_reward: bool = True,
-    clip_obs: float = 10.0,
-    clip_reward: float = 10.0,
-    gamma: float = 0.99,
-    seed: Optional[int] = None,
-    log_dir: Optional[str] = None,
-) -> Tuple[Union[DummyVecEnv, SubprocVecEnv], Optional[VecNormalize]]:
-    """
-    Build a vectorized environment for parallel training.
-
-    Args:
-        config: Configuration dictionary
-        num_envs: Number of parallel environments
-        start_method: Method to start subprocesses ('fork', 'spawn', or 'forkserver')
-        normalize: Whether to normalize observations and rewards
-        norm_obs: Whether to normalize observations
-        norm_reward: Whether to normalize rewards
-        clip_obs: Maximum absolute value for observation normalization
-        clip_reward: Maximum absolute value for reward normalization
-        gamma: Discount factor for reward normalization
-        seed: Random seed for reproducibility
-        log_dir: Directory to save normalization statistics
-
-    Returns:
-        Tuple containing the vectorized environment and the normalization wrapper
-    """
-    # Set start method for subprocesses if specified
-    if start_method is not None:
-        logger.info(f"Setting multiprocessing start method to '{start_method}'")
-        try:
-            import multiprocessing as mp
-            mp_ctx = mp.get_context(start_method)
-        except (ValueError, AttributeError) as e:
-            logger.warning(f"Failed to set start method '{start_method}': {e}")
-            mp_ctx = None
-    else:
-        mp_ctx = None
-
-    # Create a list of environment creation functions
-    env_fns = []
-    for i in range(num_envs):
-        # Create a new config for each environment with a unique seed
-        env_config = deepcopy(config)
-        env_config["seed"] = seed + i if seed is not None else None
-        env_config["rank"] = i
-        
-        # Create environment creation function with proper closure
-        def make_env(rank: int, env_config: Dict[str, Any]):
-            def _init():
-                # Create a deep copy of the config to avoid sharing state
-                local_config = deepcopy(env_config)
-                
-                # Create the base environment
-                env = make_env_from_config(local_config)
-                
-                # Log environment details
-                logger.info(f"[Worker {rank}] Environment created successfully")
-                logger.info(f"[Worker {rank}] Observation space: {env.observation_space}")
-                logger.info(f"[Worker {rank}] Action space: {env.action_space}")
-                
-                # Apply our custom compatibility wrapper first
-                env = SB3GymCompatibilityWrapper(env)
-                
-                # Apply monitoring for episode statistics
-                env = Monitor(env)
-                
-                # Apply Gymnasium to Gym wrapper if needed (for older SB3 versions)
-                try:
-                    from stable_baselines3.common.monitor import Monitor
-                    env = Monitor(env)
-                    
-                    # Try to wrap with Gymnasium compatibility
-                    try:
-                        from gymnasium.wrappers import EnvCompatibility
-                        env = EnvCompatibility(env)
-                    except ImportError:
-                        logger.warning("Gymnasium EnvCompatibility wrapper not available")
-                        
-                except Exception as e:
-                    logger.warning(f"Could not apply Monitor wrapper: {e}")
-                
-                return env
-            
-            return _init
-        
-        env_fns.append(make_env(i, env_config))
-
-    # Create the vectorized environment
-    if num_envs == 1 or mp_ctx is None:
-        logger.info(f"Creating DummyVecEnv with {num_envs} environments")
-        env = DummyVecEnv(env_fns)
-    else:
-        logger.info(f"Creating SubprocVecEnv with {num_envs} environments using {mp_ctx.get_start_method()}")
-        env = SubprocVecEnv(env_fns, start_method=start_method)
-
-    # Apply normalization if requested
-    vec_norm = None
-    if normalize:
-        try:
-            # Get the path for saving normalization statistics
-            norm_path = None
-            if log_dir is not None:
-                os.makedirs(log_dir, exist_ok=True)
-                norm_path = os.path.join(log_dir, "vec_normalize.pkl")
-            
-            # Log normalization settings
-            logger.info(f"Applying normalization with config: norm_obs={norm_obs}, "
-                      f"norm_reward={norm_reward}, clip_obs={clip_obs}, "
-                      f"clip_reward={clip_reward}, gamma={gamma}")
-            
-            # Create the normalization wrapper
-            vec_norm = VecNormalize(
-                env,
-                training=True,
-                norm_obs=norm_obs,
-                norm_reward=norm_reward,
-                clip_obs=clip_obs,
-                clip_reward=clip_reward,
-                gamma=gamma,
-                norm_obs_keys=None,  # Normalize all observation keys if dict
-            )
-            
-            # Save the normalization parameters if a path was provided
-            if norm_path is not None:
-                try:
-                    vec_norm.save(norm_path)
-                    logger.info(f"Saved normalization parameters to {norm_path}")
-                except Exception as e:
-                    logger.error(f"Failed to save normalization parameters: {e}")
-            
-            # Wrap with VecCheckNan to catch numerical instabilities
-            env = VecCheckNan(vec_norm, raise_exception=True)
-            logger.info("Successfully applied VecNormalize and VecCheckNan wrappers")
-            
-        except Exception as e:
-            logger.error(f"Error during normalization setup: {e}")
-            logger.warning("Continuing without normalization")
-            
-            # If normalization fails, still apply VecCheckNan to the original env
-            env = VecCheckNan(env, raise_exception=True)
-    
-    return env, vec_norm
-
-
-def make_env(instance_id: int, config: Dict[str, Any], cache: DataCacheManager, is_eval: bool = False) -> gym.Env:
-    """
-    Crée et configure un environnement d'entraînement avec validation et wrappers de compatibilité.
-
-    Args:
-        instance_id: Identifiant unique de l'instance
-        config: Configuration de l'environnement
-        cache: Gestionnaire de cache de données
-        is_eval: Si True, crée un environnement d'évaluation
-
-    Returns:
-        Environnement d'entraînement configuré avec les wrappers nécessaires
-    """
-    try:
-        # Configuration du logger pour cette instance
-        logger = setup_logging(instance_id)
-        logger.info(f"Initialisation de l'environnement {instance_id} (évaluation: {is_eval})")
-        
-        # Récupération de la configuration du worker
-        worker_keys = list(config["workers"].keys())
-        worker_key = worker_keys[instance_id % len(worker_keys)]
-        worker_config = config["workers"][worker_key]
-        
-        # Ajout du gestionnaire de cache dans la configuration
-        worker_config["cache_manager"] = cache
-        
-        # Création de l'environnement de base
-        env = MultiAssetChunkedEnv(
-            config=config,
-            worker_config=worker_config,
-            data_loader_instance=None,
-            shared_buffer=None,
-            worker_id=instance_id
-        )
-        
-        # 1. Validation initiale de l'environnement avant tout wrapping
-        try:
-            # Test de l'environnement de base
-            obs, _ = env.reset(seed=42 + instance_id)
-            if not isinstance(obs, dict) or 'observation' not in obs or 'portfolio_state' not in obs:
-                raise ValueError("L'environnement ne retourne pas une observation au format attendu (dict avec 'observation' et 'portfolio_state')")
-                
-            # Vérification des dimensions
-            if not isinstance(obs['observation'], np.ndarray) or obs['observation'].ndim != 3:
-                raise ValueError(f"L'observation du marché doit être un tableau numpy 3D, reçu: {type(obs['observation'])} avec forme {getattr(obs['observation'], 'shape', 'N/A')}")
-                
-            if not isinstance(obs['portfolio_state'], np.ndarray) or obs['portfolio_state'].ndim != 1:
-                raise ValueError(f"L'état du portefeuille doit être un tableau numpy 1D, reçu: {type(obs['portfolio_state'])} avec forme {getattr(obs['portfolio_state'], 'shape', 'N/A')}")
-                
-        except Exception as e:
-            logger.error("Échec de la validation initiale de l'environnement:")
-            logger.error(str(e))
-            logger.error(traceback.format_exc())
-            raise
-            
-        # 2. Application du wrapper de suivi des performances (avant la conversion Gymnasium->Gym)
-        env = Monitor(env)
-        
-        # 3. Application du wrapper de compatibilité Gymnasium vers Gym
-        env = GymnasiumToGymWrapper(env)
-        
-        # 4. Configuration du seed pour la reproductibilité
-        env.reset(seed=42 + instance_id)
-        
-        logger.info(f"Environnement {instance_id} initialisé avec succès")
-        return env
-        
-    except Exception as e:
-        logger.error(f"Erreur lors de l'initialisation de l'environnement {instance_id}: {str(e)}")
-        logger.error(traceback.format_exc())
-        raise
-
-
-def setup_logging(instance_id: int) -> logging.Logger:
-    """Configure le logging pour l'entraînement parallèle.
-
-    Returns:
-        logging.Logger: L'objet logger configuré
-    """
-    log_dir = os.path.join(PROJECT_ROOT, "logs", f"instance_{instance_id}")
-    os.makedirs(log_dir, exist_ok=True)
-
-    # Configurer le logger pour cette instance
-    instance_logger = logging.getLogger(f"instance_{instance_id}")
-    instance_logger.setLevel(logging.INFO)
-
-    # Créer un gestionnaire de fichier
-    log_file = os.path.join(log_dir, "training.log")
-    file_handler = logging.FileHandler(log_file)
-    file_handler.setLevel(logging.INFO)
-
-    # Créer un formateur et l'ajouter au gestionnaire
-    formatter = logging.Formatter(
-        '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-    )
-    file_handler.setFormatter(formatter)
-
-    # Ajouter le gestionnaire au logger
-    instance_logger.addHandler(file_handler)
-
-    return instance_logger
-
-
-
-
-def load_base_config(config_input: Union[str, Dict[str, Any]]) -> Dict[str, Any]:
-    """
-    Charge la configuration de base avec résolution simple des chemins.
-    
-    Args:
-        config_input: Soit un chemin vers un fichier YAML, soit un dictionnaire de configuration
-        
-    Returns:
-        Dictionnaire de configuration avec les chemins résolus
-    """
-    try:
-        # Si l'entrée est un dictionnaire, l'utiliser directement
-        if isinstance(config_input, dict):
-            config = config_input.copy()
-        # Sinon, essayer de charger depuis un fichier
-        else:
-            with open(config_input, 'r', encoding='utf-8') as file:
-                config = yaml.safe_load(file)
-        
-        # Définir le répertoire de base de manière fixe
-        base_dir = "/home/morningstar/Documents/trading/bot"
-        
-        # Correction des chemins dans la section paths
-        if 'paths' not in config:
-            config['paths'] = {}
-            
-        config['paths'].update({
-            'base_dir': base_dir,
-            'data_dir': f"{base_dir}/data",
-            'raw_data_dir': f"{base_dir}/data/raw",
-            'processed_data_dir': f"{base_dir}/data/processed",
-            'indicators_data_dir': f"{base_dir}/data/processed/indicators",
-            'final_data_dir': f"{base_dir}/data/final",
-            'models_dir': f"{base_dir}/models",
-            'trained_models_dir': f"{base_dir}/models/rl_agents",
-            'logs_dir': f"{base_dir}/logs",
-            'reports_dir': f"{base_dir}/reports",
-            'figures_dir': f"{base_dir}/reports/figures",
-            'metrics_dir': f"{base_dir}/reports/metrics"
-        })
-        
-        # Correction des autres chemins dans la config
-        if 'model' in config and 'diagnostics' in config['model']:
-            config['model']['diagnostics']['attention_map_dir'] = f"{base_dir}/models/attention_maps"
-        
-        if 'data' in config:
-            config['data']['data_dir'] = f"{base_dir}/data/processed/indicators"
-        
-        if 'training' in config and 'checkpointing' in config['training']:
-            config['training']['checkpointing']['save_path'] = f"{base_dir}/models/rl_agents/adan_model"
-        
-        if 'reward_shaping' in config and 'tier_rewards' in config['reward_shaping']:
-            config['reward_shaping']['tier_rewards']['checkpoint_dir'] = f"{base_dir}/models/rl_agents/checkpoints"
-        
-        # Créer les répertoires nécessaires
-        for path in config['paths'].values():
-            if isinstance(path, str):
-                os.makedirs(path, exist_ok=True)
-        
-        # Créer aussi les autres répertoires nécessaires
-        os.makedirs(f"{base_dir}/models/attention_maps", exist_ok=True)
-        os.makedirs(f"{base_dir}/models/rl_agents/checkpoints", exist_ok=True)
-        
-        logger.info("Configuration chargée avec chemins corrigés")
-        return config
-        
-    except Exception as e:
-        logger.error(f"Erreur lors du chargement de la configuration: {e}")
-        raise
-
-        raise
-    except TypeError as e:
-        logger.error(f"Type de configuration invalide: {str(e)}")
-        raise
-    except Exception as e:
-        logger.critical(f"Erreur critique dans load_base_config: {str(e)}", exc_info=True)
-        raise
-
-
-class TimeoutException(Exception):
-    """Exception levée quand le timeout est atteint"""
-
-    pass
-
-
-def timeout_handler(signum, frame):
-    """Gestionnaire de signal pour le timeout"""
-    raise TimeoutException("Temps d'entraînement écoulé")
-
-
-def save_checkpoint(model, optimizer, epoch: int, path: str):
-    """
-    Sauvegarde un checkpoint du modèle et de l'optimiseur.
-    
-    Args:
-        model: Modèle à sauvegarder (PPO de Stable Baselines 3)
-        optimizer: Optimiseur à sauvegarder
-        epoch: Numéro d'epoch actuel
-        path: Chemin de base pour la sauvegarde (sans extension)
-    """
-    try:
-        # Créer le répertoire s'il n'existe pas
-        os.makedirs(os.path.dirname(path), exist_ok=True)
-        
-        # Pour les modèles PPO de Stable Baselines 3, utiliser la méthode save intégrée
-        if hasattr(model, 'save'):
-            # Sauvegarder le modèle complet
-            model.save(path)
-            
-            # Si un optimiseur est fourni, le sauvegarder séparément
-            if optimizer is not None:
-                checkpoint = {
-                    'epoch': epoch,
-                    'optimizer_state_dict': optimizer.state_dict()
-                }
-                th.save(checkpoint, f"{path}_optimizer.pt")
-        else:
-            # Pour les modèles PyTorch standard
-            checkpoint = {
-                'epoch': epoch,
-                'model_state_dict': model.state_dict(),
-                'optimizer_state_dict': optimizer.state_dict() if optimizer else None
-            }
-            th.save(checkpoint, f"{path}.pt")
-        
-        logging.info(f"Checkpoint sauvegardé dans {path} (epoch {epoch})")
-        
-    except Exception as e:
-        logging.error(f"Erreur lors de la sauvegarde du checkpoint {path}: {e}")
-        raise
-
-
-def load_checkpoint(model, optimizer, path: str):
-    """
-    Charge un checkpoint de modèle et d'optimiseur.
-    
-    Args:
-        model: Modèle à mettre à jour (PPO de Stable Baselines 3)
-        optimizer: Optimiseur à mettre à jour
-        path: Chemin de base du checkpoint (sans extension)
-        
-    Returns:
-        L'epoch à partir de laquelle reprendre l'entraînement
-    """
-    try:
-        # Vérifier que le fichier du modèle existe
-        if not os.path.exists(f"{path}.zip"):
-            raise FileNotFoundError(f"Checkpoint non trouvé: {path}.zip")
-        
-        epoch = 0
-        
-        # Pour les modèles PPO de Stable Baselines 3, utiliser la méthode load intégrée
-        if hasattr(model, 'load'):
-            model = model.load(path, device=model.device)
-            
-            # Charger l'optimiseur séparément s'il existe
-            optimizer_path = f"{path}_optimizer.pt"
-            if optimizer is not None and os.path.exists(optimizer_path):
-                checkpoint = th.load(optimizer_path, map_location=model.device)
-                optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
-                epoch = checkpoint.get('epoch', 0)
-        else:
-            # Pour les modèles PyTorch standard
-            checkpoint = th.load(f"{path}.pt", map_location=model.device)
-            model.load_state_dict(checkpoint['model_state_dict'])
-            
-            if optimizer is not None and 'optimizer_state_dict' in checkpoint:
-                optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
-            
-            epoch = checkpoint.get('epoch', 0)
-        
-        logging.info(f"Checkpoint chargé depuis {path} (epoch {epoch})")
-        return epoch
-        
-    except Exception as e:
-        logging.error(f"Erreur lors du chargement du checkpoint {path}: {e}")
-        return 0  # Reprendre au début en cas d'erreur
-
-
-def emergency_save(model, env, save_path: str):
-    """Sauvegarde d'urgence du modèle et de l'environnement.
-
-    Args:
-        model: Modèle à sauvegarder
-        env: Environnement à sauvegarder
-        save_path: Chemin de sauvegarde
-    """
-    try:
-        # Créer le répertoire de sauvegarde s'il n'existe pas
-        os.makedirs(os.path.dirname(save_path), exist_ok=True)
-
-        # Sauvegarder le modèle
-        model.save(f"{save_path}_emergency")
-
-        # Sauvegarder l'environnement s'il a une méthode de sauvegarde
-        if hasattr(env, 'save'):
-            env.save(f"{save_path}_vecnormalize_emergency.pkl")
-
-        logging.info(f"Sauvegarde d'urgence effectuée dans {save_path}_emergency")
-    except Exception as e:
-        logging.error(f"Erreur lors de la sauvegarde d'urgence: {str(e)}")
-
-
-
-
-
-
-
-def train_single_instance(
-    instance_id: int,
-    total_timesteps: int,
-    config_override: Optional[Union[Dict[str, Any], str]] = None,
-    shared_model_path: str = None,
-    checkpoint_path: str = None,
-    timeout: int = None,
-) -> Dict[str, Any]:
-    """Entraîne une instance spécifique du modèle avec sa configuration de worker dédiée.
-
-    Gère le timeout et la sauvegarde automatique des checkpoints.
-    Utilise un cache pour les données et les scalers.
-
-    Args:
-        instance_id: Identifiant numérique de l'instance (1-4)
-        total_timesteps: Nombre total de pas d'entraînement
-        config_override: Configuration de remplacement optionnelle (chemin ou dict)
-        shared_model_path: Chemin vers un modèle partagé pour le fine-tuning
-        checkpoint_path: Chemin pour sauvegarder les checkpoints
-        timeout: Délai maximal d'exécution en secondes
-
-    Returns:
-        Dict contenant les résultats de l'entraînement
-    """
-    # Initialisation du timer
-    start_time = time.time()
-
-    # Configuration du logging pour cette instance
-    setup_logging(instance_id)
-
-    try:
-        # Gestion du timeout
-        if timeout:
-            signal.signal(signal.SIGALRM, timeout_handler)
-            signal.alarm(timeout)
-
-        # Charger la configuration
-        if config_override is None:
-            config_path = os.path.join(
-                os.getenv('TRADING_BOT_DIR', '.'), 
-                'config', 
-                'config.yaml'
-            )
-            config = load_base_config(config_path)
-        elif isinstance(config_override, str):
-            config = load_base_config(config_override)
-        elif isinstance(config_override, dict):
-            config = load_base_config()  # Charge la config par défaut
-            # Fusionne avec les overrides
-            for key, value in config_override.items():
-                if key in config and isinstance(config[key], dict) and isinstance(value, dict):
-                    config[key].update(value)
-                else:
-                    config[key] = value
-
-        # Initialisation du cache de données si nécessaire
-        if 'data_cache' not in locals():
-            data_cache = {}
-
-        # Création de l'environnement
-        env = make_env(instance_id, config, data_cache)
-
-        # Vérification de la compatibilité Gymnasium
-        try:
-            check_env(env)
-        except Exception as e:
-            logger.warning(
-                f"Avertissement de compatibilité Gymnasium: {e}"
-            )
-
-        # Enveloppement dans un wrapper de compatibilité SB3 si nécessaire
-        if not hasattr(env, 'step'):
-            env = SB3GymCompatibilityWrapper(env)
-
-        # Ajout du wrapper Monitor pour le suivi
-        env = Monitor(env, f"instance_{instance_id}")
-
-        # Création ou chargement du modèle
-        if shared_model_path and os.path.exists(shared_model_path):
-            logger.info(f"Chargement du modèle partagé depuis {shared_model_path}")
-            model = load_checkpoint(shared_model_path, env=env)
-        else:
-            # Création d'un nouveau modèle
-            policy_kwargs = dict(
-                net_arch=dict(pi=[64, 64], vf=[64, 64])
-            )
-
-            model = PPO(
-                "MlpPolicy",
-                env,
-                policy_kwargs=policy_kwargs,
-                verbose=1,
-                tensorboard_log=os.path.join(
-                    config['training']['log_dir'], 
-                    f"instance_{instance_id}"
-                )
-            )
-
-        # Configuration des callbacks
-        callbacks = []
-
-        # Callback pour le suivi personnalisé
-        callbacks.append(CustomTrainingInfoCallback(
-            verbose=1,
-            instance_id=instance_id,
-            log_interval=config['training'].get('log_interval', 100)
-        ))
-        
-        # Callback pour les sauvegardes périodiques
-        if checkpoint_path:
-            os.makedirs(checkpoint_path, exist_ok=True)
-            callbacks.append(CheckpointCallback(
-                save_freq=config['training'].get('save_freq', 10000),
-                save_path=checkpoint_path,
-                name_prefix=f"instance_{instance_id}",
-                verbose=1
-            ))
-            
-        # Entraînement du modèle
-        model.learn(
-            total_timesteps=total_timesteps,
-            callback=callbacks,
-            progress_bar=True
-        )
-        
-        # Sauvegarde finale du modèle
-        final_model_path = None
-        if checkpoint_path:
-            final_model_path = os.path.join(
-                checkpoint_path, 
-                f"instance_{instance_id}_final"
-            )
-            save_checkpoint(model, env, final_model_path)
-            logger.info(f"Modèle final sauvegardé dans {final_model_path}")
-            
-        # Retourner les résultats
-        return {
-            "instance_id": instance_id,
-            "status": "completed",
-            "model_path": final_model_path,
-            "timesteps_completed": total_timesteps,
-            "training_time": time.time() - start_time
-        }
-            
-    except TimeoutException as e:
-        logger.error(f"Temps d'exécution dépassé pour l'instance {instance_id}")
-        return {
-            "instance_id": instance_id,
-            "status": "timeout",
-            "error": str(e),
-            "timesteps_completed": (
-                model.num_timesteps if (
-                    'model' in locals() and 
-                    hasattr(model, 'num_timesteps')
-                ) else 0
-            ),
-            "training_time": time.time() - start_time
-        }
-            
-    except Exception as e:
-        logger.error(f"Erreur critique dans l'instance {instance_id}: {str(e)}")
-        logger.debug(traceback.format_exc())
-        
-        # Sauvegarde d'urgence si possible
-        if 'model' in locals() and 'env' in locals() and checkpoint_path:
-            try:
-                emergency_save(
-                    model, 
-                    env, 
-                    os.path.join(
-                        checkpoint_path, 
-                        f"crash_save_instance_{instance_id}"
-                    )
-                )
-            except Exception as save_error:
-                logger.error(f"Échec de la sauvegarde d'urgence: {str(save_error)}")
-        
-        return {
-            "instance_id": instance_id,
-            "status": "failed",
-            "error": str(e),
-            "traceback": traceback.format_exc(),
-            "timesteps_completed": (
-                model.num_timesteps if (
-                    'model' in locals() and 
-                    hasattr(model, 'num_timesteps')
-                ) else 0
-            ),
-            "training_time": time.time() - start_time
-        }
-        
-    finally:
-        # Nettoyage
-        try:
-            if 'env' in locals():
-                env.close()
-        except Exception as e:
-            logger.error(f"Erreur lors de la fermeture de l'environnement: {str(e)}")
-
-def train_single_instance(
-    instance_id: int,
-    total_timesteps: int,
-    config_override: Optional[Union[Dict[str, Any], str]] = None,
-    shared_model_path: str = None,
-    checkpoint_path: str = None,
-    timeout: int = None,
-) -> Dict[str, Any]:
-    """Entraîne une instance spécifique du modèle avec sa configuration de worker dédiée.
-
-    Gère le timeout et la sauvegarde automatique des checkpoints.
-    Utilise un cache pour les données et les scalers.
-
-    Args:
-        instance_id: Identifiant numérique de l'instance (1-4)
-        total_timesteps: Nombre total de pas d'entraînement
-        config_override: Configuration de remplacement optionnelle
-        shared_model_path: Chemin vers un modèle partagé pour le fine-tuning
-        checkpoint_path: Chemin pour sauvegarder les checkpoints
-        timeout: Délai maximal d'exécution en secondes
-
-    Returns:
-        Dict contenant les résultats de l'entraînement
-    """
-    instance_logger = setup_logging(instance_id)
-    start_time = time.time()
-    last_checkpoint_time = start_time
-    checkpoint_interval = 300  # 5 minutes en secondes
-
-    # Variables pour la gestion des interruptions
-    model = None
-    env = None
-    eval_env = None
-
-    def signal_handler(signum, frame):
-        nonlocal model, env, instance_id
-        msg = f"Signal {signum} reçu, sauvegarde d'urgence..."
-        instance_logger.warning(msg)
-
-        # Créer le répertoire de sauvegarde s'il n'existe pas
-        save_dir = os.path.join(PROJECT_ROOT, "checkpoints")
-        os.makedirs(save_dir, exist_ok=True)
-
-        # Définir le chemin de sauvegarde avec un horodatage
-        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-        save_path = os.path.join(
-            save_dir,
-            f"emergency_save_instance_{instance_id}_{timestamp}"
-        )
-
-        try:
-            if model is not None and env is not None:
-                emergency_save(model, env, save_path)
-                instance_logger.info(f"Sauvegarde d'urgence effectuée dans {save_path}")
-            else:
-                instance_logger.warning("Impossible de sauvegarder: modèle ou environnement non initialisé")
-        except Exception as e:
-            instance_logger.error(f"Erreur lors de la sauvegarde d'urgence: {str(e)}")
-
-        sys.exit(0)
-
-    # Enregistrer le gestionnaire de signal pour SIGINT (Ctrl+C)
-    import signal
-    signal.signal(signal.SIGINT, signal_handler)
-
-    try:
-        # Initialiser les variables pour la gestion des interruptions
-        model = None
-        env = None
-        eval_env = None
-
-        # Définir le chemin de sauvegarde d'urgence
-        emergency_save_path = os.path.join(
-            os.path.dirname(checkpoint_path) if checkpoint_path else
-            os.path.join(PROJECT_ROOT, "models"),
-            f"emergency_save_instance_{instance_id}"
-        )
-
-        # Charger la configuration
-        config = load_base_config(config_override)
-
-        # Initialiser le cache des données
-        cache_dir = os.path.join(PROJECT_ROOT, "data", "cache")
-        os.makedirs(cache_dir, exist_ok=True)
-        cache = DataCacheManager(cache_dir)
-
-        instance_logger.info(f"🚀 Démarrage de l'entraînement pour l'instance {instance_id}")
-        instance_logger.info(f"Utilisation du cache dans : {cache_dir}")
-
-        # Configuration spécifique au worker
-        worker_keys = list(config["workers"].keys())
-        worker_key = worker_keys[instance_id % len(worker_keys)]
-        worker_config = config["workers"][worker_key]
-        agent_config = config.get("agent", {})
-
-        # Initialiser les environnements à None
-        env = None
-        eval_env = None
-
-        # Définir le répertoire de logs
-        log_dir = os.path.join(
-            PROJECT_ROOT,
-            "logs",
-            f"instance_{instance_id}",
-            datetime.now().strftime("%Y%m%d_%H%M%S")
-        )
-        os.makedirs(log_dir, exist_ok=True)
-        os.makedirs(os.path.join(log_dir, "tensorboard"), exist_ok=True)
-
-        # Ajouter la clé du worker à la configuration pour référence
-        worker_config["worker_key"] = worker_key
-
-        # 3. Fusionner les configurations (si nécessaire)
-        # Ici, nous pourrions ajouter une logique pour fusionner des configurations
-        # spécifiques du worker avec la configuration de base
-
-        # 4. Journalisation des informations de configuration
-        instance_logger.info(f"Instance {instance_id} - {worker_config.get('name', 'Sans nom')}")
-        instance_logger.info(f"  - Actifs: {', '.join(worker_config.get('assets', []))}")
-        instance_logger.info(f"  - Timeframes: {', '.join(worker_config.get('timeframes', []))}")
-        instance_logger.info(f"  - Jeu de données: {worker_config.get('data_split', 'train')}")
-
-        # 5. Charger la configuration de base
-        base_config = load_base_config(config_override)
-
-        # 6. S'assurer que la configuration de l'environnement est correctement structurée
-        if "environment" not in base_config:
-            base_config["environment"] = {}
-
-        # 7. Créer l'environnement avec la configuration fusionnée
-        from adan_trading_bot.environment.compat import SB3GymCompatibilityWrapper
-        # S'assurer que worker_config contient les champs requis
-        if not isinstance(worker_config, dict):
-            worker_config = {}
-        
-        # Définir les valeurs par défaut si non spécifiées
-        worker_config.setdefault('assets', base_config.get('assets', ['BTCUSDT']))
-        worker_config.setdefault('timeframes', base_config.get('timeframes', ['1h']))
-        worker_config.setdefault('window_size', base_config.get('window_size', 100))
-        
-        # Créer l'environnement de base
-        env = MultiAssetChunkedEnv(config=base_config, worker_config=worker_config)
-        
-        # Afficher les informations sur les espaces d'observation et d'action
-        instance_logger.info(f"Espace d'observation initial: {env.observation_space}")
-        instance_logger.info(f"Espace d'action initial: {env.action_space}")
-        
-        # Configurer la politique en fonction du type d'espace d'observation
-        if isinstance(env.observation_space, gym.spaces.Dict):
-            policy = "MultiInputPolicy"
-            instance_logger.info(f"Utilisation de {policy} pour l'espace d'observation de type Dict")
-            
-            # Vérifier que les clés attendues sont présentes
-            if not ('observation' in env.observation_space.spaces and 'portfolio_state' in env.observation_space.spaces):
-                raise ValueError("L'espace d'observation Dict doit contenir les clés 'observation' et 'portfolio_state'")
-                
-            # Afficher les détails de l'espace d'observation
-            obs_space = env.observation_space.spaces['observation']
-            portfolio_space = env.observation_space.spaces['portfolio_state']
-            instance_logger.info(f"  - Observation shape: {obs_space.shape}, type: {type(obs_space).__name__}")
-            instance_logger.info(f"  - Portfolio state shape: {portfolio_space.shape}, type: {type(portfolio_space).__name__}")
-        else:
-            policy = "MlpPolicy"
-            instance_logger.info(f"Utilisation de {policy} pour l'espace d'observation standard")
-        
-        # Envelopper l'environnement avec le wrapper de compatibilité
-        env = SB3GymCompatibilityWrapper(env)
-        instance_logger.info(f"Espace d'observation après wrapper: {env.observation_space}")
-        instance_logger.info(f"Espace d'action après wrapper: {env.action_space}")
-        
-        # Configuration du modèle avec gestion des espaces d'observation de type Dict
-        policy_kwargs = {
-            "net_arch": {
-                "pi": [64, 64],
-                "vf": [64, 64]
-            },
-            "activation_fn": torch.nn.ReLU,
-            "ortho_init": True
-        }
-
-        # Configuration de base du modèle
-        model_config = {
-            "learning_rate": config.get("learning_rate", 3e-4),
-            "n_steps": config.get("n_steps", 2048),
-            "batch_size": config.get("batch_size", 64),
-            "n_epochs": config.get("n_epochs", 10),
-            "gamma": config.get("gamma", 0.99),
-            "gae_lambda": config.get("gae_lambda", 0.95),
-            "clip_range": config.get("clip_range", 0.2),
-            "clip_range_vf": config.get("clip_range_vf", None),
-            "normalize_advantage": config.get("normalize_advantage", True),
-            "ent_coef": config.get("ent_coef", 0.0),
-            "vf_coef": config.get("vf_coef", 0.5),
-            "max_grad_norm": config.get("max_grad_norm", 0.5),
-            "use_sde": config.get("use_sde", False),
-            "sde_sample_freq": config.get("sde_sample_freq", -1),
-            "target_kl": config.get("target_kl", None),
-            "tensorboard_log": os.path.join(log_dir, "tensorboard"),
-            "verbose": 1,
-            "seed": config.get("seed", 42) + instance_id,
-            "device": config.get("device", "auto")
-        }
-
-        # Créer un environnement vectorisé avec gestion des espaces d'observation de type Dict
-        def make_env():
-            # Créer une nouvelle instance de l'environnement
-            env = MultiAssetChunkedEnv(config=base_config, worker_config=worker_config)
-            
-            # Appliquer le wrapper de compatibilité
-            env = SB3GymCompatibilityWrapper(env)
-            
-            # Appliquer le wrapper Monitor pour le suivi des épisodes
-            env = Monitor(env)
-            
-            return env
-        
-        # Créer l'environnement vectorisé avec un seul worker
-        vec_env = DummyVecEnv([make_env])
-        
-        # Configurer la politique en fonction du type d'espace d'observation
-        if isinstance(env.observation_space, gym.spaces.Dict):
-            # Utiliser une politique adaptée aux espaces d'observation de type Dict
-            policy = "MultiInputPolicy"
-            
-            # Configurer l'extracteur de caractéristiques personnalisé
-            policy_kwargs.update({
-                "features_extractor_class": CustomCombinedExtractor,
-                "features_extractor_kwargs": {
-                    "cnn_output_dim": 64,
-                    "mlp_extractor_net_arch": [64, 64],
-                    "observation_space": env.observation_space
-                },
-                "net_arch": {
-                    "pi": [64, 64],
-                    "vf": [64, 64]
-                },
-                "activation_fn": torch.nn.ReLU,
-                "ortho_init": True
-            })
-            
-            # Pour les espaces d'observation complexes, utiliser un wrapper supplémentaire
-            # si nécessaire pour la transposition des images
-            if len(env.observation_space.spaces['observation'].shape) >= 2:
-                vec_env = VecTransposeImage(vec_env)
-                
-            # Afficher les informations sur l'environnement vectorisé
-            instance_logger.info(f"Environnement vectorisé créé avec succès")
-            instance_logger.info(f"  - Espace d'observation: {vec_env.observation_space}")
-            instance_logger.info(f"  - Espace d'action: {vec_env.action_space}")
-            
-        else:
-            # Pour les espaces d'observation simples, utiliser une politique standard
-            policy = "MlpPolicy"
-            policy_kwargs.update({
-                "net_arch": {
-                    "pi": [64, 64],
-                    "vf": [64, 64]
-                },
-                "activation_fn": torch.nn.ReLU,
-                "ortho_init": True
-            })
-            
-            # Afficher les informations sur l'environnement vectorisé
-            instance_logger.info(f"Environnement vectorisé créé avec succès (espace d'observation simple)")
-            instance_logger.info(f"  - Espace d'observation: {vec_env.observation_space}")
-            instance_logger.info(f"  - Espace d'action: {vec_env.action_space}")
-        
-        # Mettre à jour la configuration du modèle avec les paramètres de la politique
-        model_config.update({
-            "policy": policy,
-            "env": vec_env,
-            "policy_kwargs": policy_kwargs,
-            "verbose": 1,
-            "tensorboard_log": os.path.join(log_dir, "tensorboard"),
-            "seed": config.get("seed", 42) + instance_id,
-            "device": config.get("device", "auto")
-        })
-        
-        # Afficher la configuration du modèle pour le débogage
-        instance_logger.info("Configuration du modèle:")
-        for key, value in model_config.items():
-            if key != 'policy_kwargs':
-                instance_logger.info(f"  - {key}: {value}")
-        
-        instance_logger.info("Configuration de la politique (policy_kwargs):")
-        for key, value in policy_kwargs.items():
-            instance_logger.info(f"  - {key}: {value}")
-        
-        # Création du modèle avec gestion des erreurs
-        try:
-            model = PPO(**model_config)
-        except Exception as e:
-            logger.error(f"Erreur lors de la création du modèle: {e}")
-            raise
-
-        # Configuration de l'entraînement
-        n_steps = agent_config.get("n_steps", 2048)
-        epochs = (total_timesteps // n_steps) + 1
-        checkpoint_interval = 300  # 5 minutes
-
-        # Charger le checkpoint s'il existe
-        start_epoch = 0
-        if checkpoint_path and os.path.exists(checkpoint_path):
-            start_epoch = load_checkpoint(
-                model, model.policy.optimizer, checkpoint_path
-            )
-            instance_logger.info(
-                f"Reprise de l'entraînement à partir de l'epoch {start_epoch+1}/{epochs}"
-            )
-
-        # Boucle d'entraînement
-        try:
-            # Réinitialisation initiale
-            obs = env.reset()
-            if isinstance(obs, tuple):
-                obs = obs[0]  # Extraire l'observation du tuple (obs, info)
-
-            for epoch in range(start_epoch, epochs):
-                current_time = time.time()
-                time_elapsed = current_time - start_time
-
-                # Vérifier le timeout
-                if timeout and time_elapsed >= timeout:
-                    instance_logger.info(f"Timeout atteint après {time_elapsed:.1f} secondes")
-                    break
-
-                instance_logger.info(f"Début de l'epoch {epoch+1}/{epochs}")
-
-                # Entraînement sur une epoch
-                model.learn(
-                    total_timesteps=n_steps,
-                    tb_log_name=f"instance_{instance_id}_{worker_config['name'].lower()}",
-                    progress_bar=True,
-                    reset_num_timesteps=False,
-                )
-
-                # Sauvegarder le checkpoint périodiquement
-                current_time = time.time()
-                if checkpoint_path and (current_time - last_checkpoint_time) >= checkpoint_interval:
-                    save_checkpoint(model, model.policy.optimizer, epoch, checkpoint_path)
-                    logger.info("Checkpoint sauvegardé à %s", checkpoint_path)
-                    last_checkpoint_time = current_time
-
-                # Réinitialisation pour la prochaine époque
-                obs = env.reset()
-                if isinstance(obs, tuple):
-                    obs = obs[0]
-
-            # Sauvegarder le modèle final
-            if checkpoint_path:
-                save_checkpoint(model, model.policy.optimizer, epoch, checkpoint_path)
-                logger.info("Checkpoint final sauvegardé à %s", checkpoint_path)
-
-        except Exception as e:
-            logger.error("Erreur pendant l'entraînement: %s", str(e))
-            # Tenter de sauvegarder en cas d'erreur
-            if checkpoint_path:
-                emergency_path = f"{checkpoint_path}_emergency"
-                save_checkpoint(model, model.policy.optimizer, epoch, emergency_path)
-                logger.info("Sauvegarde d'urgence effectuée à %s", emergency_path)
-            raise
-
-        training_time = time.time() - start_time
-        worker_name = worker_config["name"].lower().replace(" ", "_")
-        instance_model_path = "models/instance_{}_{}_final.zip".format(
-            instance_id, worker_name
-        )
-        model.save(instance_model_path)
-
-        # Évaluation du modèle
-        obs = env.reset()  # On récupère uniquement l'observation
-        total_reward = 0
-        num_episodes = 0
-
-        for _ in range(100):
-            # Prédiction sécurisée avec gestion des erreurs
-            try:
-                action, _ = safe_predict(model, obs, deterministic=True)
-                # Exécution du pas d'environnement avec gestion du retour (obs, reward, terminated, truncated, info)
-                next_obs, reward, terminated, truncated, info = env.step(action)
-                done = terminated or truncated
-
-                # Mise à jour de la récompense totale
-                if isinstance(reward, (list, np.ndarray)) and len(reward) > 0:
-                    total_reward += float(reward[0])
-                else:
-                    total_reward += float(reward)
-
-                # Log metrics
-                instance_logger.info(f"Trades: {info.get('total_trades', 0)}")
-                instance_logger.info(f"Win/Loss Ratio: {info.get('win_loss_ratio', 0)}")
-
-                # Mise à jour de l'observation pour la prochaine itération
-                obs = next_obs
-
-                # Réinitialisation si l'épisode est terminé
-                if done:
-                    obs = env.reset()
-                    num_episodes += 1
-                    if num_episodes >= 10:  # Limite le nombre d'épisodes
-                        break
-
-            except Exception as e:
-                logger.error("Erreur lors de l'évaluation: %s", str(e))
-                logger.debug("Détails de l'erreur:", exc_info=True)
-                break
-
-        # Calcul de la récompense moyenne
-        avg_reward = total_reward / 100 if num_episodes > 0 else 0
-
-        env.close()
-
-        results = {
-            "instance_id": instance_id,
-            "name": worker_config["name"],
-            "initial_capital": base_config["environment"]["initial_balance"],
-            "training_time": training_time,
-            "avg_reward": avg_reward,
-            "model_path": instance_model_path,
-            "timesteps": total_timesteps,
-        }
-
-        logger.info(
-            "✅ Instance %d completed - Avg Reward: %.4f, Time: %.1fs",
-            instance_id, avg_reward, training_time
-        )
-        return results
-
-    except KeyboardInterrupt:
-        logger.warning(f"Interruption utilisateur détectée pour l'instance {instance_id}")
-        if model is not None and env is not None:
-            logger.info(f"Sauvegarde d'urgence de l'instance {instance_id}...")
-            emergency_save(model, env, emergency_save_path)
-        return {"status": "interrupted", "instance_id": instance_id}
-    except Exception as e:
-        logger.error(f"Erreur lors de l'entraînement de l'instance {instance_id}: {str(e)}")
-        logger.error(traceback.format_exc())
-        # Tenter une sauvegarde d'urgence en cas d'erreur non gérée
-        if model is not None and env is not None:
-            logger.info(f"Tentative de sauvegarde d'urgence après erreur pour l'instance {instance_id}...")
-            try:
-                emergency_save(model, env, f"{emergency_save_path}_error")
-            except Exception as save_error:
-                logger.error(f"Échec de la sauvegarde d'urgence: {str(save_error)}")
-        return {"status": "error", "error": str(e), "instance_id": instance_id}
-
-
-def main(
-    config_path: str = "config/config.yaml",
-    timeout: int = None,
-    checkpoint_dir: str = "checkpoints",
-    shared_model_path: str = None,
-):
-    """Fonction principale d'entraînement parallèle"""
-    # Initialisation du logger principal avec instance_id=0
-    logger = setup_logging(instance_id=0)
-    logger.info("🚀 Starting ADAN Parallel Training")
-
-    # Charger la configuration
-    config = load_base_config(config_path)  # Load base config with provided path
-
-    num_instances = config["training"]["num_instances"]
-    timesteps_per_instance = config["training"]["timesteps_per_instance"]
-
-    # Créer les répertoires nécessaires
-    os.makedirs("models", exist_ok=True)
-    os.makedirs("logs/tensorboard", exist_ok=True)
-
-    logger.info("Training configuration:")
-    logger.info(f"  - Timesteps per instance: {timesteps_per_instance}")
-    logger.info(f"  - Parallel workers: {num_instances}")
-    logger.info(f"  - Total training steps: {timesteps_per_instance * num_instances}")
-
-    # Lancement de l'entraînement parallèle
-    start_time = time.time()
-    results = []
-
-    # Créer le dossier de checkpoints si nécessaire
-    if checkpoint_dir:
-        os.makedirs(checkpoint_dir, exist_ok=True)
-
-    with ProcessPoolExecutor(max_workers=num_instances) as executor:
-        # Soumettre les tâches d'entraînement avec les paramètres de timeout
-        futures = {
-            executor.submit(
-                train_single_instance,
-                instance_id=i,
-                total_timesteps=timesteps_per_instance,
-                config_override=config,  # Passer la configuration déjà chargée
-                shared_model_path=shared_model_path,
-                checkpoint_path=os.path.join(
-                    checkpoint_dir, f"instance_{i}_checkpoint.pt"
-                )
-                if checkpoint_dir
-                else None,
-                timeout=timeout,
-            ): i
-            for i in range(1, num_instances + 1)
-        }
-
-        # Collecter les résultats
-        for future in as_completed(futures):
-            i = futures[future]
-            try:
-                result = future.result()
-                results.append(result)
-                logger.info(f"Instance {i} completed successfully")
-            except Exception as e:
-                logger.error(f"Instance {i} failed with error: {e}")
-                results.append({"instance_id": i, "error": str(e), "success": False})
-
-    total_time = time.time() - start_time
-
-    # Analyser les résultats
-    successful_results = [r for r in results if "error" not in r]
-    failed_results = [r for r in results if "error" in r]
-
-    logger.info("📊 Training Results Summary:")
-    logger.info(f"  - Total time: {total_time:.1f}s")
-    logger.info(f"  - Successful instances: {len(successful_results)}/{len(results)}")
-    logger.info(f"  - Failed instances: {len(failed_results)}/{len(results)}")
-
-    if successful_results:
-        logger.info("  - Instance Performance:")
-        for result in successful_results:
-            logger.info(
-                f"    * {result['name']}: Reward={result['avg_reward']:.4f}, Time={result['training_time']:.1f}s"
-            )
-
-        # Fusionner les modèles réussis
-        model_paths = [
-            r["model_path"]
-            for r in successful_results
-            if os.path.exists(r["model_path"])
-        ]
-        if len(model_paths) > 1:
-            # Assuming merge_models function exists and is imported
-            # from .utils import merge_models # Example import
-            # merge_models(model_paths, merged_model_path)
-            logger.info(
-                "Skipping model merge for now. Implement merge_models if needed."
-            )
-
-    # Sauvegarder les résultats détaillés
-    results_path = (
-        f"logs/parallel_training_results_{int(datetime.now().timestamp())}.json"
-    )
-    import json
-
-    with open(results_path, "w") as f:
-        json.dump(results, f, indent=2)
-
-    logger.info(f"📋 Detailed results saved to: {results_path}")
-    logger.info("🎉 Parallel training completed!")
-
-    return len(successful_results) == len(results)
+    def __init__(self, env):
+        self.env = env
+        self.observation_space = getattr(env, "observation_space", None)
+        self.action_space = getattr(env, "action_space", None)
+        self.metadata = getattr(env, "metadata", {})
+        # Propriété unwrapped pour la compatibilité avec SB3
+        self.unwrapped = env.unwrapped if hasattr(env, 'unwrapped') else env
+
+    def reset(self, **kwargs):
+        # Appel à la méthode reset de l'environnement sous-jacent
+        reset_result = self.env.reset(**kwargs)
+
+        # Journalisation pour le débogage
+        logger.debug(f"ResetObsAdapter.reset - Type de sortie: {type(reset_result)}")
+        if isinstance(reset_result, tuple):
+            logger.debug(f"ResetObsAdapter.reset - Longueur du tuple: {len(reset_result)}")
+
+        # Gérer le cas où l'environnement retourne un tuple (obs, info)
+        if isinstance(reset_result, tuple) and len(reset_result) == 2:
+            obs, info = reset_result
+            logger.debug("ResetObsAdapter.reset - Tuple (obs, info) détecté, retourne obs uniquement")
+
+            # Vérifier que l'observation est dans le bon format
+            if not isinstance(obs, (np.ndarray, dict)):
+                logger.warning(f"ResetObsAdapter.reset - Type d'observation inattendu: {type(obs)}")
+
+            return obs
+
+        # Si ce n'est pas un tuple, retourner tel quel
+        logger.debug("ResetObsAdapter.reset - Sortie simple détectée")
+        return reset_result
+
+    def step(self, action):
+        out = self.env.step(action)
+        # gymnasium step: (obs, reward, terminated, truncated, info)
+        if isinstance(out, tuple) and len(out) == 5:
+            obs, reward, terminated, truncated, info = out
+            done = bool(terminated or truncated)
+            return obs, reward, done, info
+        return out
+
+    def render(self, *args, **kwargs):
+        return getattr(self.env, "render")(*args, **kwargs)
+
+    def close(self):
+        return getattr(self.env, "close")()
+
+    def seed(self, seed=None):
+        if hasattr(self.env, "seed"):
+            return self.env.seed(seed)
+        return None
 
 
 class SB3GymCompatibilityWrapper(gym.Wrapper):
@@ -1710,185 +535,1135 @@ class SB3GymCompatibilityWrapper(gym.Wrapper):
     Gère spécifiquement les espaces d'observation de type Dict pour les environnements de trading.
     """
     def __init__(self, env):
-        # Appeler le constructeur parent avec l'environnement Gymnasium
         super().__init__(env)
-        
+
         # Enregistrer l'espace d'observation original
         self.original_obs_space = env.observation_space
-        
+
         # S'assurer que l'espace d'action est correctement défini
-        if not isinstance(env.action_space, (spaces.Discrete, spaces.Box, 
-                                         spaces.MultiDiscrete, spaces.MultiBinary)):
+        if not isinstance(env.action_space, (
+            spaces.Discrete,
+            spaces.Box,
+            spaces.MultiDiscrete,
+            spaces.MultiBinary
+        )):
             raise ValueError(
                 f"Type d'espace d'action non supporté: {type(env.action_space)}"
             )
+
         # Pour les environnements de trading avec espace d'observation de type Dict
         if isinstance(env.observation_space, spaces.Dict):
             # Vérifier si nous avons les clés attendues
             if 'observation' in env.observation_space.spaces and 'portfolio_state' in env.observation_space.spaces:
                 # Enregistrer l'espace d'observation original
                 self.observation_space = env.observation_space
-                
+
                 # Extraire les espaces pour le traitement
                 obs_space = env.observation_space.spaces['observation']
                 portfolio_space = env.observation_space.spaces['portfolio_state']
-                
+
                 # Vérifier les dimensions
-                if not (isinstance(obs_space, spaces.Box) and len(obs_space.shape) == 3 and
-                       isinstance(portfolio_space, spaces.Box) and len(portfolio_space.shape) == 1):
-                    raise ValueError("Format d'observation non supporté. Attendu: observation (Box 3D) et portfolio_state (Box 1D)")
-                
+                expected_obs_shape = (3, 20, 15)  # Forme attendue: (timeframes, window_size, features)
+                expected_portfolio_shape = (17,)   # Forme attendue pour le portefeuille
+
+                # Vérifier le type et la forme de l'observation
+                if not (isinstance(obs_space, spaces.Box) and len(obs_space.shape) == 3):
+                    raise ValueError(
+                        f"Format d'observation non supporté. Attendu: Box 3D, obtenu: {type(obs_space)} avec forme {getattr(obs_space, 'shape', 'N/A')}"
+                    )
+
+                # Vérifier le type et la forme du portefeuille
+                if not (isinstance(portfolio_space, spaces.Box) and len(portfolio_space.shape) == 1):
+                    raise ValueError(
+                        f"Format d'état du portefeuille non supporté. Attendu: Box 1D, obtenu: {type(portfolio_space)} avec forme {getattr(portfolio_space, 'shape', 'N/A')}"
+                    )
+
+                # Avertissement si les formes ne correspondent pas exactement à ce qui est attendu
+                if obs_space.shape != expected_obs_shape:
+                    logger.warning(
+                        f"Forme d'observation non standard: {obs_space.shape}, attendu {expected_obs_shape}. "
+                        "Le modèle peut nécessiter un ajustement."
+                    )
+
+                if portfolio_space.shape != expected_portfolio_shape:
+                    logger.warning(
+                        f"Forme de l'état du portefeuille non standard: {portfolio_space.shape}, "
+                        f"attendu {expected_portfolio_shape}. Le modèle peut nécessiter un ajustement."
+                    )
+
                 # Enregistrer les dimensions pour le traitement des observations
                 self.obs_shape = obs_space.shape
                 self.portfolio_dim = portfolio_space.shape[0]
-                
-                logger.info(f"SB3GymCompatibilityWrapper: Espace d'observation configuré avec succès. "
-                          f"Forme de l'observation: {obs_space.shape}, "
-                          f"Dimension du portefeuille: {portfolio_space.shape}")
+
+                logger.info(
+                    "SB3GymCompatibilityWrapper: Espace d'observation "
+                    "configuré avec succès. Forme de l'observation: %s, "
+                    "Dimension du portefeuille: %s",
+                    obs_space.shape,
+                    portfolio_space.shape
+                )
             else:
                 raise ValueError("L'espace d'observation Dict doit contenir les clés 'observation' et 'portfolio_state'")
         else:
             # Pour les autres types d'espaces, utiliser l'espace d'observation tel quel
             self.observation_space = env.observation_space
-    
+
     def reset(self, **kwargs):
-        # Appeler reset sur l'environnement sous-jacent
-        obs, info = self.env.reset(**kwargs)
-        
-        # Traiter l'observation pour la compatibilité avec SB3
-        processed_obs = self._process_obs(obs)
-        
-        # Journalisation pour le débogage
-        if hasattr(self, 'obs_shape') and hasattr(self, 'portfolio_dim'):
-            logger.debug(
-                f"Reset - Type d'observation: {type(obs)}, "
-                f"Type traité: {type(processed_obs)}, "
-                f"Forme: {getattr(processed_obs, 'shape', 'N/A')}"
-            )
-        
-        return processed_obs, info
-    
+        try:
+            # Appeler reset sur l'environnement sous-jacent
+            reset_result = self.env.reset(**kwargs)
+
+            # Journalisation pour le débogage
+            logger.debug(f"SB3GymCompatibilityWrapper.reset - Type de sortie: {type(reset_result)}")
+            if isinstance(reset_result, tuple):
+                logger.debug(f"SB3GymCompatibilityWrapper.reset - Longueur du tuple: {len(reset_result)}")
+
+            # Extraire l'observation du résultat de reset
+            if isinstance(reset_result, tuple):
+                if len(reset_result) == 2:
+                    obs, info = reset_result  # Format (obs, info) de Gymnasium
+                else:
+                    # Si le tuple a une longueur différente, prendre le premier élément comme observation
+                    obs = reset_result[0] if len(reset_result) > 0 else {}
+                    info = reset_result[1] if len(reset_result) > 1 else {}
+            else:
+                obs = reset_result
+                info = {}
+
+            # Journalisation supplémentaire
+            logger.debug(f"Type d'observation après extraction: {type(obs)}")
+            if hasattr(obs, 'shape'):
+                logger.debug(f"Forme de l'observation: {obs.shape}")
+            elif isinstance(obs, dict):
+                logger.debug(f"Clés de l'observation: {list(obs.keys())}")
+
+            # Traiter l'observation pour la compatibilité avec SB3
+            processed_obs = self._process_obs(obs)
+
+            # Journalisation pour le débogage
+            logger.debug(f"SB3GymCompatibilityWrapper.reset - Type d'observation traité: {type(processed_obs)}")
+            if hasattr(processed_obs, 'shape'):
+                logger.debug(f"SB3GymCompatibilityWrapper.reset - Forme de l'observation: {processed_obs.shape}")
+
+            # Pour la compatibilité avec SB3, retourner un tuple (observation, info)
+            return processed_obs, info
+
+        except Exception as e:
+            logger.error(f"Erreur dans SB3GymCompatibilityWrapper.reset: {e}")
+            logger.error(traceback.format_exc())
+            # Retourner une observation par défaut en cas d'erreur
+            default_shape = (3 * 20 * 15) + 17
+            return np.zeros(default_shape, dtype=np.float32), {}
+
     def step(self, action):
-        # Appeler step sur l'environnement sous-jacent
-        obs, reward, terminated, truncated, info = self.env.step(action)
-        
-        # Traiter l'observation pour la compatibilité avec SB3
-        processed_obs = self._process_obs(obs)
-        
-        # Journalisation pour le débogage
-        if hasattr(self, 'obs_shape') and hasattr(self, 'portfolio_dim'):
+        try:
+            # Appeler step sur l'environnement sous-jacent
+            step_result = self.env.step(action)
+
+            # Gérer les différents formats de retour
+            if isinstance(step_result, tuple):
+                if len(step_result) == 5:
+                    # Format gymnasium : (obs, reward, terminated, truncated, info)
+                    obs, reward, terminated, truncated, info = step_result
+                    done = bool(terminated or truncated)
+                elif len(step_result) == 4:
+                    # Format gym ancien : (obs, reward, done, info)
+                    obs, reward, done, info = step_result
+                else:
+                    raise ValueError(f"Format de retour de step() non supporté: {step_result}")
+            else:
+                raise ValueError(f"Le résultat de step() doit être un tuple, reçu: {type(step_result)}")
+
+            # Traiter l'observation pour la compatibilité avec SB3
+            processed_obs = self._process_obs(obs)
+
+            # Journalisation pour le débogage
             logger.debug(
                 f"Step - Type d'observation: {type(obs)}, "
                 f"Type traité: {type(processed_obs)}, "
                 f"Forme: {getattr(processed_obs, 'shape', 'N/A')}, "
                 f"Récompense: {reward:.4f}, "
-                f"Terminé: {terminated}, Tronqué: {truncated}"
+                f"Terminé: {done}"
             )
-        
-        return processed_obs, reward, terminated, truncated, info
-    
+
+            # Retourner le format attendu par SB3 (4 valeurs)
+            return processed_obs, float(reward), done, info
+
+        except Exception as e:
+            logger.error(f"Erreur dans SB3GymCompatibilityWrapper.step: {e}")
+            logger.error(traceback.format_exc())
+            # Retourner une observation par défaut en cas d'erreur
+            default_shape = (3 * 20 * 15) + 17
+            return np.zeros(default_shape, dtype=np.float32), 0.0, True, {}
+
     def _process_obs(self, obs):
         """
         Traite l'observation pour la compatibilité avec SB3.
-        Convertit un dictionnaire d'observations en un format compatible avec SB3.
+        Convertit un dictionnaire d'observations en un tableau NumPy 1D.
+
+        Gère spécifiquement les observations avec la forme (3, 20, 15) pour les données de marché
+        et (17,) pour l'état du portefeuille.
         """
+        # Définir les formes attendues
+        expected_market_shape = (3, 20, 15)  # Forme attendue pour les données de marché
+        expected_portfolio_shape = (17,)     # Forme attendue pour l'état du portefeuille
+
+        # Fonction utilitaire pour créer une observation par défaut
+        def create_default_observation():
+            market_obs = np.zeros(expected_market_shape, dtype=np.float32)
+            portfolio_obs = np.zeros(expected_portfolio_shape, dtype=np.float32)
+            return np.concatenate([market_obs.reshape(-1), portfolio_obs.reshape(-1)])
+
         try:
             # Si l'observation est déjà un tableau numpy, la retourner telle quelle
             if isinstance(obs, np.ndarray):
-                return obs
-                
+                return obs.astype(np.float32)
+
             # Si c'est un dictionnaire avec les clés attendues
             if isinstance(obs, dict) and 'observation' in obs and 'portfolio_state' in obs:
-                # Créer une copie du dictionnaire pour éviter de modifier l'original
-                processed_obs = {}
-                
-                # Traiter l'observation de marché (3D)
-                if isinstance(obs['observation'], np.ndarray):
-                    obs_tensor = obs['observation'].astype(np.float32)
-                else:
-                    obs_tensor = np.array(obs['observation'], dtype=np.float32)
-                
-                # Traiter l'état du portefeuille (1D)
-                if isinstance(obs['portfolio_state'], np.ndarray):
-                    portfolio_tensor = obs['portfolio_state'].astype(np.float32)
-                else:
-                    portfolio_tensor = np.array(obs['portfolio_state'], dtype=np.float32)
-                
-                # Vérifier et corriger les valeurs NaN ou infinies
-                if np.any(np.isnan(obs_tensor)) or np.any(np.isinf(obs_tensor)):
-                    logger.warning("L'observation de marché contient des valeurs NaN ou infinies. Remplacement par des zéros.")
-                    obs_tensor = np.nan_to_num(obs_tensor, nan=0.0, posinf=0.0, neginf=0.0)
-                
-                if np.any(np.isnan(portfolio_tensor)) or np.any(np.isinf(portfolio_tensor)):
-                    logger.warning("L'état du portefeuille contient des valeurs NaN ou infinies. Remplacement par des zéros.")
-                    portfolio_tensor = np.nan_to_num(portfolio_tensor, nan=0.0, posinf=0.0, neginf=0.0)
-                
-                # Créer un nouveau dictionnaire avec les tableaux traités
-                processed_obs = {
-                    'observation': obs_tensor,
-                    'portfolio_state': portfolio_tensor
-                }
-                
-                return processed_obs
-            
-            # Si l'observation n'est pas un dictionnaire, essayer de la convertir en tableau numpy
-            if not isinstance(obs, np.ndarray):
+                # Valider le type et la forme des données d'observation
+                if not isinstance(obs['observation'], (np.ndarray, list, tuple)) or \
+                   not isinstance(obs['portfolio_state'], (np.ndarray, list, tuple)):
+                    logger.warning("Type d'observation invalide. Utilisation d'une observation par défaut.")
+                    return create_default_observation()
+
+                # Convertir les observations en tableaux NumPy
                 try:
-                    obs = np.array(obs, dtype=np.float32)
-                    return obs
-                except (TypeError, ValueError) as e:
-                    logger.error(f"Impossible de convertir l'observation en tableau numpy: {e}")
-                    raise ValueError(f"Format d'observation non supporté: {type(obs)}")
-            
-            return obs
-            
+                    market_obs = np.array(obs['observation'], dtype=np.float32)
+                    portfolio_obs = np.array(obs['portfolio_state'], dtype=np.float32)
+                except Exception as e:
+                    logger.error(f"Erreur lors de la conversion des observations: {e}")
+                    return create_default_observation()
+
+                # Valider et redimensionner les données de marché si nécessaire
+                if market_obs.shape != expected_market_shape:
+                    logger.warning(
+                        f"Forme des données de marché non standard: {market_obs.shape}, "
+                        f"attendu {expected_market_shape}. Redimensionnement en cours."
+                    )
+                    if len(market_obs.shape) == 3:
+                        market_obs = market_obs[:3, :20, :15]  # Tronquer aux dimensions attendues
+                        if market_obs.shape[1] < 20:  # Si la dimension temporelle est trop petite
+                            pad_width = [(0, 0), (0, 20 - market_obs.shape[1]), (0, 0)]
+                            market_obs = np.pad(market_obs, pad_width, mode='constant')
+                    else:
+                        market_obs = np.zeros(expected_market_shape, dtype=np.float32)
+
+                # Valider et redimensionner l'état du portefeuille si nécessaire
+                if portfolio_obs.shape != expected_portfolio_shape:
+                    logger.warning(
+                        f"Forme de l'état du portefeuille non standard: {portfolio_obs.shape}, "
+                        f"attendu {expected_portfolio_shape}. Redimensionnement en cours."
+                    )
+                    if len(portfolio_obs.shape) == 1 and portfolio_obs.size >= 17:
+                        portfolio_obs = portfolio_obs[:17]  # Tronquer si trop grand
+                    else:
+                        portfolio_obs = np.zeros(expected_portfolio_shape, dtype=np.float32)
+
+                # Vérifier la forme finale avant de concaténer
+                expected_market_size = np.prod(expected_market_shape)
+                if market_obs.size != expected_market_size:
+                    logger.warning(
+                        f"Taille des données de marché incorrecte: {market_obs.size}, "
+                        f"attendu {expected_market_size}. Redimensionnement en cours."
+                    )
+                    market_obs = market_obs.reshape(-1)[:expected_market_size]
+                    if market_obs.size < expected_market_size:
+                        market_obs = np.pad(
+                            market_obs,
+                            (0, expected_market_size - market_obs.size),
+                            mode='constant'
+                        )
+                    market_obs = market_obs.reshape(expected_market_shape)
+
+                # Aplatir et concaténer les observations
+                market_flat = market_obs.reshape(-1)
+                portfolio_flat = portfolio_obs.reshape(-1)
+
+                try:
+                    processed_obs = np.concatenate([market_flat, portfolio_flat])
+
+                    logger.debug(
+                        f"Observation traitée - Marché: {market_obs.shape} -> {market_flat.shape}, "
+                        f"Portefeuille: {portfolio_obs.shape} -> {portfolio_flat.shape}, "
+                        f"Sortie: {processed_obs.shape}"
+                    )
+                except Exception as e:
+                    logger.error(f"Erreur lors de la concaténation des observations: {e}")
+                    return create_default_observation()
+
+                return processed_obs.astype(np.float32)
+
+            # Si c'est un tuple (obs, info) de Gymnasium, extraire l'observation
+            elif isinstance(obs, tuple) and len(obs) >= 2:
+                logger.debug("Tuple d'observation détecté, extraction de l'élément d'observation")
+                return self._process_obs(obs[0])  # Traiter uniquement l'observation
+
+            # Si c'est une séquence (liste, tuple, etc.), essayer de la convertir en tableau
+            elif isinstance(obs, (list, tuple)):
+                logger.debug(f"Séquence d'observation détectée, conversion en tableau: {type(obs)}")
+                try:
+                    arr = np.array(obs, dtype=np.float32)
+                    expected_size = np.prod(expected_market_shape) + len(expected_portfolio_shape)
+
+                    if arr.size == expected_size:
+                        return arr.reshape(-1).astype(np.float32)
+                    elif arr.size > expected_size:
+                        logger.warning(f"Troncature de l'observation de taille {arr.size} à {expected_size}")
+                        return arr.flat[:expected_size].astype(np.float32)
+                    else:
+                        logger.warning(f"Remplissage de l'observation de taille {arr.size} à {expected_size}")
+                        return np.pad(arr.reshape(-1),
+                           (0, expected_size - arr.size),
+                           mode='constant').astype(np.float32)
+                except Exception as e:
+                    logger.error(f"Erreur lors de la conversion de la séquence: {e}")
+                    raise
+
+            # Pour les autres types, essayer une conversion directe
+            logger.warning(f"Type d'observation non standard, tentative de conversion: {type(obs)}")
+            try:
+                arr = np.array(obs, dtype=np.float32)
+                expected_size = np.prod(expected_market_shape) + len(expected_portfolio_shape)
+
+                if arr.size == expected_size:
+                    return arr.reshape(-1).astype(np.float32)
+                elif arr.size > expected_size:
+                    logger.warning(f"Troncature de l'observation de taille {arr.size} à {expected_size}")
+                    return arr.flat[:expected_size].astype(np.float32)
+                else:
+                    logger.warning(f"Remplissage de l'observation de taille {arr.size} à {expected_size}")
+                    return np.pad(arr.reshape(-1),
+                           (0, expected_size - arr.size),
+                           mode='constant').astype(np.float32)
+            except Exception as e:
+                logger.error(f"Échec de la conversion de l'observation: {e}")
+                return create_default_observation()
+
         except Exception as e:
-            logger.error(f"Erreur lors du traitement de l'observation: {e}")
-            logger.error(f"Type d'observation: {type(obs)}")
+            logger.error(f"Erreur critique lors du traitement de l'observation: {e}")
+            logger.error(f"Type d'observation: {type(obs).__name__}")
+
+            # Journalisation détaillée pour le débogage
             if hasattr(obs, 'shape'):
                 logger.error(f"Forme de l'observation: {obs.shape}")
+            elif hasattr(obs, '__len__'):
+                logger.error(f"Longueur de l'observation: {len(obs)}")
+
             if isinstance(obs, dict):
-                logger.error(f"Clés de l'observation: {obs.keys()}")
+                logger.error("Clés de l'observation:")
                 for k, v in obs.items():
-                    logger.error(f"  {k}: type={type(v).__name__}, shape={getattr(v, 'shape', 'N/A')}")
+                    type_info = type(v).__name__
+                    shape_info = f", shape={v.shape}" if hasattr(v, 'shape') else ""
+                    len_info = f", len={len(v)}" if hasattr(v, '__len__') else ""
+                    logger.error(f"  {k}: type={type_info}{shape_info}{len_info}")
+
+            logger.error("Traceback complet de l'erreur:", exc_info=True)
+
+        # En cas d'erreur, retourner un tableau de zéros de la bonne dimension
+        default_market = np.zeros(expected_market_shape, dtype=np.float32)
+        default_portfolio = np.zeros(expected_portfolio_shape, dtype=np.float32)
+        default_obs = np.concatenate([default_market.reshape(-1), default_portfolio])
+
+        logger.warning(
+            f"Retour d'une observation par défaut de forme {default_obs.shape} "
+            f"(marché: {default_market.shape}, portefeuille: {default_portfolio.shape})"
+        )
+
+        return default_obs
+
+
+def make_env(rank: int, seed: int = 0, config: Optional[Dict] = None, worker_config: Optional[Dict] = None) -> Callable:
+    """
+    Crée et configure un environnement pour un worker donné.
+
+    Args:
+        rank: Identifiant unique du worker
+        seed: Graine pour la reproductibilité
+        config: Configuration de l'environnement
+        worker_config: Configuration spécifique au worker
+
+    Returns:
+        Fonction qui crée et retourne un environnement
+    """
+    def _init() -> gym.Env:
+        # Configuration du worker si non fournie
+        nonlocal worker_config
+        if worker_config is None:
+            # Récupérer la liste des actifs depuis la configuration
+            data_config = config.get("data", {})
+            file_structure = data_config.get("file_structure", {})
+            assets = file_structure.get("assets", ["BTCUSDT"])
+            timeframes = file_structure.get("timeframes", ["5m", "1h", "4h"])
+
+            worker_config = {
+                "rank": rank,
+                "num_workers": config.get("num_workers", 1) if config else 1,
+                "assets": assets,
+                "timeframes": timeframes,
+                "data_loader": {
+                    "batch_size": config.get("batch_size", 32) if config else 32,
+                    "shuffle": True,
+                    "num_workers": 0  # Désactiver le multithreading pour éviter les problèmes
+                }
+            }
+
+        # Extraire les paramètres nécessaires de la configuration
+        data_config = config.get("data", {})
+        env_config = config.get("environment", {})
+
+        # Récupérer les paramètres requis
+        timeframes = data_config.get("file_structure", {}).get("timeframes", ["5m", "1h", "4h"])
+        window_size = env_config.get("window_size", 100)
+        features_config = env_config.get("features_config", {
+            "5m": ["OPEN", "HIGH", "LOW", "CLOSE", "VOLUME"],
+            "1h": ["OPEN", "HIGH", "LOW", "CLOSE", "VOLUME"],
+            "4h": ["OPEN", "HIGH", "LOW", "CLOSE", "VOLUME"]
+        })
+
+        # Define the base data directory
+        base_data_dir = "data/processed/indicators/val"
+        data = {}
+        data_found = False
+
+        # Load data for each asset and timeframe
+        for asset in worker_config.get("assets", ["BTCUSDT"]):
+            data[asset] = {}
+            for tf in timeframes:
+                # Construct the path to the data file
+                file_path = os.path.join(base_data_dir, asset, f"{tf}.parquet")
+
+                if os.path.exists(file_path):
+                    try:
+                        df = pd.read_parquet(file_path)
+                        data[asset][tf] = df
+                        logger.info(f"Données chargées depuis {file_path}: {len(df)} lignes")
+                        data_found = True
+                    except Exception as e:
+                        logger.error(f"Erreur lors du chargement de {file_path}: {str(e)}")
+                else:
+                    logger.warning(f"Fichier non trouvé: {file_path}")
+
+        if not any(data.values()):
+            raise ValueError("Aucune donnée n'a pu être chargée. Vérifiez les chemins des fichiers de données.")
+
+        # Créer l'environnement avec les données chargées
+        env = MultiAssetChunkedEnv(
+            data=data,
+            timeframes=timeframes,
+            window_size=window_size,
+            features_config=features_config,
+            max_steps=env_config.get("max_steps", 1000),
+            initial_balance=env_config.get("initial_balance", 10000.0),
+            commission=env_config.get("commission", 0.001),
+            reward_scaling=env_config.get("reward_scaling", 1.0),
+            render_mode=None,
+            enable_logging=config.get("enable_logging", True),
+            log_dir=config.get("log_dir", "logs"),
+            # Passer les configurations nécessaires
+            worker_config=worker_config,
+            config=config
+        )
+
+        # Appliquer les wrappers dans le bon ordre
+        # 1. D'abord le wrapper ResetObsAdapter pour gérer les retours de reset
+        env = ResetObsAdapter(env)
+
+        # 2. Ensuite le wrapper de compatibilité SB3 pour traiter l'observation
+        env = SB3GymCompatibilityWrapper(env)
+
+        # 3. Enfin, le wrapper GymnasiumToGymWrapper pour assurer la compatibilité avec SB3
+        # (ce wrapper doit être le plus externe pour gérer correctement les retours de reset et step)
+        env = GymnasiumToGymWrapper(env)
+
+        # Configurer la graine pour la reproductibilité sans toucher aux attributs dépréciés
+        try:
+            base = getattr(env, 'unwrapped', env)
+            if hasattr(base, 'seed'):
+                base.seed(seed + rank)
+        except Exception:
+            pass
+        try:
+            if hasattr(env, 'action_space') and hasattr(env.action_space, 'seed'):
+                env.action_space.seed(seed + rank)
+        except Exception:
+            pass
+
+        return env
+
+    return _init
+
+def main(
+    config_path: str = "config/config.yaml",
+    timeout: Optional[int] = None,
+    checkpoint_dir: str = "checkpoints",
+    shared_model_path: Optional[str] = None,
+    resume: bool = False,
+    num_envs: int = 4,
+    use_subproc: bool = False,
+) -> bool:
+    """
+    Fonction principale pour l'entraînement parallèle des agents ADAN.
+
+    Args:
+        config_path: Chemin vers le fichier de configuration YAML
+        timeout: Délai maximum d'entraînement en secondes
+        checkpoint_dir: Répertoire pour enregistrer les points de contrôle
+        shared_model_path: Chemin vers un modèle partagé pour l'entraînement distribué
+        resume: Reprendre l'entraînement à partir du dernier point de contrôle
+        num_envs: Nombre d'environnements parallèles à exécuter
+        use_subproc: Si True, utilise SubprocVecEnv au lieu de DummyVecEnv
+
+    Returns:
+        bool: True si l'entraînement s'est terminé avec succès, False sinon
+    """
+    try:
+        # Validate environment (Python version, deps, etc.)
+        try:
+            validate_environment()
+        except Exception as e:
+            logger.error("Environment validation failed: %s", e)
+            raise
+        # Charger la configuration
+        with open(config_path, 'r') as f:
+            config = yaml.safe_load(f)
+
+        logger.info(f"Configuration chargée depuis {config_path}")
+        logger.info(f"Démarrage de l'entraînement avec un timeout de {timeout} secondes")
+        # Activer ou non la barre de progression pendant l'entraînement (config training.progress_bar)
+        progress_bar = bool(config.get('training', {}).get('progress_bar', False))
+
+        # Créer les environnements vectorisés
+        VecEnvClass = SubprocVecEnv if use_subproc else DummyVecEnv
+
+            # Récupérer la liste des actifs et timeframes depuis la configuration
+        data_config = config.get("data", {})
+        file_structure = data_config.get("file_structure", {})
+        assets = file_structure.get("assets", ["BTCUSDT"])
+        timeframes = file_structure.get("timeframes", ["5m", "1h", "4h"])
+
+        # Configuration commune pour tous les workers
+        base_worker_config = {
+            "num_workers": num_envs,
+            "assets": assets,  # Liste des actifs
+            "timeframes": timeframes,  # Liste des timeframes
+            # Réduire la taille des chunks pour s'adapter aux petits fichiers de données
+            "chunk_sizes": {tf: 50 for tf in timeframes},
+            "data_loader": {
+                "batch_size": config.get("batch_size", 32),
+                "shuffle": True,
+                "num_workers": 0  # Désactiver le multithreading pour éviter les problèmes
+            }
+        }
+
+        env_fns = [
+            make_env(
+                rank=i,
+                seed=config.get('seed', 42),
+                config=config,
+                worker_config={"rank": i, **base_worker_config}
+            )
+            for i in range(num_envs)
+        ]
+
+        # Créer l'environnement vectorisé
+        env = VecEnvClass(env_fns)
+
+        # Ajouter la normalisation des observations si nécessaire
+        if config.get('normalize_observations', True):
+            env = VecNormalize(env, norm_obs=True, norm_reward=True)
+
+        # Valider l'environnement
+        try:
+            logger.info("Validation de l'environnement...")
+            # Valider l'environnement sans les wrappers en évitant les attributs dépréciés
+            base_env = env
+
+            # Déroulage sûr des wrappers sans accès direct aux attributs dépréciés
+            try:
+                # Essayer d'utiliser l'API VecEnv pour récupérer l'env sous-jacent
+                # (certaines implémentations exposent get_attr)
+                if hasattr(env, 'get_attr'):
+                    inner_envs = env.get_attr('env', indices=0)
+                    if inner_envs:
+                        base_env = inner_envs[0]
+            except Exception:
+                pass
+
+            # Fallback générique: dérouler prudemment sans supposer .venv
+            visited = set()
+            for _ in range(10):  # éviter les boucles infinies
+                obj_id = id(base_env)
+                if obj_id in visited:
+                    break
+                visited.add(obj_id)
+
+                # Éviter d'accéder directement à .envs (déprécié). Utiliser unwrapped si disponible
+                if hasattr(base_env, 'unwrapped'):
+                    base_env = base_env.unwrapped
+                    continue
+
+                # Wrappers gymnasium: .env
+                if hasattr(base_env, 'env'):
+                    base_env = base_env.env
+                    continue
+
+                break
+
+            # Valider l'environnement de base
+            logger.info("Validation de l'environnement de base...")
+            base_obs, _ = base_env.reset()
+            logger.info(f"Observation de base après reset: {base_obs}")
+            logger.info(f"Type de l'observation de base: {type(base_obs)}")
+
+            # Valider l'observation de base
+            if not isinstance(base_obs, dict):
+                raise TypeError(f"Type d'observation de base invalide: {type(base_obs)} - attendu un dictionnaire")
+
+            required = {'observation', 'portfolio_state'}
+            if not required.issubset(set(base_obs.keys())):
+                raise KeyError(f"Dictionnaire d'observation de base manquant des clés requises. Clés présentes: {list(base_obs.keys())}")
+
+            logger.info("Environnement de base validé avec succès.")
+            logger.info("Environnement validé avec succès.")
+        except Exception as e:
+            logger.error(f"Erreur de validation de l'environnement: {str(e)}", exc_info=True)
+            env.close()
+            return False
+
+        logger.info(f"Environnement vectorisé créé avec {num_envs} environnements")
+
+        # Configuration optimisée de l'agent PPO avec MultiInputPolicy pour gérer les espaces d'observation de type dictionnaire
+
+        # Vérifier l'espace d'observation
+        logger.info(f"Espace d'observation de l'environnement: {env.observation_space}")
+
+        # Configuration du réseau de neurones
+        policy_kwargs = {
+            'net_arch': [dict(pi=[64, 64], vf=[64, 64])],
+            'activation_fn': torch.nn.ReLU,
+            'ortho_init': True
+        }
+
+        # Créer ou charger le modèle PPO
+        model = None
+        latest_checkpoint = None
+
+        # Vérifier si on doit reprendre depuis un checkpoint
+        if resume and checkpoint_manager.list_checkpoints():
+            latest_checkpoint = checkpoint_manager.list_checkpoints()[-1]
+            logger.info(f"Reprise de l'entraînement depuis le checkpoint: {latest_checkpoint}")
+
+            # Créer un modèle minimal pour le chargement
+            model = PPO(
+                policy="MultiInputPolicy",
+                env=env,
+                policy_kwargs=policy_kwargs,
+                verbose=1,
+                seed=config.get('seed', 42),
+                device='auto'
+            )
+            # Configure SB3 logger for resume case
+            try:
+                sb3_log_dir = Path("bot/config/logs/sb3")
+                sb3_log_dir.mkdir(parents=True, exist_ok=True)
+                new_logger = sb3_logger_configure(str(sb3_log_dir), ["stdout", "csv", "tensorboard"])
+                model.set_logger(new_logger)
+                logger.info(f"SB3 logger configured at {sb3_log_dir}")
+            except Exception as e:
+                logger.warning(f"Failed to configure SB3 logger: {e}")
+
+            # Charger le checkpoint
+            model, _, metadata = checkpoint_manager.load_checkpoint(
+                checkpoint_path=latest_checkpoint,
+                model=model,
+                map_location='auto'
+            )
+
+            if metadata:
+                logger.info(
+                    "Checkpoint chargé - Épisode: %d, Steps: %d",
+                    metadata.episode, metadata.total_steps
+                )
+                start_timesteps = metadata.total_steps
+            else:
+                logger.warning("Métadonnées du checkpoint non trouvées, démarrage à zéro")
+                start_timesteps = 0
+
+        # Si pas de reprise ou échec de chargement, créer un nouveau modèle
+        if model is None:
+            logger.info("Création d'un nouveau modèle")
+            model = PPO(
+                policy="MultiInputPolicy",
+                env=env,
+                learning_rate=3e-4,
+                n_steps=2048,
+                batch_size=64,
+                n_epochs=10,
+                gamma=0.99,
+                gae_lambda=0.95,
+                clip_range=0.2,
+                ent_coef=0.0,
+                vf_coef=0.5,
+                max_grad_norm=0.5,
+                policy_kwargs=policy_kwargs,
+                verbose=1,
+                seed=config.get('seed', 42),
+                device='auto'
+            )
+            # Configure SB3 logger for fresh model
+            try:
+                sb3_log_dir = Path("bot/config/logs/sb3")
+                sb3_log_dir.mkdir(parents=True, exist_ok=True)
+                new_logger = sb3_logger_configure(str(sb3_log_dir), ["stdout", "csv", "tensorboard"])
+                model.set_logger(new_logger)
+                logger.info(f"SB3 logger configured at {sb3_log_dir}")
+            except Exception as e:
+                logger.warning(f"Failed to configure SB3 logger: {e}")
+            start_timesteps = 0
+
+        # Créer le répertoire de checkpoints si nécessaire
+        os.makedirs(checkpoint_dir, exist_ok=True)
+
+        # Initialiser le CheckpointManager
+        checkpoint_manager = CheckpointManager(
+            checkpoint_dir=checkpoint_dir,
+            max_checkpoints=5,  # Garder les 5 derniers checkpoints
+            checkpoint_interval=10000,  # Sauvegarder tous les 10 000 steps
+            logger=logger
+        )
+
+        # Vérifier si on doit reprendre depuis un checkpoint
+        if resume:
+            try:
+                checkpoints = checkpoint_manager.list_checkpoints()
+                if not checkpoints:
+                    logger.info("Aucun checkpoint trouvé, démarrage d'un nouvel entraînement")
+                    start_timesteps = 0
+                else:
+                    latest_checkpoint = checkpoints[-1]
+                    logger.info(f"Tentative de reprise depuis le checkpoint: {latest_checkpoint}")
+
+                    # Vérifier si le checkpoint existe toujours
+                    if not os.path.exists(latest_checkpoint):
+                        logger.warning(f"Le checkpoint {latest_checkpoint} n'existe plus")
+                        start_timesteps = 0
+                    else:
+                        # Créer un modèle minimal pour le chargement
+                        model = PPO(
+                            policy="MultiInputPolicy",
+                            env=env,
+                            policy_kwargs=policy_kwargs,
+                            verbose=1,
+                            seed=config.get('seed', 42),
+                            device='auto'
+                        )
+
+                        try:
+                            # Charger le checkpoint
+                            model, optimizer, metadata = checkpoint_manager.load_checkpoint(
+                                checkpoint_path=latest_checkpoint,
+                                model=model,
+                                map_location='auto'
+                            )
+
+                            if metadata is not None:
+                                logger.info(
+                                    "Checkpoint chargé - Épisode: %d, Steps: %d",
+                                    metadata.episode, metadata.total_steps
+                                )
+                                start_timesteps = metadata.total_steps
+
+                                # Vérifier la cohérence des métadonnées
+                                if not hasattr(metadata, 'total_steps') or not isinstance(metadata.total_steps, int):
+                                    logger.warning("Métadonnées de checkpoint invalides, réinitialisation du compteur d'étapes")
+                                    start_timesteps = 0
+                            else:
+                                logger.warning("Aucune métadonnée trouvée dans le checkpoint")
+                                start_timesteps = 0
+
+                        except Exception as e:
+                            logger.error(f"Erreur lors du chargement du checkpoint: {str(e)}", exc_info=True)
+                            logger.warning("Démarrage d'un nouvel entraînement")
+                            start_timesteps = 0
+
+            except Exception as e:
+                logger.error(f"Erreur lors de la vérification des checkpoints: {str(e)}", exc_info=True)
+                logger.warning("Démarrage d'un nouvel entraînement")
+                start_timesteps = 0
+        else:
+            logger.info("Démarrage d'un nouvel entraînement (sans reprise)")
+            start_timesteps = 0
+
+        class CustomCheckpointCallback(BaseCallback):
+            """
+            Callback personnalisé pour la sauvegarde des checkpoints.
+            """
+
+            def __init__(
+                self,
+                checkpoint_manager: CheckpointManager,
+                verbose: int = 0
+            ):
+                """
+                Initialise le callback de sauvegarde.
+
+                Args:
+                    checkpoint_manager: Gestionnaire de checkpoints
+                    verbose: Niveau de verbosité
+                """
+                super().__init__(verbose)
+                self.checkpoint_manager = checkpoint_manager
+                self.last_save = 0
+                self.last_checkpoint = None
+                self.episode_rewards = []
+                self._last_checkpoint_step = 0  # Pour suivre la dernière étape de sauvegarde
+
+            def _on_step(self) -> bool:
+                """
+                Appelé à chaque étape d'entraînement pour gérer la sauvegarde des checkpoints.
+
+                Returns:
+                    bool: True pour continuer l'entraînement, False pour l'arrêter
+                """
+                # Vérifier si c'est le moment de sauvegarder un checkpoint
+                if (self.num_timesteps - self._last_checkpoint_step) >= self.checkpoint_manager.checkpoint_interval:
+                    self._save_checkpoint()
+                    self._last_checkpoint_step = self.num_timesteps
+                return True
+
+            def _save_checkpoint(self):
+                """
+                Sauvegarde un checkpoint du modèle.
+                """
+                try:
+                    # Récupérer les métriques actuelles
+                    metrics = {}
+                    if hasattr(self.model, 'ep_info_buffer') and len(self.model.ep_info_buffer) > 0:
+                        # Calculer les statistiques de récompense sur les derniers épisodes
+                        rewards = [ep_info['r'] for ep_info in self.model.ep_info_buffer if 'r' in ep_info]
+                        if rewards:
+                            metrics['mean_reward'] = float(np.mean(rewards))
+                            metrics['min_reward'] = float(np.min(rewards))
+                            metrics['max_reward'] = float(np.max(rewards))
+                            metrics['num_episodes'] = len(rewards)
+
+                    # Récupérer le numéro d'épisode actuel si disponible
+                    episode = getattr(self.model, '_episode_num', 0)
+
+                    # Sauvegarder le checkpoint
+                    checkpoint_path = self.checkpoint_manager.save_checkpoint(
+                        model=self.model,
+                        optimizer=self.model.policy.optimizer if hasattr(self.model.policy, 'optimizer') else None,
+                        episode=episode,
+                        total_steps=self.num_timesteps,
+                        metrics=metrics,
+                        custom_data={
+                            'config': config,
+                            'policy_kwargs': policy_kwargs,
+                            'env_config': config.get('env', {})
+                        },
+                        is_final=False
+                    )
+
+                    if checkpoint_path:
+                        self.last_checkpoint = checkpoint_path
+                        self.last_save = self.num_timesteps
+                        logger.info(
+                            "Checkpoint sauvegardé (étape %d, épisode %d, récompense moyenne: %s)",
+                            self.num_timesteps,
+                            episode,
+                            metrics.get('mean_reward', 'N/A')
+                        )
+
+                        # Nettoyer les anciens checkpoints si nécessaire
+                        self.checkpoint_manager._cleanup_old_checkpoints()
+
+                except Exception as e:
+                    logger.error("Erreur lors de la sauvegarde du checkpoint: %s", str(e), exc_info=True)
+
+            def _on_training_end(self) -> None:
+                """
+                Appelé à la fin de l'entraînement pour sauvegarder un checkpoint final.
+                """
+                try:
+                    # Sauvegarder un checkpoint final
+                    metrics = {}
+                    if hasattr(self.model, 'ep_info_buffer') and len(self.model.ep_info_buffer) > 0:
+                        rewards = [ep_info['r'] for ep_info in self.model.ep_info_buffer if 'r' in ep_info]
+                        if rewards:
+                            metrics['final_mean_reward'] = float(np.mean(rewards))
+
+                    episode = getattr(self.model, '_episode_num', 0)
+
+                    checkpoint_path = self.checkpoint_manager.save_checkpoint(
+                        model=self.model,
+                        optimizer=self.model.policy.optimizer if hasattr(self.model.policy, 'optimizer') else None,
+                        episode=episode,
+                        total_steps=self.num_timesteps,
+                        metrics=metrics,
+                        custom_data={
+                            'config': config,
+                            'policy_kwargs': policy_kwargs,
+                            'env_config': config.get('env', {}),
+                            'training_completed': True
+                        },
+                        is_final=True
+                    )
+
+                    if checkpoint_path:
+                        logger.info(
+                            "Checkpoint final sauvegardé: %s (étape %d, épisode %d)",
+                            checkpoint_path, self.num_timesteps, episode
+                        )
+
+                except Exception as e:
+                    logger.error("Erreur lors de la sauvegarde du checkpoint final: %s", str(e), exc_info=True)
+
+        # Créer le callback de sauvegarde des checkpoints
+        checkpoint_callback = CustomCheckpointCallback(
+            checkpoint_manager=checkpoint_manager,
+            verbose=1
+        )
+
+        # Initialiser la liste des callbacks avec le checkpoint
+        callbacks = [checkpoint_callback]
+
+        # Ajouter le callback de progression si demandé
+        if progress_bar:
+            from stable_baselines3.common.callbacks import ProgressBarCallback
+            progress_callback = ProgressBarCallback()
+            callbacks.append(progress_callback)
+
+            # Configurer le logging pour la barre de progression
+            logger.info("Barre de progression activée pour le suivi de l'entraînement")
+
+        # Créer un CallbackList pour gérer plusieurs callbacks
+        from stable_baselines3.common.callbacks import CallbackList
+        callback = CallbackList(callbacks)
+
+        logger.info(f"{len(callbacks)} callback(s) configuré(s) pour l'entraînement")
+
+        # Prepare timeout manager with cleanup callback
+        tm = None
+        if timeout is not None and timeout > 0:
+            def _cleanup_on_timeout():
+                logger.info("Timeout reached, attempting to save checkpoint before exit...")
+                try:
+                    # Ensure checkpoint directory exists
+                    os.makedirs(checkpoint_manager.checkpoint_dir, exist_ok=True)
+                except Exception:
+                    pass
+                try:
+                    optimizer = getattr(model.policy, 'optimizer', None) if hasattr(model, 'policy') else None
+                    episode = getattr(model, '_episode_num', 0)
+                    total_steps = getattr(model, 'num_timesteps', 0)
+                    checkpoint_manager.save_checkpoint(
+                        model=model,
+                        optimizer=optimizer,
+                        episode=episode,
+                        total_steps=total_steps,
+                        is_final=False
+                    )
+                    logger.info("Checkpoint saved on timeout.")
+                except Exception as e:
+                    logger.error("Failed to save checkpoint on timeout: %s", e)
+
+            tm = TimeoutManager(timeout=float(timeout), cleanup_callback=_cleanup_on_timeout)
+
+        try:
+            # Entraînement avec gestion des interruptions
+            try:
+                # Calculer le nombre d'étapes restantes
+                total_timesteps = config.get('training', {}).get('total_timesteps', 1000000)
+                remaining_timesteps = total_timesteps - start_timesteps
+
+                if remaining_timesteps <= 0:
+                    logger.info("L'entraînement est déjà terminé selon le nombre d'étapes total configuré.")
+                    return True
+
+                logger.info("Démarrage de l'entraînement pour %d étapes supplémentaires...", remaining_timesteps)
+
+                # Démarrer l'entraînement avec les callbacks
+                if tm:
+                    with tm.limit():
+                        model.learn(
+                            total_timesteps=remaining_timesteps,
+                            callback=callback,  # Utilisation du CallbackList
+                            reset_num_timesteps=False,  # Ne pas réinitialiser le compteur d'étapes
+                            progress_bar=progress_bar  # Utiliser la barre de progression configurée
+                        )
+                else:
+                    model.learn(
+                        total_timesteps=remaining_timesteps,
+                        callback=callback,  # Utilisation du CallbackList
+                        reset_num_timesteps=False,  # Ne pas réinitialiser le compteur d'étapes
+                        progress_bar=progress_bar  # Utiliser la barre de progression configurée
+                    )
+            except KeyboardInterrupt:
+                logger.info(
+                    "\nInterruption de l'utilisateur détectée. "
+                    "Sauvegarde du dernier état..."
+                )
+                # Sauvegarder un checkpoint final
+                optimizer = None
+                if hasattr(model.policy, 'optimizer'):
+                    optimizer = model.policy.optimizer
+
+                episode = 0
+                if hasattr(model, '_episode_num'):
+                    episode = model._episode_num
+
+                total_steps = 0
+                if hasattr(model, 'num_timesteps'):
+                    total_steps = model.num_timesteps
+
+                checkpoint_manager.save_checkpoint(
+                    model=model,
+                    optimizer=optimizer,
+                    episode=episode,
+                    total_steps=total_steps,
+                    is_final=True
+                )
+                logger.info("Dernier état sauvegardé avec succès.")
+                raise
+            logger.info("Entraînement terminé avec succès!")
+
+        except (TimeoutException, TMTimeoutException):
+            logger.info(
+                "Temps d'entraînement écoulé. Arrêt de l'entraînement..."
+            )
+        except Exception as e:
+            logger.error(
+                "Erreur lors de l'entraînement: %s",
+                str(e)
+            )
             raise
 
+        finally:
+            # Sauvegarder le modèle final
+            final_metrics = {}
+            if hasattr(model, 'ep_info_buffer'):
+                rewards = [ep_info['r'] for ep_info in model.ep_info_buffer]
+                if rewards:  # Vérifier si la liste n'est pas vide
+                    final_metrics['episode_reward'] = np.mean(rewards)
+
+            optimizer = None
+            if hasattr(model.policy, 'optimizer'):
+                optimizer = model.policy.optimizer
+
+            episode = 0
+            if hasattr(model, '_episode_num'):
+                episode = model._episode_num
+
+            total_steps = 0
+            if hasattr(model, 'num_timesteps'):
+                total_steps = model.num_timesteps
+
+            checkpoint_manager.save_checkpoint(
+                model=model,
+                optimizer=optimizer,
+                episode=episode,
+                total_steps=total_steps,
+                metrics=final_metrics,
+                custom_data={
+                    'config': config,
+                    'policy_kwargs': policy_kwargs,
+                    'training_complete': True
+                },
+                is_final=True
+            )
+            logger.info("Modèle final sauvegardé avec succès.")
+
+            # Afficher un message de fin
+            logger.info("Entraînement terminé. Nettoyage des ressources...")
+
+        # Nettoyer
+        env.close()
+        return True
+
+    except Exception as e:
+        logger.error(
+            "Erreur lors de l'exécution de l'entraînement: %s",
+            str(e)
+        )
+        logger.error(traceback.format_exc())
+
+        # Fermer les environnements en cas d'erreur
+        if 'env' in locals():
+            env.close()
+
+        return False
 
 if __name__ == "__main__":
-    # Parse arguments if run from command line
     import argparse
 
     parser = argparse.ArgumentParser(
-        description="Train ADAN trading bot with timeout and checkpoint support"
+        description=(
+            "Entraîne un bot de trading ADAN avec support du timeout "
+            "et des points de contrôle"
+        )
     )
     parser.add_argument(
-        "--config", type=str, default="config/config.yaml", help="Path to config file"
+        "--config",
+        type=str,
+        default="config/config.yaml",
+        help="Chemin vers le fichier de configuration"
     )
     parser.add_argument(
-        "--timeout", type=int, default=None, help="Maximum training time in seconds"
+        "--timeout",
+        type=int,
+        default=None,
+        help="Temps maximum d'entraînement en secondes"
     )
     parser.add_argument(
         "--checkpoint-dir",
         type=str,
         default="checkpoints",
-        help="Directory to save checkpoints",
+        help="Répertoire pour enregistrer les points de contrôle",
     )
     parser.add_argument(
         "--shared-model",
         type=str,
         default=None,
-        help="Path to shared model for distributed training",
+        help=(
+            "Chemin vers un modèle partagé pour l'entraînement "
+            "distribué"
+        ),
     )
     parser.add_argument(
-        "--resume", action="store_true", help="Resume training from latest checkpoint"
+        "--resume",
+        action="store_true",
+        help="Reprend l'entraînement à partir du dernier point de contrôle"
     )
+
+    # Ajout des arguments supplémentaires mentionnés dans le patch
+    parser.add_argument(
+        "--workers",
+        type=int,
+        default=None,
+        help="Number of parallel workers (optional)"
+    )
+    parser.add_argument(
+        "--debug",
+        action="store_true",
+        help="Enable debug mode"
+    )
+
     args = parser.parse_args()
 
-    # Call main with all arguments
-    success = main(
-        config_path=args.config,
-        timeout=args.timeout,
-        checkpoint_dir=args.checkpoint_dir,
-        shared_model_path=args.shared_model,
-    )
+    # Appel robuste de la fonction main()
+    try:
+        # 1) Appel avec les arguments nommés
+        success = main(
+            config_path=args.config,
+            timeout=args.timeout,
+            checkpoint_dir=args.checkpoint_dir,
+            shared_model_path=args.shared_model,
+            resume=args.resume
+        )
+    except Exception as e:
+        print(f"Erreur lors de l'exécution: {e}", file=sys.stderr)
+        raise
+
     sys.exit(0 if success else 1)

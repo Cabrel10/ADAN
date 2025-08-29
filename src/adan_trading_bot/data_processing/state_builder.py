@@ -261,42 +261,54 @@ class StateBuilder:
         # - Indicateurs de tendance disponibles : SUPERTREND_14_2.0, PSAR_0.02_0.2
 
         # Configuration spécifique par timeframe basée sur les données disponibles
+        # Définition des indicateurs composites qui génèrent plusieurs colonnes
+        self.composite_indicators = {
+            'STOCH_14_3_3': ['STOCHK_14_3_3', 'STOCHD_14_3_3'],  # STOCH génère %K et %D (les noms réels dans les données)
+            'MACD_12_26_9': ['MACD_12_26_9', 'MACD_SIGNAL_12_26_9', 'MACD_HIST_12_26_9'],
+            'ICHIMOKU_9_26_52': ['TENKAN_9', 'KIJUN_26', 'SENKOU_A', 'SENKOU_B', 'CHIKOU_26']
+        }
+
+        # Liste des indicateurs de base (non composites)
+        self.base_indicators = [
+            'RSI_14', 'CCI_20_0.015', 'MFI_14', 'ROC_9',
+            'EMA_5', 'EMA_20', 'EMA_50', 'EMA_100', 'SMA_200',
+            'SUPERTREND_14_2.0', 'PSAR_0.02_0.2', 'ATR_14',
+            'STOCHK_14_3_3', 'STOCHD_14_3_3'  # Ajout des composants STOCH directs
+        ]
+
+        # Configuration des features attendues par timeframe
+        # Note: Le timestamp est géré séparément et n'est pas inclus dans les features
         self.expected_features = {
             '5m': [
-                # Données OHLCV de base (5)
+                # Données OHLCV de base (5) - Le timestamp est géré séparément
                 'OPEN', 'HIGH', 'LOW', 'CLOSE', 'VOLUME',
-                # Indicateurs de momentum (4)
-                'RSI_14', 'CCI_20_0.015', 'MFI_14', 'ROC_9',
+                # Indicateurs de momentum (6)
+                'RSI_14', 'STOCHK_14_3_3', 'STOCHD_14_3_3', 'CCI_20_0.015', 'ROC_9', 'MFI_14',
                 # Moyennes mobiles (2)
                 'EMA_5', 'EMA_20',
                 # Indicateurs de tendance (2)
-                'SUPERTREND_14_2.0', 'PSAR_0.02_0.2',
-                # Placeholders pour atteindre 15 caractéristiques (2)
-                'PADDING_1', 'PADDING_2'
+                'SUPERTREND_14_2.0', 'PSAR_0.02_0.2'
+                # Total: 15 features (sans le timestamp)
             ],
             '1h': [
-                # Données OHLCV de base (5)
+                # Données OHLCV de base (5) - Le timestamp est géré séparément
                 'OPEN', 'HIGH', 'LOW', 'CLOSE', 'VOLUME',
                 # Indicateurs de momentum (3)
                 'RSI_14', 'CCI_20_0.015', 'MFI_14',
-                # Moyennes mobiles (2)
-                'EMA_20', 'EMA_50',
-                # Indicateurs de tendance (2)
-                'SUPERTREND_14_2.0', 'PSAR_0.02_0.2',
-                # Placeholders (3)
-                'PADDING_1', 'PADDING_2', 'PADDING_3'
+                # Moyennes mobiles (3)
+                'EMA_50', 'EMA_100', 'SMA_200',
+                # Placeholders (4) - Pour atteindre 15 features
+                'PADDING_1', 'PADDING_2', 'PADDING_3', 'PADDING_4'
             ],
             '4h': [
-                # Données OHLCV de base (5)
+                # Données OHLCV de base (5) - Le timestamp est géré séparément
                 'OPEN', 'HIGH', 'LOW', 'CLOSE', 'VOLUME',
                 # Indicateurs de momentum (3)
                 'RSI_14', 'CCI_20_0.015', 'MFI_14',
                 # Moyennes mobiles (2)
                 'EMA_50', 'SMA_200',
-                # Indicateurs de tendance (2)
-                'SUPERTREND_14_2.0', 'PSAR_0.02_0.2',
-                # Placeholders (3)
-                'PADDING_1', 'PADDING_2', 'PADDING_3'
+                # Placeholders (5) - Pour atteindre 15 features
+                'PADDING_1', 'PADDING_2', 'PADDING_3', 'PADDING_4', 'PADDING_5'
             ]
         }
 
@@ -2085,16 +2097,48 @@ class StateBuilder:
             return np.zeros((len(window), len(cached_features)), dtype=np.float32)
 
     def _build_asset_timeframe_state(self, asset, timeframe, df: pd.DataFrame):
+        """
+        Construit l'état pour un actif et un timeframe donnés.
+        Gère les indicateurs composites qui génèrent plusieurs colonnes.
+        """
+        # Récupérer les features requises pour ce timeframe
         required = self.features_config[timeframe]
-        # 1) Création d'une copie pour éviter SettingWithCopyWarning
+
+        # Créer une copie pour éviter les avertissements
         df = df.copy()
-        # 2) Ajout des colonnes manquantes à 0.0
-        missing = [f for f in required if f not in df.columns]
-        if missing is not None and len(missing) > 0:
-            df.loc[:, missing] = 0.0
-        # 3) Sélection et ordre garanti
-        arr = df[required].to_numpy()
-        return arr  # shape = (n_rows, len(required))
+
+        # Traiter les indicateurs composites
+        processed_required = []
+        for feature in required:
+            if feature in self.composite_indicators:
+                # Ajouter toutes les colonnes générées par l'indicateur composite
+                processed_required.extend(self.composite_indicators[feature])
+            else:
+                processed_required.append(feature)
+
+        # S'assurer que toutes les colonnes requises existent
+        missing = [f for f in processed_required if f not in df.columns]
+        if missing:
+            logger.warning(f"Colonnes manquantes dans les données pour {timeframe}: {missing}")
+            # Ajouter les colonnes manquantes avec des valeurs nulles
+            for col in missing:
+                df[col] = 0.0
+
+        # Sélectionner uniquement les colonnes requises dans l'ordre spécifié
+        try:
+            # Vérifier si toutes les colonnes sont présentes
+            missing_cols = [col for col in processed_required if col not in df.columns]
+            if missing_cols:
+                raise ValueError(f"Colonnes manquantes après traitement: {missing_cols}")
+
+            arr = df[processed_required].to_numpy()
+            return arr
+
+        except Exception as e:
+            logger.error(f"Erreur lors de la construction de l'état pour {asset} {timeframe}: {str(e)}")
+            logger.error(f"Colonnes disponibles: {df.columns.tolist()}")
+            logger.error(f"Colonnes requises: {processed_required}")
+            raise
 
     def align_timeframe_dims(self, obs_by_tf: Optional[Dict[str, np.ndarray]]) -> np.ndarray:
         """
@@ -2249,7 +2293,12 @@ class StateBuilder:
 
             # Empiler tous les timeframes le long de la première dimension
             try:
+                # Log des dimensions avant empilement
+                for i, arr in enumerate(aligned):
+                    logger.debug(f"Avant empilement - Observation {i}: shape={arr.shape}, dtype={arr.dtype}")
+
                 result = np.stack(aligned, axis=0)
+                logger.debug(f"Après empilement - Résultat: shape={result.shape}, dtype={result.dtype}")
 
                 # Validation finale de la forme de sortie
                 if result.shape[0] != len(valid_obs) or result.shape[1] != self.window_size:
@@ -2298,7 +2347,11 @@ class StateBuilder:
 
         # Normalize observation array
         try:
+            logger.debug(f"Avant conversion - Type: {type(obs)}")
+            if hasattr(obs, 'shape'):
+                logger.debug(f"  Shape: {obs.shape}")
             obs_arr = np.asarray(obs, dtype=np.float32)
+            logger.debug(f"Après conversion - Type: {type(obs_arr)}, Shape: {obs_arr.shape}")
         except Exception:
             logger.warning("_wrap_observation: could not convert observation to ndarray, using zeros")
             # Fallback shape guess: use attributes if available
@@ -2329,6 +2382,26 @@ class StateBuilder:
         )
         return result
 
+    def _expand_composite_indicators(self, indicators: List[str]) -> List[str]:
+        """
+        Étend les indicateurs composites en leurs composants individuels.
+
+        Par exemple, 'STOCH_14_3' devient ['STOCHk_14_3', 'STOCHd_14_3']
+
+        Args:
+            indicators: Liste des indicateurs à étendre
+
+        Returns:
+            Liste des indicateurs avec les composites développés
+        """
+        expanded = []
+        for indicator in indicators:
+            if indicator in self.composite_indicators:
+                expanded.extend(self.composite_indicators[indicator])
+            else:
+                expanded.append(indicator)
+        return expanded
+
     def _process_timeframe_data(
         self,
         data: Dict[str, Dict[str, pd.DataFrame]],
@@ -2339,6 +2412,9 @@ class StateBuilder:
         """
         Traite les données pour un timeframe spécifique et retourne un tableau numpy
         avec la forme (window_size, n_features=15).
+
+        Le timestamp est préservé pour le suivi temporel mais n'est pas inclus dans les features.
+        Seules les colonnes spécifiées dans self.expected_features sont conservées.
 
         Args:
             data: Dictionnaire contenant les données de marché pour tous les actifs et timeframes
@@ -2354,14 +2430,18 @@ class StateBuilder:
 
         # Obtenir les caractéristiques attendues pour ce timeframe
         expected_features = self.expected_features.get(tf, [])
+
+        # Développer les indicateurs composites
+        expected_features = self._expand_composite_indicators(expected_features)
+
         logger.info(f"Caractéristiques attendues pour {tf} ({len(expected_features)}): {expected_features}")
 
         # S'assurer qu'on a exactement 15 caractéristiques
         if len(expected_features) != 15:
-            logger.warning(f"Le nombre de caractéristiques attendues n'est pas 15 mais {len(expected_features)}. Ajustement en cours...")
-            expected_features = expected_features[:15]  # On garde les 15 premières si trop
+            logger.warning(f"Le nombre de caractéristiques n'est pas 15 mais {len(expected_features)}. Ajustement en cours...")
+            expected_features = expected_features[:15]  # Tronquer si nécessaire
             if len(expected_features) < 15:
-                # Si pas assez de caractéristiques, on complète avec des placeholders
+                # Ajouter des placeholders si nécessaire
                 expected_features.extend([f'PADDING_{i}' for i in range(15 - len(expected_features))])
 
         def create_default_observation():
@@ -2414,9 +2494,24 @@ class StateBuilder:
                                  tf, missing_cols)
                     logger.debug("Colonnes disponibles: %s", available_cols)
 
-                # 4. Créer un nouveau DataFrame avec les colonnes dans l'ordre attendu
+                # 4. Exclure le timestamp des features
+                if 'timestamp' in df.columns:
+                    timestamps = df['timestamp'].copy()
+                    df = df.drop(columns=['timestamp'])
+                    logger.debug("Timestamp extrait et retiré des features")
+                else:
+                    logger.warning("Aucune colonne 'timestamp' trouvée dans les données")
+
+                # 5. Créer un nouveau DataFrame avec les colonnes dans l'ordre attendu
                 # et remplir avec des zéros les colonnes manquantes
+                logger.info("Création du DataFrame traité avec les colonnes attendues")
+                logger.info("Colonnes attendues: %s", expected_features)
+                logger.info("Colonnes disponibles dans les données: %s", df.columns.tolist())
+
                 processed_data = pd.DataFrame(index=df.index)
+
+                # Liste pour suivre les colonnes ajoutées
+                added_columns = []
 
                 for col in expected_features:
                     # Vérifier si la colonne existe (en tenant compte de la casse)
@@ -2427,6 +2522,7 @@ class StateBuilder:
                         original_col = next((c for c in df.columns if c.upper() == col.upper()), col)
                         # Copier les données avec conversion en float32
                         processed_data[col] = df[original_col].astype(np.float32)
+                        added_columns.append(col)
 
                         # Vérifier les valeurs manquantes ou infinies
                         if processed_data[col].isna().any() or np.isinf(processed_data[col]).any():
@@ -2435,9 +2531,14 @@ class StateBuilder:
                     else:
                         # Créer une colonne de zéros
                         processed_data[col] = 0.0
+                        added_columns.append(f"{col} (ajoutée)")
                         logger.debug("Colonne %s manquante, remplacée par des zéros", col)
 
                 # 5. Vérification finale des dimensions
+                logger.info("Colonnes ajoutées au DataFrame traité: %s", added_columns)
+                logger.info("Nombre de colonnes dans le DataFrame traité: %d", len(processed_data.columns))
+                logger.info("Colonnes actuelles: %s", processed_data.columns.tolist())
+
                 if len(processed_data.columns) != 15:
                     logger.error("Le nombre de colonnes (%d) ne correspond pas aux 15 attendues. Ajustement en cours...",
                                 len(processed_data.columns))
@@ -2598,6 +2699,22 @@ class StateBuilder:
             if not isinstance(portfolio_state, np.ndarray):
                 logger.warning("État du portefeuille invalide, utilisation d'un tableau de zéros")
                 portfolio_state = np.zeros(17, dtype=np.float32)
+
+            # Forcer la forme exacte de l'observation (3, 20, 15)
+            if aligned_obs.shape != (3, 20, 15):
+                logger.warning(
+                    "Forme d'observation inattendue: %s. Forçage à (3, 20, 15).",
+                    aligned_obs.shape
+                )
+                # Créer un nouveau tableau avec la forme exacte
+                new_obs = np.zeros((3, 20, 15), dtype=np.float32)
+                # Copier les données existantes
+                min_timeframes = min(aligned_obs.shape[0], 3)
+                min_steps = min(aligned_obs.shape[1], 20)
+                min_features = min(aligned_obs.shape[2], 15)
+                new_obs[:min_timeframes, :min_steps, :min_features] = \
+                    aligned_obs[:min_timeframes, :min_steps, :min_features]
+                aligned_obs = new_obs
 
             # Créer l'observation finale avec vérification de type
             final_observation = {
