@@ -6,21 +6,96 @@ into a structured observation space suitable for reinforcement learning.
 """
 
 import gc
-import hashlib
-import logging
 import os
-import warnings
-from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple, Union
-
-import joblib
+import logging
+import traceback
 import numpy as np
 import pandas as pd
+from typing import Dict, List, Tuple, Any, Optional, Union
+
 import psutil
 from sklearn.preprocessing import MinMaxScaler, RobustScaler, StandardScaler
 
-
 logger = logging.getLogger(__name__)
+
+
+def _force_canonical_output(market_arr, portfolio_arr, expected_market_shape=None,
+                          expected_port_shape=None):
+    """Convertit les tableaux d'entrée en un format canonique.
+
+    Args:
+        market_arr: Données de marché à convertir (peut être un tableau numpy,
+                   un tenseur PyTorch, un DataFrame pandas, etc.)
+        portfolio_arr: Données de portefeuille à convertir
+        expected_market_shape: Forme attendue pour les données de marché
+                             (par défaut: None)
+        expected_port_shape: Forme attendue pour les données de portefeuille
+                           (par défaut: None)
+
+    Returns:
+        Tuple de (market_np, portfolio_np) où les deux sont des tableaux numpy
+        du bon format
+    """
+    def to_np(x):
+        """Fonction utilitaire pour convertir en numpy."""
+        try:
+            import torch
+            if isinstance(x, torch.Tensor):
+                return x.detach().cpu().numpy()
+        except Exception:
+            pass
+        try:
+            import pandas as _pd
+            if isinstance(x, (_pd.DataFrame, _pd.Series)):
+                return x.values
+        except Exception:
+            pass
+        try:
+            return np.asarray(x)
+        except Exception:
+            return None
+
+    # Conversion en numpy
+    m = to_np(market_arr)
+    p = to_np(portfolio_arr)
+
+    # Valeur par défaut si None
+    if m is None:
+        if expected_market_shape is not None:
+            m = np.zeros(expected_market_shape, dtype=np.float32)
+        else:
+            m = np.zeros((1, 1, 1), dtype=np.float32)
+
+    # Conversion du type et ajustement des dimensions
+    m = m.astype(np.float32, copy=False)
+    if expected_market_shape is not None:
+        # Ajustement à la forme attendue
+        target = tuple(expected_market_shape)
+        out = np.zeros(target, dtype=np.float32)
+        # S'assurer que m a au moins le même nombre de dimensions
+        while m.ndim < len(target):
+            m = np.expand_dims(m, 0)
+        slices = tuple(slice(0, min(m.shape[i], target[i])) for i in range(len(target)))
+        out[slices] = m[slices]
+        m = out
+
+    # Gestion du portefeuille
+    if p is None:
+        if expected_port_shape is not None:
+            p = np.zeros(expected_port_shape, dtype=np.float32)
+        else:
+            p = np.zeros((1,), dtype=np.float32)
+
+    p = p.astype(np.float32, copy=False)
+    # Aplatir ou redimensionner le portefeuille à la forme attendue
+    p = p.reshape(-1)
+    if expected_port_shape is not None:
+        desired = int(np.prod(expected_port_shape))
+        outp = np.zeros(desired, dtype=np.float32)
+        outp[:min(desired, p.shape[0])] = p[:min(desired, p.shape[0])]
+        p = outp.reshape(expected_port_shape)
+
+    return m, p
 
 
 class TimeframeConfig:
@@ -44,12 +119,12 @@ class TimeframeConfig:
         Args:
             timeframe: The timeframe identifier (e.g., '5m', '1h')
             features: List of feature names for this timeframe
-            window_size: Number of time steps to include
+            window_size: Number of time steps to include in the window
             normalize: Whether to normalize the data
         """
         self.timeframe = timeframe
-        self.features = features
-        self.window_size = window_size
+        self.features = features if (features is not None and len(features) > 0) else []
+        self.window_size = window_size if window_size is not None else 100
         self.normalize = normalize
 
     def to_dict(self) -> Dict[str, Any]:
@@ -118,8 +193,7 @@ class StateBuilder:
                     "CLOSE",
                     "VOLUME",
                     "RSI_14",
-                    "STOCHk_14_3_3",
-                    "STOCHd_14_3_3",
+                    "STOCH_14_3",
                     "CCI_20_0.015",
                     "ROC_9",
                     "MFI_14",
@@ -127,6 +201,7 @@ class StateBuilder:
                     "EMA_20",
                     "SUPERTREND_14_2.0",
                     "PSAR_0.02_0.2",
+                    "ATR_14"
                 ],
                 "1h": [
                     "OPEN",
@@ -171,6 +246,86 @@ class StateBuilder:
             raise ValueError(
                 "Aucun timeframe valide trouvé dans la configuration des fonctionnalités"
             )
+
+        # Log de la configuration des caractéristiques
+        logger.info("=== Configuration des caractéristiques par timeframe ===")
+        for tf in self.timeframes:
+            features = self.features_config.get(tf, [])
+            logger.info(f"Timeframe {tf}: {len(features)} features - {features}")
+
+        # Définition des fonctionnalités disponibles par timeframe
+        # Basé sur les logs, nous avons les indicateurs suivants disponibles :
+        # - Données OHLCV de base : OPEN, HIGH, LOW, CLOSE, VOLUME
+        # - Indicateurs de momentum disponibles : RSI_14, CCI_20_0.015, MFI_14, ROC_9
+        # - Moyennes mobiles disponibles : EMA_5, EMA_20
+        # - Indicateurs de tendance disponibles : SUPERTREND_14_2.0, PSAR_0.02_0.2
+
+        # Configuration spécifique par timeframe basée sur les données disponibles
+        self.expected_features = {
+            '5m': [
+                # Données OHLCV de base (5)
+                'OPEN', 'HIGH', 'LOW', 'CLOSE', 'VOLUME',
+                # Indicateurs de momentum (4)
+                'RSI_14', 'CCI_20_0.015', 'MFI_14', 'ROC_9',
+                # Moyennes mobiles (2)
+                'EMA_5', 'EMA_20',
+                # Indicateurs de tendance (2)
+                'SUPERTREND_14_2.0', 'PSAR_0.02_0.2',
+                # Placeholders pour atteindre 15 caractéristiques (2)
+                'PADDING_1', 'PADDING_2'
+            ],
+            '1h': [
+                # Données OHLCV de base (5)
+                'OPEN', 'HIGH', 'LOW', 'CLOSE', 'VOLUME',
+                # Indicateurs de momentum (3)
+                'RSI_14', 'CCI_20_0.015', 'MFI_14',
+                # Moyennes mobiles (2)
+                'EMA_20', 'EMA_50',
+                # Indicateurs de tendance (2)
+                'SUPERTREND_14_2.0', 'PSAR_0.02_0.2',
+                # Placeholders (3)
+                'PADDING_1', 'PADDING_2', 'PADDING_3'
+            ],
+            '4h': [
+                # Données OHLCV de base (5)
+                'OPEN', 'HIGH', 'LOW', 'CLOSE', 'VOLUME',
+                # Indicateurs de momentum (3)
+                'RSI_14', 'CCI_20_0.015', 'MFI_14',
+                # Moyennes mobiles (2)
+                'EMA_50', 'SMA_200',
+                # Indicateurs de tendance (2)
+                'SUPERTREND_14_2.0', 'PSAR_0.02_0.2',
+                # Placeholders (3)
+                'PADDING_1', 'PADDING_2', 'PADDING_3'
+            ]
+        }
+
+        # S'assurer que chaque timeframe a exactement 15 caractéristiques
+        for tf in self.expected_features:
+            features = self.expected_features[tf]
+            if len(features) != 15:
+                logger.warning(f"Le timeframe {tf} a {len(features)} fonctionnalités au lieu de 15. Ajustement en cours...")
+                # Si trop de fonctionnalités, on garde les 15 premières
+                if len(features) > 15:
+                    self.expected_features[tf] = features[:15]
+                # Si pas assez, on complète avec des placeholders
+                else:
+                    padding = [f'PADDING_{i}' for i in range(15 - len(features))]
+                    self.expected_features[tf].extend(padding)
+
+        # Vérifier la cohérence entre la configuration et les fonctionnalités attendues
+        for tf in self.timeframes:
+            if tf in self.expected_features:
+                expected = set(self.expected_features[tf])
+                actual = set(self.features_config[tf])
+                if expected != actual:
+                    logger.warning(
+                        f"Configuration des fonctionnalités incohérente pour {tf}. "
+                        f"Attendu: {expected}, Reçu: {actual}"
+                    )
+                    # Mettre à jour la configuration avec les fonctionnalités attendues
+                    self.features_config[tf] = self.expected_features[tf]
+                    logger.info(f"Configuration des fonctionnalités mise à jour pour {tf}")
 
         self.nb_features_per_tf = {
             tf: len(features)
@@ -287,7 +442,7 @@ class StateBuilder:
     def set_timeframe_config(self, timeframe: str, window_size: int, features: List[str]) -> None:
         """
         Configure les paramètres d'un timeframe spécifique.
-        
+
         Args:
             timeframe: Identifiant du timeframe (ex: '5m', '1h', '4h')
             window_size: Taille de la fenêtre pour ce timeframe
@@ -296,19 +451,19 @@ class StateBuilder:
         if timeframe not in self.timeframes:
             logger.warning(f"Tentative de configuration d'un timeframe non pris en charge: {timeframe}")
             return
-            
+
         # Mettre à jour la configuration des features si fournie
         if features:
             self.features_config[timeframe] = features
             self.nb_features_per_tf[timeframe] = len(features)
-            
+
         # Mettre à jour la taille de la fenêtre pour ce timeframe
         if hasattr(self, 'window_sizes'):
             self.window_sizes[timeframe] = window_size
         else:
             self.window_sizes = {tf: self.window_size for tf in self.timeframes}
             self.window_sizes[timeframe] = window_size
-            
+
         # Mettre à jour la taille maximale de fenêtre si nécessaire
         if window_size > self.window_size:
             self.window_size = window_size
@@ -318,7 +473,7 @@ class StateBuilder:
                 self.window_size,
                 self.max_features,
             )
-            
+
         logger.info(f"Configuration du timeframe {timeframe}: fenêtre={window_size}, features={len(features)}")
 
     def _initialize_memory_metrics(self):
@@ -1037,10 +1192,10 @@ class StateBuilder:
                     trend_strengths.append(adx)
 
             # Calcul des métriques agrégées
-            if volatility_scores:
+            if volatility_scores is not None and len(volatility_scores) > 0:
                 regime_metrics["volatility"] = float(np.mean(volatility_scores))
 
-            if trend_strengths:
+            if trend_strengths is not None and len(trend_strengths) > 0:
                 regime_metrics["trend_strength"] = (
                     float(np.mean(trend_strengths)) * 2 - 1
                 )  # -1 à 1
@@ -1349,111 +1504,375 @@ class StateBuilder:
 
     def _apply_temporal_transforms(self, df: pd.DataFrame) -> pd.DataFrame:
         """
-        Apply temporal transformations to the input data based on config.
-        
+        Applique des transformations temporelles aux données d'entrée selon la configuration.
+
+        Cette méthode ajoute des indicateurs techniques et des caractéristiques temporelles
+        aux données de prix et de volume pour améliorer la capacité du modèle à détecter
+        des motifs temporels.
+
         Args:
-            df: Input DataFrame with time series data
-            
+            df: DataFrame d'entrée avec les données de séries temporelles
+
         Returns:
-            DataFrame with additional temporal features
+            DataFrame avec des caractéristiques temporelles supplémentaires
+
+        Raises:
+            ValueError: Si les données d'entrée sont vides ou invalides
         """
+        # Vérifier si les transformations temporelles sont activées
         if not hasattr(self, 'config') or not self.config.get('temporal_transforms', {}).get('enabled', True):
+            logger.debug("Transformations temporelles désactivées dans la configuration")
             return df
-            
+
+        # Vérifier les données d'entrée
+        if df.empty or not isinstance(df, pd.DataFrame):
+            logger.warning("Données d'entrée vides ou invalides pour les transformations temporelles")
+            return pd.DataFrame()
+
+        # Faire une copie pour éviter les effets de bord
         df = df.copy()
-        numeric_cols = df.select_dtypes(include=['float64', 'int64']).columns
-        
+
+        # Journaliser le nombre de lignes et colonnes initiales
+        logger.debug("Application des transformations temporelles sur un DataFrame de forme %s", df.shape)
+
+        # Identifier les colonnes numériques pour les transformations
+        numeric_cols = df.select_dtypes(include=['float64', 'float32', 'int64', 'int32']).columns.tolist()
+        if not numeric_cols:
+            logger.warning("Aucune colonne numérique trouvée pour les transformations temporelles")
+            return df
+
         # 1. Différences premières
         if 'diffs' in self.config.get('temporal_transforms', {}):
-            for col in self.config['temporal_transforms']['diffs']:
-                if col in df.columns:
-                    df[f'{col}_diff'] = df[col].diff().fillna(0)
-        
+            diff_cols = self.config['temporal_transforms']['diffs']
+            if not isinstance(diff_cols, list):
+                logger.warning("La configuration 'diffs' doit être une liste de noms de colonnes")
+            else:
+                logger.debug("Application des différences premières sur les colonnes: %s", diff_cols)
+                for col in diff_cols:
+                    try:
+                        if col in df.columns:
+                            # Calculer la différence première
+                            diff_series = df[col].diff()
+
+                            # Remplacer les valeurs infinies et NaN
+                            if np.isinf(diff_series).any() or diff_series.isna().any():
+                                logger.debug("Valeurs infinies ou NaN détectées dans les différences pour %s", col)
+                                diff_series = diff_series.replace([np.inf, -np.inf], np.nan).fillna(0)
+
+                            # Ajouter la colonne différenciée
+                            new_col = f'{col}_diff'
+                            df[new_col] = diff_series.astype(np.float32)
+                            logger.debug("Colonne ajoutée: %s (min=%.4f, max=%.4f)",
+                                        new_col, df[new_col].min(), df[new_col].max())
+                        else:
+                            logger.warning("Colonne non trouvée pour le calcul des différences: %s", col)
+                    except Exception as e:
+                        logger.error("Erreur lors du calcul de la différence pour %s: %s",
+                                   col, str(e), exc_info=True)
+
+        # Mettre à jour la liste des colonnes numériques après l'ajout des différences
+        numeric_cols = df.select_dtypes(include=['float64', 'float32', 'int64', 'int32']).columns.tolist()
+
         # 2. Moyennes mobiles
         if 'rolling_windows' in self.config.get('temporal_transforms', {}):
-            for window in self.config['temporal_transforms']['rolling_windows']:
-                for col in numeric_cols:
-                    df[f'{col}_ma{window}'] = (
-                        df[col]
-                        .rolling(window=window, min_periods=1)
-                        .mean()
-                        .fillna(method='bfill')
-                    )
-        
-        # 3. RSI
-        if self.config.get('temporal_transforms', {}).get('rsi_window'):
-            delta = df['close'].diff()
-            gain = (delta.where(delta > 0, 0)).rolling(
-                window=self.config['temporal_transforms']['rsi_window']
-            ).mean()
-            loss = (-delta.where(delta < 0, 0)).rolling(
-                window=self.config['temporal_transforms']['rsi_window']
-            ).mean()
-            rs = gain / loss
-            df['rsi'] = 100 - (100 / (1 + rs)).fillna(50)  # 50 is neutral RSI
-        
-        # 4. MACD
-        if all(k in self.config.get('temporal_transforms', {}) 
-               for k in ['macd_fast', 'macd_slow', 'macd_signal']):
-            exp1 = df['close'].ewm(
-                span=self.config['temporal_transforms']['macd_fast'],
-                adjust=False
-            ).mean()
-            exp2 = df['close'].ewm(
-                span=self.config['temporal_transforms']['macd_slow'],
-                adjust=False
-            ).mean()
-            df['macd'] = exp1 - exp2
-            df['macd_signal'] = df['macd'].ewm(
-                span=self.config['temporal_transforms']['macd_signal'],
-                adjust=False
-            ).mean()
-        
+            rolling_windows = self.config['temporal_transforms']['rolling_windows']
+            if not isinstance(rolling_windows, list) or not all(isinstance(w, int) and w > 0 for w in rolling_windows):
+                logger.warning("La configuration 'rolling_windows' doit être une liste d'entiers positifs")
+            else:
+                logger.debug("Calcul des moyennes mobiles avec les fenêtres: %s", rolling_windows)
+                for window in rolling_windows:
+                    if window < 1:
+                        logger.warning("Fenêtre de moyenne mobile invalide (doit être >= 1): %d", window)
+                        continue
+
+                    for col in numeric_cols:
+                        try:
+                            # Calculer la moyenne mobile
+                            ma_series = df[col].rolling(window=window, min_periods=1).mean()
+
+                            # Remplir les valeurs manquantes
+                            if ma_series.isna().any():
+                                logger.debug("Valeurs manquantes détectées dans la moyenne mobile de %s (fenêtre=%d)",
+                                           col, window)
+                                ma_series = ma_series.ffill().bfill().fillna(0)
+
+                            # Ajouter la colonne de moyenne mobile
+                            new_col = f'{col}_ma{window}'
+                            df[new_col] = ma_series.astype(np.float32)
+
+                            # Journalisation des statistiques
+                            logger.debug("Moyenne mobile ajoutée: %s (min=%.4f, max=%.4f, mean=%.4f)",
+                                       new_col, df[new_col].min(), df[new_col].max(), df[new_col].mean())
+
+                        except Exception as e:
+                            logger.error("Erreur lors du calcul de la moyenne mobile pour %s (fenêtre=%d): %s",
+                                       col, window, str(e), exc_info=True)
+
+        # 3. RSI (Relative Strength Index)
+        rsi_config = self.config.get('temporal_transforms', {}).get('rsi_window')
+        if rsi_config:
+            try:
+                # Vérifier que la configuration est valide
+                if not isinstance(rsi_config, int) or rsi_config < 1:
+                    logger.warning("La configuration RSI doit être un entier positif, reçu: %s", rsi_config)
+                elif 'close' not in df.columns:
+                    logger.warning("Colonne 'close' non trouvée pour le calcul du RSI")
+                else:
+                    window = int(rsi_config)
+                    logger.debug("Calcul du RSI avec une fenêtre de %d périodes", window)
+
+                    # Calculer les variations de prix
+                    delta = df['close'].diff()
+
+                    # Séparer les gains et les pertes
+                    gain = delta.where(delta > 0, 0.0)
+                    loss = -delta.where(delta < 0, 0.0)
+
+                    # Calculer les moyennes mobiles des gains et pertes
+                    avg_gain = gain.rolling(window=window, min_periods=1).mean()
+                    avg_loss = loss.rolling(window=window, min_periods=1).mean()
+
+                    # Éviter la division par zéro
+                    avg_loss = avg_loss.replace(0, np.nan)
+
+                    # Calculer le RS et le RSI
+                    rs = avg_gain / avg_loss
+                    rsi = 100 - (100 / (1 + rs))
+
+                    # Remplacer les valeurs infinies et NaN
+                    rsi = rsi.replace([np.inf, -np.inf], np.nan).fillna(50.0)  # 50 est la valeur neutre du RSI
+
+                    # Ajouter la colonne RSI
+                    df['rsi'] = rsi.astype(np.float32)
+
+                    # Journalisation des statistiques
+                    logger.debug("RSI calculé (min=%.2f, max=%.2f, mean=%.2f)",
+                               df['rsi'].min(), df['rsi'].max(), df['rsi'].mean())
+
+            except Exception as e:
+                logger.error("Erreur lors du calcul du RSI: %s", str(e), exc_info=True)
+
+        # 4. MACD (Moving Average Convergence Divergence)
+        macd_config = self.config.get('temporal_transforms', {})
+        required_macd_keys = ['macd_fast', 'macd_slow', 'macd_signal']
+
+        if all(k in macd_config for k in required_macd_keys):
+            try:
+                # Vérifier que les paramètres sont valides
+                fast = int(macd_config['macd_fast'])
+                slow = int(macd_config['macd_slow'])
+                signal = int(macd_config['macd_signal'])
+
+                if fast <= 0 or slow <= 0 or signal <= 0:
+                    logger.warning("Les paramètres MACD doivent être des entiers positifs (fast=%d, slow=%d, signal=%d)",
+                                 fast, slow, signal)
+                elif fast >= slow:
+                    logger.warning("La période MACD rapide (%d) doit être inférieure à la période lente (%d)",
+                                 fast, slow)
+                elif 'close' not in df.columns:
+                    logger.warning("Colonne 'close' non trouvée pour le calcul du MACD")
+                else:
+                    logger.debug("Calcul du MACD avec fast=%d, slow=%d, signal=%d", fast, slow, signal)
+
+                    # Calculer les moyennes mobiles exponentielles
+                    exp1 = df['close'].ewm(span=fast, adjust=False, min_periods=1).mean()
+                    exp2 = df['close'].ewm(span=slow, adjust=False, min_periods=1).mean()
+
+                    # Calculer la ligne MACD (différence entre les deux EMA)
+                    macd_line = exp1 - exp2
+
+                    # Calculer la ligne de signal (EMA de la ligne MACD)
+                    signal_line = macd_line.ewm(span=signal, adjust=False, min_periods=1).mean()
+
+                    # Ajouter les colonnes au DataFrame
+                    df['macd'] = macd_line.astype(np.float32)
+                    df['macd_signal'] = signal_line.astype(np.float32)
+
+                    # Calculer l'histogramme MACD (différence entre la ligne MACD et la ligne de signal)
+                    df['macd_hist'] = (macd_line - signal_line).astype(np.float32)
+
+                    # Journalisation des statistiques
+                    logger.debug("MACD calculé - Ligne: min=%.4f, max=%.4f",
+                               df['macd'].min(), df['macd'].max())
+                    logger.debug("Signal MACD - min=%.4f, max=%.4f",
+                               df['macd_signal'].min(), df['macd_signal'].max())
+                    logger.debug("Histogramme MACD - min=%.4f, max=%.4f",
+                               df['macd_hist'].min(), df['macd_hist'].max())
+
+            except (ValueError, TypeError) as e:
+                logger.error("Erreur de type dans les paramètres MACD: %s", str(e))
+            except Exception as e:
+                logger.error("Erreur lors du calcul du MACD: %s", str(e), exc_info=True)
+
         # 5. Bandes de Bollinger
-        if all(k in self.config.get('temporal_transforms', {}) 
-               for k in ['bollinger_window', 'bollinger_std']):
-            window = self.config['temporal_transforms']['bollinger_window']
-            std = self.config['temporal_transforms']['bollinger_std']
-            
-            df['bollinger_mid'] = df['close'].rolling(window=window).mean()
-            df['bollinger_std'] = df['close'].rolling(window=window).std()
-            df['bollinger_upper'] = df['bollinger_mid'] + (df['bollinger_std'] * std)
-            df['bollinger_lower'] = df['bollinger_mid'] - (df['bollinger_std'] * std)
-        
+        bb_config = self.config.get('temporal_transforms', {})
+        if all(k in bb_config for k in ['bollinger_window', 'bollinger_std']):
+            try:
+                # Récupérer et valider les paramètres
+                window = int(bb_config['bollinger_window'])
+                std_dev = float(bb_config['bollinger_std'])
+
+                if window <= 0:
+                    logger.warning("La fenêtre des bandes de Bollinger doit être un entier positif, reçu: %d", window)
+                elif std_dev <= 0:
+                    logger.warning("L'écart-type des bandes de Bollinger doit être un nombre positif, reçu: %.2f", std_dev)
+                elif 'close' not in df.columns:
+                    logger.warning("Colonne 'close' non trouvée pour le calcul des bandes de Bollinger")
+                else:
+                    logger.debug("Calcul des bandes de Bollinger avec fenêtre=%d, écart-type=%.2f", window, std_dev)
+
+                    # Calculer la moyenne mobile (ligne médiane)
+                    middle_band = df['close'].rolling(window=window, min_periods=1).mean()
+
+                    # Calculer l'écart-type
+                    rolling_std = df['close'].rolling(window=window, min_periods=1).std()
+
+                    # Calculer les bandes supérieure et inférieure
+                    upper_band = middle_band + (rolling_std * std_dev)
+                    lower_band = middle_band - (rolling_std * std_dev)
+
+                    # Ajouter les colonnes au DataFrame
+                    df['bollinger_mid'] = middle_band.astype(np.float32)
+                    df['bollinger_upper'] = upper_band.astype(np.float32)
+                    df['bollinger_lower'] = lower_band.astype(np.float32)
+
+                    # Calculer la largeur des bandes (pourcentage)
+                    df['bollinger_width'] = ((upper_band - lower_band) / middle_band * 100).astype(np.float32)
+
+                    # Journalisation des statistiques
+                    logger.debug("Bandes de Bollinger calculées - Moyenne: min=%.4f, max=%.4f",
+                               df['bollinger_mid'].min(), df['bollinger_mid'].max())
+                    logger.debug("Bande supérieure: min=%.4f, max=%.4f",
+                               df['bollinger_upper'].min(), df['bollinger_upper'].max())
+                    logger.debug("Bande inférieure: min=%.4f, max=%.4f",
+                               df['bollinger_lower'].min(), df['bollinger_lower'].max())
+                    logger.debug("Largeur des bandes: min=%.2f%%, max=%.2f%%",
+                               df['bollinger_width'].min(), df['bollinger_width'].max())
+
+            except (ValueError, TypeError) as e:
+                logger.error("Erreur de type dans les paramètres des bandes de Bollinger: %s", str(e))
+            except Exception as e:
+                logger.error("Erreur lors du calcul des bandes de Bollinger: %s", str(e), exc_info=True)
+
         # 6. Volume moyen mobile
-        if 'rolling_windows' in self.config.get('temporal_transforms', {}):
-            for window in self.config['temporal_transforms']['rolling_windows']:
-                if 'volume' in df.columns:
-                    df[f'volume_ma{window}'] = (
-                        df['volume']
-                        .rolling(window=window, min_periods=1)
-                        .mean()
-                        .fillna(method='bfill')
-                    )
-        
-        # Suppression des NaN générés par les indicateurs
-        df = df.bfill().ffill().fillna(0)
-        
+        volume_windows = self.config.get('temporal_transforms', {}).get('volume_rolling_windows',
+                                                                      self.config.get('temporal_transforms', {}).get('rolling_windows', []))
+
+        if volume_windows and 'volume' in df.columns:
+            try:
+                if not isinstance(volume_windows, list) or not all(isinstance(w, int) and w > 0 for w in volume_windows):
+                    logger.warning("La configuration 'volume_rolling_windows' doit être une liste d'entiers positifs")
+                else:
+                    logger.debug("Calcul des moyennes mobiles de volume avec les fenêtres: %s", volume_windows)
+
+                    for window in volume_windows:
+                        try:
+                            if window < 1:
+                                logger.warning("Fenêtre de volume invalide (doit être >= 1): %d", window)
+                                continue
+
+                            # Calculer la moyenne mobile du volume
+                            volume_ma = df['volume'].rolling(window=window, min_periods=1).mean()
+
+                            # Remplir les valeurs manquantes
+                            if volume_ma.isna().any():
+                                logger.debug("Valeurs manquantes détectées dans la moyenne mobile du volume (fenêtre=%d)", window)
+                                volume_ma = volume_ma.ffill().bfill().fillna(0)
+
+                            # Ajouter la colonne
+                            col_name = f'volume_ma{window}'
+                            df[col_name] = volume_ma.astype(np.float32)
+
+                            # Journalisation des statistiques
+                            logger.debug("Moyenne mobile de volume ajoutée: %s (min=%.2f, max=%.2f, mean=%.2f)",
+                                       col_name, df[col_name].min(), df[col_name].max(), df[col_name].mean())
+
+                        except Exception as e:
+                            logger.error("Erreur lors du calcul de la moyenne mobile du volume (fenêtre=%d): %s",
+                                       window, str(e), exc_info=True)
+
+            except Exception as e:
+                logger.error("Erreur lors du traitement des fenêtres de volume: %s", str(e), exc_info=True)
+        elif 'volume' not in df.columns:
+            logger.debug("Colonne 'volume' non trouvée, calcul des moyennes mobiles de volume ignoré")
+
+        # Nettoyage final des valeurs manquantes et infinies
+        try:
+            # Compter les NaN et infinis avant nettoyage
+            nan_before = df.isna().sum().sum()
+            inf_before = np.isinf(df.select_dtypes(include=[np.number])).sum().sum()
+
+            # Remplacer les infinis par NaN d'abord
+            df = df.replace([np.inf, -np.inf], np.nan)
+
+            # Remplir les valeurs manquantes
+            df = df.ffill().bfill()
+
+            # Remplacer les valeurs manquantes restantes par 0
+            df = df.fillna(0)
+
+            # Vérifier s'il reste des valeurs manquantes ou infinies
+            nan_after = df.isna().sum().sum()
+            inf_after = np.isinf(df.select_dtypes(include=[np.number])).sum().sum()
+
+            # Journalisation du nettoyage
+            if nan_before > 0 or inf_before > 0:
+                logger.debug("Nettoyage des valeurs manquantes: %d NaN et %d infinis remplacés",
+                           nan_before, inf_before)
+
+            if nan_after > 0 or inf_after > 0:
+                logger.warning("Il reste %d valeurs manquantes et %d valeurs infinies après nettoyage",
+                             nan_after, inf_after)
+
+            # Vérifier la cohérence des données
+            inf_cols = df.columns[np.isinf(df).any()].tolist()
+            if inf_cols:
+                logger.warning("Valeurs infinies détectées dans les colonnes: %s", inf_cols)
+
+            nan_cols = df.columns[df.isna().any()].tolist()
+            if nan_cols:
+                logger.warning("Valeurs manquantes détectées dans les colonnes: %s", nan_cols)
+
+        except Exception as e:
+            logger.error("Erreur lors du nettoyage final des données: %s", str(e), exc_info=True)
+            # En cas d'erreur, essayer de récupérer en forçant le remplissage par zéro
+            df = df.fillna(0)
+            df = df.replace([np.inf, -np.inf], 0)
+            logger.warning("Récupération après erreur: toutes les valeurs manquantes et infinies ont été remplacées par 0")
+
+        # Vérifier la forme finale des données
+        logger.debug("Traitement temporel terminé. Forme des données: %s, colonnes: %s",
+                    df.shape, ", ".join(df.columns.tolist()[:5]) + ("..." if len(df.columns) > 5 else ""))
+
         return df
 
     def _apply_data_augmentation(self, df: pd.DataFrame) -> pd.DataFrame:
         """
         Apply data augmentation to the input data based on config.
-        
+
         Args:
             df: Input DataFrame with time series data
-            
+
         Returns:
             DataFrame with augmented data
         """
         if not hasattr(self, 'config') or not self.config.get('data_augmentation', {}).get('enabled', False):
             return df
-            
+
         df = df.copy()
         config = self.config.get('data_augmentation', {})
         numeric_cols = df.select_dtypes(include=['float64', 'int64']).columns
-        
+
         # 1. Bruit gaussien
+        self.features = config.get('features', ['open', 'high', 'low', 'close', 'volume'])
+        self.technical_indicators = config.get('technical_indicators', [])
+
+        # Log de la configuration des caractéristiques
+        logger.info(f"Configuration - Features: {self.features}")
+        logger.info(f"Configuration - Technical indicators: {self.technical_indicators}")
+        logger.info(f"Nombre total de caractéristiques: {len(self.features + self.technical_indicators)}")
+        logger.info(f"Observation shape: {self.observation_shape}")
+
         if config.get('gaussian_noise', {}).get('enabled', True):
             noise_std = config.get('gaussian_noise', {}).get('std', 0.01)
             for col in numeric_cols:
@@ -1461,176 +1880,209 @@ class StateBuilder:
                     continue
                 noise = np.random.normal(0, noise_std * df[col].std(), size=len(df))
                 df[col] = df[col] + noise
-        
+
         # 2. Time warping (warping temporel)
         if config.get('time_warping', {}).get('enabled', False):
             window = config['time_warping'].get('window', 10)
             sigma = config['time_warping'].get('sigma', 0.2)
-            
+
             for i in range(0, len(df) - window, window):
                 window_slice = slice(i, min(i + window, len(df)))
                 warp_factor = np.random.normal(1.0, sigma)
-                
+
                 for col in numeric_cols:
                     if col in config.get('time_warping', {}).get('exclude_columns', []):
                         continue
-                        
+
                     # Appliquer un facteur d'échelle aléatoire à la fenêtre
                     df.iloc[window_slice][col] *= warp_factor
-        
+
         # 3. Permutation de fenêtres
         if config.get('window_permutation', {}).get('enabled', False):
             window_size = config['window_permutation'].get('window_size', 5)
             n_permutations = config['window_permutation'].get('n_permutations', 1)
-            
+
             for _ in range(n_permutations):
                 if len(df) > 2 * window_size:
                     start = np.random.randint(0, len(df) - 2 * window_size)
                     window1 = slice(start, start + window_size)
                     window2 = slice(start + window_size, start + 2 * window_size)
-                    
+
                     for col in numeric_cols:
                         if col in config.get('window_permutation', {}).get('exclude_columns', []):
                             continue
-                            
+
                         # Échanger les deux fenêtres
                         temp = df[col].iloc[window1].copy()
                         df[col].iloc[window1] = df[col].iloc[window2].values
                         df[col].iloc[window2] = temp.values
-        
+
         # 4. Scaling aléatoire
         if config.get('random_scaling', {}).get('enabled', False):
             scale_range = config['random_scaling'].get('scale_range', [0.9, 1.1])
             for col in numeric_cols:
                 if col in config.get('random_scaling', {}).get('exclude_columns', []):
                     continue
-                    
+
                 scale = np.random.uniform(scale_range[0], scale_range[1])
                 df[col] = df[col] * scale
-        
+
         # 5. Ajout de tendances
         if config.get('trend_augmentation', {}).get('enabled', False):
             max_trend = config['trend_augmentation'].get('max_trend', 0.01)
             for col in numeric_cols:
                 if col in config.get('trend_augmentation', {}).get('exclude_columns', []):
                     continue
-                    
+
                 trend = np.linspace(
-                    0, 
+                    0,
                     np.random.uniform(-max_trend, max_trend) * len(df),
                     len(df)
                 )
                 df[col] = df[col] * (1 + trend)
-        
+
         # 6. Mélange temporel partiel
         if config.get('partial_shuffle', {}).get('enabled', False):
             segment_size = config['partial_shuffle'].get('segment_size', 5)
             for col in numeric_cols:
                 if col in config.get('partial_shuffle', {}).get('exclude_columns', []):
                     continue
-                    
+
                 for i in range(0, len(df) - segment_size, segment_size):
                     segment = df[col].iloc[i:i+segment_size]
                     if len(segment) == segment_size and np.random.random() < 0.3:  # 30% de chance de mélanger
                         df[col].iloc[i:i+segment_size] = segment.sample(frac=1).values
-        
+
         # 7. Ajout d'impulsions aléatoires
         if config.get('random_impulses', {}).get('enabled', False):
             impulse_prob = config['random_impulses'].get('probability', 0.01)
             max_impulse = config['random_impulses'].get('max_impulse', 0.1)
-            
+
             for col in numeric_cols:
                 if col in config.get('random_impulses', {}).get('exclude_columns', []):
                     continue
-                    
+
                 for i in range(len(df)):
                     if np.random.random() < impulse_prob:
                         impulse = np.random.uniform(-max_impulse, max_impulse) * df[col].std()
                         df[col].iloc[i] += impulse
-        
+
         return df
 
     def transform_with_cached_scaler(self, timeframe: str, window_data: pd.DataFrame,
                                    requested_features: list) -> np.ndarray:
         """
-        Safely transform data using a cached scaler or fit a new one if needed.
+        Transforme les données en utilisant un scaler mis en cache ou en ajuste un nouveau si nécessaire.
 
         Args:
-            timeframe: The timeframe for the data
-            window_data: DataFrame containing the data to transform
-            requested_features: List of feature names in the expected order
+            timeframe: Le timeframe des données (ex: '5m', '1h', '4h')
+            window_data: DataFrame contenant les données à transformer
+            requested_features: Liste des noms de fonctionnalités dans l'ordre attendu
 
         Returns:
-            Transformed numpy array with the same number of rows as window_data
-            and number of columns matching requested_features
+            Tableau numpy transformé avec le même nombre de lignes que window_data
+            et un nombre de colonnes correspondant à requested_features
         """
-        # Create a copy to avoid SettingWithCopyWarning
+        # Vérifier si les données d'entrée sont vides
+        if window_data.empty:
+            logger.warning("Données vides reçues pour le timeframe %s, retour de zéros", timeframe)
+            return np.zeros((0, len(requested_features)), dtype=np.float32)
+
+        # Créer une copie pour éviter les avertissements de modification
         window = window_data.copy()
 
-        # Canonical feature signature (requested order)
+        # Vérifier que le timeframe est valide
+        if timeframe not in self.expected_features:
+            logger.error("Timeframe %s non reconnu dans les fonctionnalités attendues", timeframe)
+            return np.zeros((len(window), len(requested_features)), dtype=np.float32)
+
+        # Récupérer les fonctionnalités attendues pour ce timeframe
+        expected_features = self.expected_features[timeframe]
+
+        # Vérifier que les fonctionnalités demandées correspondent aux fonctionnalités attendues
+        if set(requested_features) != set(expected_features):
+            logger.warning(
+                "Les fonctionnalités demandées ne correspondent pas aux fonctionnalités attendues pour %s. "
+                "Attendu: %s, Reçu: %s. Utilisation des fonctionnalités attendues.",
+                timeframe, expected_features, requested_features
+            )
+            requested_features = expected_features
+
+        # Signature canonique pour le cache (ordre des fonctionnalités important)
         feat_sig = tuple(requested_features)
         key = (timeframe, feat_sig)
 
-        logger.debug("Transform request - Timeframe: %s, Features: %s",
-                    timeframe, feat_sig)
+        logger.debug("Requête de transformation - Timeframe: %s, Fonctionnalités: %s",
+                   timeframe, feat_sig)
 
-        # Try to find a matching cached scaler
+        # Essayer de trouver un scaler mis en cache correspondant
         if key in self.scaler_cache:
             scaler = self.scaler_cache[key]
-            expected_features = self.scaler_feature_order[key]
-            logger.debug("Using cached scaler for timeframe %s with signature %s",
-                        timeframe, feat_sig)
+            cached_features = self.scaler_feature_order[key]
+            logger.debug("Utilisation du scaler en cache pour le timeframe %s avec la signature %s",
+                       timeframe, feat_sig)
         else:
-            # Fallback: find any scaler for this timeframe
-            candidates = [k for k in self.scaler_cache.keys() if k[0] == timeframe]
-            if candidates:
-                key0 = candidates[0]
-                scaler = self.scaler_cache[key0]
-                expected_features = self.scaler_feature_order[key0]
-                logger.debug("Using scaler cached for different signature %s for timeframe %s",
-                           key0[1], timeframe)
-            else:
-                # No cached scaler found - fit a new one
-                expected_features = requested_features
-                from sklearn.preprocessing import RobustScaler
-                scaler = RobustScaler()
+            # Aucun scaler en cache trouvé - en ajuster un nouveau
+            logger.info("Ajustement d'un nouveau scaler pour le timeframe %s avec %d fonctionnalités",
+                      timeframe, len(requested_features))
 
-                # Ensure all features exist
-                for f in expected_features:
-                    if f not in window.columns:
-                        window.loc[:, f] = 0.0
+            from sklearn.preprocessing import RobustScaler
+            scaler = RobustScaler()
 
-                # Fit on the expected features
-                try:
-                    scaler.fit(window[expected_features].values)
-                    self.scaler_cache[key] = scaler
-                    self.scaler_feature_order[key] = expected_features
-                    logger.info("Fitted new scaler for timeframe %s with %d features",
-                              timeframe, len(expected_features))
-                except Exception as e:
-                    logger.error("Failed to fit new scaler for %s: %s",
-                               timeframe, str(e))
-                    # Return zeros as fallback
-                    return np.zeros((len(window), len(expected_features)),
-                                 dtype=np.float32)
+            # S'assurer que toutes les fonctionnalités attendues existent
+            missing_features = [f for f in requested_features if f not in window.columns]
+            if missing_features:
+                logger.debug("Ajout des fonctionnalités manquantes pour %s: %s avec des zéros",
+                           timeframe, missing_features)
+                for f in missing_features:
+                    window.loc[:, f] = 0.0
 
-        # Ensure all expected features exist in the window
-        for f in expected_features:
-            if f not in window.columns:
+            try:
+                # Ajuster le scaler sur les fonctionnalités demandées
+                scaler.fit(window[requested_features].values)
+
+                # Mettre en cache le scaler
+                self.scaler_cache[key] = scaler
+                self.scaler_feature_order[key] = requested_features.copy()
+                cached_features = requested_features
+
+                logger.info("Nouveau scaler ajusté pour le timeframe %s avec %d fonctionnalités",
+                          timeframe, len(requested_features))
+
+            except Exception as e:
+                logger.error("Échec de l'ajustement du nouveau scaler pour %s: %s",
+                           timeframe, str(e), exc_info=True)
+                # Retourner des zéros comme solution de repli
+                return np.zeros((len(window), len(requested_features)), dtype=np.float32)
+
+        # S'assurer que toutes les fonctionnalités mises en cache existent dans la fenêtre
+        missing_cached_features = [f for f in cached_features if f not in window.columns]
+        if missing_cached_features:
+            logger.debug("Ajout des fonctionnalités manquantes du cache pour %s: %s avec des zéros",
+                       timeframe, missing_cached_features)
+            for f in missing_cached_features:
                 window.loc[:, f] = 0.0
 
-        # Reindex to the expected order (safe, deterministic)
-        X = window[list(expected_features)].values.astype(np.float32)
-
+        # Réorganiser les colonnes selon l'ordre des fonctionnalités mises en cache
         try:
+            X = window[list(cached_features)].values.astype(np.float32)
+
+            # Appliquer la transformation
             Xs = scaler.transform(X)
+
+            # Vérifier la forme de sortie
+            if Xs.shape[1] != len(cached_features):
+                logger.error("Le nombre de fonctionnalités en sortie (%d) ne correspond pas à celui attendu (%d) pour %s",
+                           Xs.shape[1], len(cached_features), timeframe)
+                return np.zeros((len(window), len(cached_features)), dtype=np.float32)
+
             return Xs
+
         except Exception as e:
-            logger.error("Scaler transform failed for %s: expected %d features, got %s. Error: %s",
-                        timeframe, len(expected_features), X.shape, str(e))
-            # Fallback: return zeros with correct shape
-            return np.zeros((len(window), len(expected_features)),
-                         dtype=np.float32)
+            logger.error("Échec de la transformation avec le scaler pour %s: %s",
+                       timeframe, str(e), exc_info=True)
+            # Solution de repli : retourner des zéros avec la forme correcte
+            return np.zeros((len(window), len(cached_features)), dtype=np.float32)
 
     def _build_asset_timeframe_state(self, asset, timeframe, df: pd.DataFrame):
         required = self.features_config[timeframe]
@@ -1638,366 +2090,549 @@ class StateBuilder:
         df = df.copy()
         # 2) Ajout des colonnes manquantes à 0.0
         missing = [f for f in required if f not in df.columns]
-        if missing:
+        if missing is not None and len(missing) > 0:
             df.loc[:, missing] = 0.0
         # 3) Sélection et ordre garanti
         arr = df[required].to_numpy()
         return arr  # shape = (n_rows, len(required))
 
-    def align_timeframe_dims(self, obs_by_tf: Dict[str, np.ndarray]) -> np.ndarray:
+    def align_timeframe_dims(self, obs_by_tf: Optional[Dict[str, np.ndarray]]) -> np.ndarray:
         """
-        Ensure all timeframe observations have the same number of features by padding or truncating.
+        Assure que toutes les observations de timeframe ont le même nombre de fonctionnalités
+        en ajoutant des zéros ou en tronquant si nécessaire.
+
+        Cette méthode gère :
+        - Les entrées manquantes ou invalides
+        - Les dimensions de fonctionnalités variables entre les timeframes
+        - Les formes de tableaux incohérentes
+        - La conversion de type en float32
+        - La gestion complète des erreurs et la journalisation
 
         Args:
-            obs_by_tf: Dictionary mapping timeframes to their observation arrays
+            obs_by_tf: Dictionnaire associant les timeframes à leurs tableaux d'observations.
+                      Peut être None ou vide.
 
         Returns:
-            3D numpy array of shape (n_timeframes, window_size, max_features)
+            Tableau numpy 3D de forme (n_timeframes, window_size, max_features)
+            Retourne des zéros si l'entrée est invalide ou vide.
         """
-        if not obs_by_tf:
-            return np.zeros((0, self.window_size, 0), dtype=np.float32)
+        # Suivi si nous utilisons un scénario de repli
+        fallback_used = False
 
-        # Find maximum number of features across all timeframes
-        max_f = max(arr.shape[1] for arr in obs_by_tf.values())
-        aligned = []
+        # Valeur de retour vide par défaut avec les bonnes dimensions
+        empty_return = np.zeros((0, self.window_size, 0), dtype=np.float32)
 
+        # Gestion des entrées None ou vides
+        if not obs_by_tf or not isinstance(obs_by_tf, dict):
+            logger.warning("Aucune observation de timeframe valide fournie ou l'entrée n'est pas un dictionnaire")
+            return empty_return
+
+        # Journalisation des statistiques d'entrée
+        logger.debug("Traitement de %d observations de timeframe", len(obs_by_tf))
         for tf, arr in obs_by_tf.items():
-            f = arr.shape[1]
-            if f < max_f:
-                # Pad with zeros
-                pad = ((0, 0), (0, max_f - f))
-                arr = np.pad(arr, pad, 'constant', constant_values=0.0)
-                logger.debug("Padded features for %s from %d to %d",
-                           tf, f, max_f)
-            elif f > max_f:
-                # Truncate
-                arr = arr[:, :max_f]
-                logger.debug("Truncated features for %s from %d to %d",
-                           tf, f, max_f)
+            if arr is not None and hasattr(arr, 'shape'):
+                logger.debug("  %s: shape=%s, dtype=%s, min=%s, max=%s",
+                           tf,
+                           arr.shape,
+                           getattr(arr, 'dtype', 'inconnu'),
+                           np.min(arr) if arr.size > 0 else 'N/A',
+                           np.max(arr) if arr.size > 0 else 'N/A')
 
-            aligned.append(arr.astype(np.float32))
+        # Filtrer les tableaux None ou invalides, convertir au format cohérent
+        valid_obs = {}
+        for tf, arr in obs_by_tf.items():
+            if arr is None or not isinstance(arr, np.ndarray) or arr.size == 0:
+                # Utiliser les fonctionnalités attendues pour ce timeframe si disponible
+                expected_features = self.expected_features.get(tf, ["close"])
+                logger.warning("Tableau d'observation invalide pour %s - utilisation de zéros avec %d fonctionnalités",
+                             tf, len(expected_features))
+                valid_obs[tf] = np.zeros((self.window_size, len(expected_features)), dtype=np.float32)
+                fallback_used = True
+            else:
+                # S'assurer d'avoir une copie pour éviter de modifier l'entrée
+                valid_obs[tf] = np.asarray(arr, dtype=np.float32).copy()
 
-        return np.stack(aligned, axis=0)
+                # Vérifier les valeurs NaN ou infinies
+                if np.any(~np.isfinite(valid_obs[tf])):
+                    logger.warning("Valeurs non finies trouvées dans les observations de %s - remplacement par des zéros", tf)
+                    valid_obs[tf][~np.isfinite(valid_obs[tf])] = 0.0
+                    fallback_used = True
 
-    def build_observation(
-        self, current_idx: int, data: Dict[str, Dict[str, pd.DataFrame]]
-    ) -> np.ndarray:
-        """
-        Build observations for each timeframe and combine into a 3D array.
+        if not valid_obs:
+            logger.warning("Aucune observation valide après filtrage")
+            return empty_return
 
-        Args:
-            current_idx: Current index in the data
-            data: Dictionary mapping assets to their timeframe data
+        # S'assurer que tous les tableaux sont en 2D (window_size, n_features)
+        for tf in list(valid_obs.keys()):
+            arr = valid_obs[tf]
+            try:
+                # Gérer les tableaux 1D en les transformant en 2D
+                if arr.ndim == 1:
+                    logger.debug("Redimensionnement du tableau 1D pour %s en 2D", tf)
+                    valid_obs[tf] = arr.reshape(-1, 1)
+                # Aplatir les tableaux de dimension supérieure à 2
+                elif arr.ndim > 2:
+                    logger.warning("Aplatissement de l'observation %s de %dD à 2D",
+                                tf, arr.ndim)
+                    valid_obs[tf] = arr.reshape(arr.shape[0], -1)
 
-        Returns:
-            3D numpy array of shape (n_timeframes, window_size, max_features)
-        """
-        """
-        Build observations for each timeframe and combine into a 3D array.
+                # S'assurer que la taille de la fenêtre correspond
+                if valid_obs[tf].shape[0] != self.window_size:
+                    logger.warning("Incompatibilité de taille de fenêtre pour %s: attendu %d, reçu %d",
+                                 tf, self.window_size, valid_obs[tf].shape[0])
+                    # Tronquer ou compléter pour correspondre à window_size
+                    if valid_obs[tf].shape[0] > self.window_size:
+                        valid_obs[tf] = valid_obs[tf][-self.window_size:]
+                    else:
+                        pad = ((self.window_size - valid_obs[tf].shape[0], 0), (0, 0))
+                        valid_obs[tf] = np.pad(valid_obs[tf], pad, 'constant', constant_values=0.0)
+                    fallback_used = True
 
-        Args:
-            current_idx: Current index in the data
-            data: Dictionary mapping assets to their timeframe data
+            except Exception as e:
+                logger.error("Erreur lors du traitement du tableau %s: %s", tf, str(e))
+                # Utiliser les fonctionnalités attendues pour ce timeframe si disponible
+                expected_features = self.expected_features.get(tf, ["close"])
+                valid_obs[tf] = np.zeros((self.window_size, len(expected_features)), dtype=np.float32)
+                fallback_used = True
 
-        Returns:
-            3D numpy array of shape (n_timeframes, window_size, max_features)
-        """
-        logger.debug("Starting to build observation at index %d", current_idx)
-
-        observations = {}
-        max_features = max(len(feats) for feats in self.features_config.values())
-
-        # Process each timeframe
-        for tf in self.timeframes:
-            tf_result = self._process_timeframe_data(tf, data, current_idx, max_features)
-            if tf_result:
-                tf_key, obs = tf_result
-                observations[tf_key] = obs
-
-        # Stack observations along the first axis to create a 3D array
+        # Trouver le nombre maximum de fonctionnalités parmi tous les timeframes
         try:
-            # Log observation shapes before alignment
-            logger.debug("Observation shapes before alignment:")
-            for tf, obs in observations.items():
-                logger.debug("  %s: %s", tf, obs.shape)
+            max_f = max(arr.shape[1] for arr in valid_obs.values())
+            if max_f == 0:
+                logger.warning("Aucune fonctionnalité trouvée dans aucun timeframe")
+                return empty_return
 
-            # Align dimensions across timeframes
-            aligned_obs = self.align_timeframe_dims(observations)
+            logger.debug("Nombre maximum de fonctionnalités à travers les timeframes: %d", max_f)
+            aligned = []
+            timeframes_processed = []
 
-            # Ensure we have the correct number of timeframes
-            if len(aligned_obs) != len(self.timeframes):
-                logger.error(
-                    "Mismatch in number of timeframes: expected %d, got %d. "
-                    "Using zeros as fallback.",
-                    len(self.timeframes), len(aligned_obs)
-                )
-                return np.zeros(
-                    (len(self.timeframes), self.window_size, max_features),
-                    dtype=np.float32,
-                )
+            # Traiter chaque timeframe dans un ordre cohérent
+            for tf in sorted(valid_obs.keys()):
+                try:
+                    arr = valid_obs[tf]
+                    f = arr.shape[1]
 
-            logger.debug("Built observation with shape: %s", aligned_obs.shape)
-            return aligned_obs
+                    # Obtenir les fonctionnalités attendues pour ce timeframe
+                    expected_features = self.expected_features.get(tf, [])
+                    expected_f = len(expected_features) if expected_features else max_f
+
+                    # Utiliser le maximum entre le nombre de fonctionnalités attendues et le maximum observé
+                    target_f = max(max_f, expected_f) if expected_features else max_f
+
+                    # Créer un nouveau tableau avec exactement target_features colonnes
+                    new_arr = np.zeros((arr.shape[0], target_f), dtype=np.float32)
+
+                    # Copier les données existantes
+                    copy_cols = min(f, target_f)
+                    new_arr[:, :copy_cols] = arr[:, :copy_cols]
+
+                    if f != target_f:
+                        logger.warning("Ajustement de %s de %d à %d fonctionnalités",
+                                     tf, f, target_f)
+                        fallback_used = True
+
+                    aligned.append(new_arr)
+
+                    timeframes_processed.append(tf)
+
+                except Exception as e:
+                    logger.error("Erreur lors du traitement de %s: %s", tf, str(e), exc_info=True)
+                    # Solution de repli : utiliser des zéros avec les dimensions correctes
+                    fallback = np.zeros((self.window_size, max_f), dtype=np.float32)
+                    aligned.append(fallback)
+                    timeframes_processed.append(f"{tf} (erreur)")
+                    fallback_used = True
+
+            if not aligned:
+                logger.warning("Aucune observation valide après alignement")
+                return empty_return
+
+            # Empiler tous les timeframes le long de la première dimension
+            try:
+                result = np.stack(aligned, axis=0)
+
+                # Validation finale de la forme de sortie
+                if result.shape[0] != len(valid_obs) or result.shape[1] != self.window_size:
+                    logger.error(
+                        "Forme de sortie inattendue: %s, attendu (%d, %d, %d)",
+                        result.shape, len(valid_obs), self.window_size, max_f
+                    )
+                    return empty_return
+
+                # Journalisation finale
+                if fallback_used:
+                    logger.warning(
+                        "Solution de repli utilisée pendant l'alignement. "
+                        "Timeframes traités: %s",
+                        ", ".join(timeframes_processed)
+                    )
+                else:
+                    logger.debug(
+                        "Alignement réussi de %d timeframes vers la forme %s",
+                        len(timeframes_processed), result.shape
+                    )
+
+                return result
+
+            except Exception as e:
+                logger.error("Erreur lors de l'empilement des observations: %s", str(e), exc_info=True)
+                return empty_return
 
         except Exception as e:
-            logger.error("Error stacking observations: %s", str(e), exc_info=True)
-            return np.zeros(
-                (len(self.timeframes), self.window_size, max_features),
-                dtype=np.float32,
-            )
+            logger.error(f"Critical error in align_timeframe_dims: {str(e)}", exc_info=True)
+            return empty_return
+
+    def _wrap_observation(self, obs_candidate, portfolio_candidate=None):
+        """
+        Normalize the build_observation output to:
+          {'observation': ndarray (float32), 'portfolio_state': ndarray shape (17,) (float32)}
+        Works for obs_candidate being ndarray, list, dict, None.
+        """
+        # If a dict is already provided, try to standardize it
+        if isinstance(obs_candidate, dict):
+            obs = obs_candidate.get("observation", obs_candidate)
+            ps = obs_candidate.get("portfolio_state", portfolio_candidate)
+        else:
+            obs = obs_candidate
+            ps = portfolio_candidate
+
+        # Normalize observation array
+        try:
+            obs_arr = np.asarray(obs, dtype=np.float32)
+        except Exception:
+            logger.warning("_wrap_observation: could not convert observation to ndarray, using zeros")
+            # Fallback shape guess: use attributes if available
+            default_shape = getattr(self, "observation_shape", None)
+            if default_shape is None:
+                # best effort: (n_timeframes, window_size, n_features)
+                n_tf = len(getattr(self, "timeframes", [0]))
+                ws = getattr(self, "window_size", 20)
+                default_shape = (n_tf, ws, 1)
+            obs_arr = np.zeros(default_shape, dtype=np.float32)
+
+        # Normalize portfolio state to length 17
+        try:
+            ps_arr = np.asarray(ps, dtype=np.float32).flatten()
+            if ps_arr.size < 17:
+                ps_arr = np.concatenate([ps_arr, np.zeros(17 - ps_arr.size, dtype=np.float32)])
+            elif ps_arr.size > 17:
+                ps_arr = ps_arr[:17]
+        except Exception:
+            ps_arr = np.zeros(17, dtype=np.float32)
+
+        result = {"observation": obs_arr, "portfolio_state": ps_arr}
+        # debug log
+        logger.debug(
+            "_wrap_observation -> obs type=%s shape=%s dtype=%s; ps shape=%s",
+            type(result["observation"]), result["observation"].shape,
+            result["observation"].dtype, result["portfolio_state"].shape
+        )
+        return result
 
     def _process_timeframe_data(
         self,
-        tf: str,
         data: Dict[str, Dict[str, pd.DataFrame]],
+        tf: str,
         current_idx: int,
         max_features: int
-    ) -> Optional[Tuple[str, np.ndarray]]:
-        """Process data for a single timeframe.
+    ) -> Tuple[str, np.ndarray]:
+        """
+        Traite les données pour un timeframe spécifique et retourne un tableau numpy
+        avec la forme (window_size, n_features=15).
 
         Args:
-            tf: Timeframe identifier (e.g., '5m', '1h')
-            data: Dictionary mapping assets to their timeframe data
-            current_idx: Current index in the data
-            max_features: Maximum number of features across all timeframes
+            data: Dictionnaire contenant les données de marché pour tous les actifs et timeframes
+            tf: Timeframe à traiter (ex: '5m', '1h', '4h')
+            current_idx: Index actuel dans les données
+            max_features: Nombre maximum de caractéristiques à travers tous les timeframes (non utilisé ici)
 
         Returns:
-            Tuple of (timeframe, processed_data) or None if processing fails
+            Tuple de (timeframe, processed_data) où processed_data a la forme (window_size, 15)
         """
+        logger.info(f"\n=== Traitement du timeframe {tf} ===")
+        logger.info(f"Index courant: {current_idx}, Taille max des caractéristiques: {max_features}")
+
+        # Obtenir les caractéristiques attendues pour ce timeframe
+        expected_features = self.expected_features.get(tf, [])
+        logger.info(f"Caractéristiques attendues pour {tf} ({len(expected_features)}): {expected_features}")
+
+        # S'assurer qu'on a exactement 15 caractéristiques
+        if len(expected_features) != 15:
+            logger.warning(f"Le nombre de caractéristiques attendues n'est pas 15 mais {len(expected_features)}. Ajustement en cours...")
+            expected_features = expected_features[:15]  # On garde les 15 premières si trop
+            if len(expected_features) < 15:
+                # Si pas assez de caractéristiques, on complète avec des placeholders
+                expected_features.extend([f'PADDING_{i}' for i in range(15 - len(expected_features))])
+
+        def create_default_observation():
+            """Crée une observation par défaut avec la forme attendue."""
+            shape = (self.window_size, len(expected_features))
+            logger.warning(f"Création d'une observation par défaut avec la forme: {shape}")
+            return np.zeros(shape, dtype=np.float32)
+
+        # Valider la configuration du timeframe
+        if tf not in self.timeframes or not expected_features:
+            logger.error("Configuration invalide pour le timeframe %s. Vérifiez votre configuration.", tf)
+            return tf, create_default_observation()
+
         try:
-            # Combine data from all assets for the current timeframe
+            # 1. Obtenir les données pour tous les actifs pour ce timeframe
             asset_dfs = []
             for asset in data:
-                if tf in data[asset]:
-                    asset_dfs.append(data[asset][tf])
+                if tf in data[asset] and not data[asset][tf].empty:
+                    # S'assurer que toutes les colonnes sont en majuscules
+                    df = data[asset][tf].copy()
+                    df.columns = [col.upper() for col in df.columns]
+                    asset_dfs.append(df)
 
             if not asset_dfs:
-                logger.warning("No data found for timeframe %s, using zeros", tf)
-                return tf, np.zeros((self.window_size, max_features), dtype=np.float32)
+                logger.warning("Aucune donnée trouvée pour le timeframe %s, utilisation de zéros", tf)
+                return tf, create_default_observation()
 
-            # Get features for this timeframe
-            features = self.features_config.get(tf, [])
-            if not features:
-                logger.warning("No features configured for timeframe %s, using zeros", tf)
-                return tf, np.zeros((self.window_size, max_features), dtype=np.float32)
+            # 2. Concaténer les données de tous les actifs
+            try:
+                df = pd.concat(asset_dfs, axis=0)
 
-            # Concatenate all assets for this timeframe
-            df = pd.concat(asset_dfs, axis=0)
+                # Journalisation des informations de débogage
+                logger.debug("Traitement des données %s. Forme: %s, colonnes: %s",
+                           tf, df.shape, df.columns.tolist())
 
-            # Ensure we have enough data
-            if current_idx < self.window_size:
-                logger.warning(
-                    "Current index %d < window_size %d for %s. Returning zero-padded observation.",
-                    current_idx, self.window_size, tf
-                )
-                return tf, np.zeros((self.window_size, max_features), dtype=np.float32)
+                # 3. Identifier les colonnes manquantes par rapport aux fonctionnalités attendues
+                # Convertir les noms de colonnes en majuscules pour la correspondance
+                df_columns_upper = [str(col).upper() for col in df.columns]
+                df_columns_set = set(df_columns_upper)
 
-            # Get the window of data with some lookahead for indicators
-            lookahead = max(
-                self.config.get('data_processing', {}).get('max_lookahead', 50),
-                50  # default lookahead
-            )
-            window_start = max(0, current_idx - self.window_size - lookahead)
-            window_end = current_idx
-            window_data = df.iloc[window_start:window_end].copy()
+                # Créer un mapping entre les noms de colonnes originaux et en majuscules
+                column_mapping = {str(col).upper(): col for col in df.columns}
 
-            # 1. Apply temporal transformations (diffs, moving averages, etc.)
-            if hasattr(self, 'config') and self.config.get('temporal_transforms', {}).get('enabled', True):
-                window_data = self._apply_temporal_transforms(window_data)
+                missing_cols = set(expected_features) - df_columns_set
+                available_cols = set(expected_features) & df_columns_set
 
-            # 2. Handle missing values after transformations
-            if window_data.isnull().values.any():
-                logger.debug("NaN values found in %s data after transforms, using forward fill then zero fill", tf)
-                window_data = window_data.ffill().bfill().fillna(0)
+                # Journalisation des colonnes manquantes et disponibles
+                if missing_cols:
+                    logger.warning("Colonnes manquantes dans les données %s: %s. Remplissage par des zéros.",
+                                 tf, missing_cols)
+                    logger.debug("Colonnes disponibles: %s", available_cols)
 
-            # 3. Apply data augmentation if enabled
-            if hasattr(self, 'config') and self.config.get('data_augmentation', {}).get('enabled', False):
-                window_data = self._apply_data_augmentation(window_data)
+                # 4. Créer un nouveau DataFrame avec les colonnes dans l'ordre attendu
+                # et remplir avec des zéros les colonnes manquantes
+                processed_data = pd.DataFrame(index=df.index)
 
-            # 4. Keep only the requested window size
-            window_data = window_data.iloc[-self.window_size:]
+                for col in expected_features:
+                    # Vérifier si la colonne existe (en tenant compte de la casse)
+                    col_exists = any(c.upper() == col.upper() for c in df.columns)
 
-            # Log before transform
-            logger.debug("TF=%s before transform shape=%s, features=%s",
-                       tf, window_data.shape, features)
+                    if col_exists:
+                        # Trouver le nom de colonne original (avec la bonne casse)
+                        original_col = next((c for c in df.columns if c.upper() == col.upper()), col)
+                        # Copier les données avec conversion en float32
+                        processed_data[col] = df[original_col].astype(np.float32)
 
-            # 5. Apply normalization if needed
-            if self.normalize:
-                try:
-                    obs = self.transform_with_cached_scaler(tf, window_data, features)
-                except Exception as e:
-                    logger.error("Error in transform_with_cached_scaler for %s: %s",
-                               tf, str(e), exc_info=True)
-                    obs = np.zeros((len(window_data), len(features)), dtype=np.float32)
-            else:
-                # Ensure all features are present and in correct order
-                missing = [f for f in features if f not in window_data.columns]
-                if missing:
-                    logger.debug("Adding missing features to %s: %s", tf, missing)
-                    window_data.loc[:, missing] = 0.0
-                obs = window_data[features].values.astype(np.float32)
+                        # Vérifier les valeurs manquantes ou infinies
+                        if processed_data[col].isna().any() or np.isinf(processed_data[col]).any():
+                            logger.warning("Valeurs manquantes ou infinies détectées dans la colonne %s. Remplacement par des zéros.", col)
+                            processed_data[col] = processed_data[col].fillna(0.0).replace([np.inf, -np.inf], 0.0)
+                    else:
+                        # Créer une colonne de zéros
+                        processed_data[col] = 0.0
+                        logger.debug("Colonne %s manquante, remplacée par des zéros", col)
 
-            logger.debug("TF=%s after transform shape=%s (expected features=%d)",
-                       tf, obs.shape, len(features))
+                # 5. Vérification finale des dimensions
+                if len(processed_data.columns) != 15:
+                    logger.error("Le nombre de colonnes (%d) ne correspond pas aux 15 attendues. Ajustement en cours...",
+                                len(processed_data.columns))
+                    # Garder uniquement les 15 premières colonnes
+                    if len(processed_data.columns) > 15:
+                        processed_data = processed_data.iloc[:, :15]
+                        logger.warning("Troncature à 15 colonnes")
+                    # Ou ajouter des colonnes manquantes
+                    else:
+                        for i in range(len(processed_data.columns), 15):
+                            processed_data[f'PADDING_{i}'] = 0.0
+                            logger.warning("Ajout de la colonne PADDING_%d", i)
 
-            return tf, obs
+                # 6. S'assurer que nous avons suffisamment de données
+                if len(processed_data) < self.window_size:
+                    logger.warning("Pas assez de points de données pour %s: %d < %d. Remplissage avec des zéros.",
+                                 tf, len(processed_data), self.window_size)
+
+                    if len(processed_data) == 0:
+                        logger.warning("Aucune donnée disponible pour %s, création d'une observation par défaut", tf)
+                        return tf, create_default_observation()
+
+                    # Répéter les données disponibles pour remplir la fenêtre
+                    repeats = (self.window_size // len(processed_data)) + 1
+                    processed_data = pd.concat([processed_data] * repeats, axis=0).reset_index(drop=True)
+                    processed_data = processed_data.head(self.window_size)
+
+                # 7. Sélectionner la fenêtre de données
+                window_data = processed_data.iloc[-self.window_size:].copy()
+                result = window_data.values.astype(np.float32)
+
+                # 8. Validation finale de la forme du résultat
+                expected_shape = (self.window_size, 15)  # Taille fixe attendue
+                if result.shape != expected_shape:
+                    logger.warning("Forme inattendue pour %s: %s. Redimensionnement à %s.",
+                                 tf, result.shape, expected_shape)
+
+                    # Journalisation pour le débogage
+                    logger.debug("Forme actuelle: %s, Forme attendue: %s",
+                                result.shape, expected_shape)
+
+                    # Créer un nouveau tableau avec la forme correcte
+                    new_result = np.zeros(expected_shape, dtype=np.float32)
+
+                    # Copier autant de données que possible
+                    min_rows = min(result.shape[0], expected_shape[0])
+                    min_cols = min(result.shape[1], expected_shape[1])
+
+                    new_result[:min_rows, :min_cols] = result[:min_rows, :min_cols]
+                    result = new_result
+
+                logger.info("Observation traitée pour %s: shape=%s, type=%s",
+                           tf, result.shape, type(result).__name__)
+                return tf, result
+
+            except Exception as e:
+                logger.error("Error processing data for %s: %s. Using default values.",
+                            tf, str(e))
+                logger.error(traceback.format_exc())
+                return tf, create_default_observation()
 
         except Exception as e:
-            logger.error("Error processing %s timeframe: %s", tf, str(e), exc_info=True)
-            return tf, np.zeros((self.window_size, max_features), dtype=np.float32)
+            logger.error("Unexpected error processing timeframe %s: %s. Using default values.",
+                        tf, str(e))
+            logger.error(traceback.format_exc())
+            return tf, create_default_observation()
 
     def build_observation(
         self, current_idx: int, data: Dict[str, Dict[str, pd.DataFrame]]
-    ) -> np.ndarray:
-        """
-        Build observations for each timeframe and combine into a 3D array.
-
-        Args:
-            current_idx: Current index in the data
-            data: Dictionary mapping assets to their timeframe data
-
-        Returns:
-            3D numpy array of shape (n_timeframes, window_size, max_features)
-        """
-        if not data:
-            logger.error("No data provided to build_observation")
-            return np.zeros(
-                (len(self.timeframes), self.window_size, self.max_features),
-                dtype=np.float32,
-            )
-
-        logger.debug("Starting to build observation at index %d", current_idx)
-
-        observations = {}
-        max_features = max(len(feats) for feats in self.features_config.values()) if self.features_config else 0
-
-        # Process each timeframe
-        for tf in self.timeframes:
-            tf_result = self._process_timeframe_data(tf, data, current_idx, max_features)
-            if tf_result:
-                tf_key, obs = tf_result
-                observations[tf_key] = obs
-
-        # Stack observations along the first axis to create a 3D array
-        try:
-            # Log observation shapes before alignment
-            logger.debug("Observation shapes before alignment:")
-            for tf, obs in observations.items():
-                logger.debug("  %s: %s", tf, obs.shape)
-
-            # Align dimensions across timeframes
-            aligned_obs = self.align_timeframe_dims(observations)
-
-            # Ensure we have the correct number of timeframes
-            if len(aligned_obs) != len(self.timeframes):
-                logger.error(
-                    "Mismatch in number of timeframes: expected %d, got %d. "
-                    "Using zeros as fallback.",
-                    len(self.timeframes), len(aligned_obs)
-                )
-                return np.zeros(
-                    (len(self.timeframes), self.window_size, max_features),
-                    dtype=np.float32,
-                )
-
-            logger.debug("Built observation with shape: %s", aligned_obs.shape)
-            return aligned_obs
-
-        except Exception as e:
-            logger.error("Error stacking observations: %s", str(e), exc_info=True)
-            return np.zeros(
-                (len(self.timeframes), self.window_size, max_features),
-                dtype=np.float32,
-            )
-
-    def build_adaptive_observation(
-        self,
-        current_idx: int,
-        data: Dict[str, Dict[str, pd.DataFrame]],
-        portfolio_manager: Any = None,
     ) -> Dict[str, np.ndarray]:
         """
-        Build observation with adaptive window sizing and timeframe weighting.
+        Construit et retourne l'observation finale sous forme de dictionnaire,
+        conforme à ce qui est attendu par l'environnement.
 
         Args:
-            current_idx: Current index in the data
-            data: Dictionary mapping assets to their timeframe data
-            portfolio_manager: Portfolio manager instance for portfolio state
+            current_idx: Index actuel dans les données
+            data: Dictionnaire des données par actif et par timeframe
 
         Returns:
-            Dictionary containing:
-            - 'observation': 3D numpy array of shape (timeframes, window_size, features)
-            - 'portfolio_state': 1D numpy array of portfolio state features
+            Dictionnaire contenant:
+            - 'observation': Tableau numpy des observations (n_timeframes, window_size, n_features)
+            - 'portfolio_state': État du portefeuille (17,)
         """
-        # Initialize return dictionary
-        result = {"observation": None, "portfolio_state": None}
+        logger.info("\n=== Construction de l'observation ===")
+        logger.info("Index courant: %d", current_idx)
+        logger.info("Timeframes disponibles: %s", list(data.get(next(iter(data)), {}).keys()))
 
-        # Update adaptive window based on current market conditions
-        first_asset = next(iter(data.keys()))
-        self.update_adaptive_window(data[first_asset], current_idx)
+        try:
+            # Initialiser le dictionnaire des observations
+            observations = {}
 
-        # Build standard observations
-        observation_3d = self.build_observation(current_idx, data)
+            # Déterminer le nombre maximal de fonctionnalités à travers tous les timeframes
+            max_features = 0
+            if self.features_config:
+                max_features = max(len(feats) for feats in self.features_config.values())
+                logger.info("Nombre maximum de fonctionnalités configurées: %d", max_features)
 
-        logger.debug(
-            f"build_adaptive_observation received array with shape: {observation_3d.shape}"
-        )
-        if not isinstance(observation_3d, np.ndarray) or observation_3d.size == 0:
-            logger.warning(
-                "Observation array is empty. Returning zero-padded observation."
-            )
-            result["observation"] = np.zeros(self.observation_shape, dtype=np.float32)
-            if self.include_portfolio_state:
-                result["portfolio_state"] = np.zeros(17, dtype=np.float32)
-            return result
+                # Afficher les fonctionnalités configurées pour chaque timeframe
+                logger.info("Configuration des fonctionnalités par timeframe:")
+                for tf, feats in self.features_config.items():
+                    logger.info("  - %s: %d fonctionnalités - %s", tf, len(feats), feats)
+            else:
+                logger.warning("Aucune configuration de fonctionnalités trouvée, utilisation de 0 comme valeur par défaut")
 
-        # Apply timeframe weighting directly on the 3D array
-        weighted_observation = (
-            observation_3d
-            * np.array([self.timeframe_weights[tf] for tf in self.timeframes])[
-                :, np.newaxis, np.newaxis
-            ]
-        )
+            # Traiter chaque timeframe
+            for tf in self.timeframes:
+                try:
+                    logger.info("\n--- Traitement du timeframe: %s ---", tf)
+                    tf_result = self._process_timeframe_data(data, tf, current_idx, max_features)
+                    if tf_result is not None:  # Vérification explicite de None
+                        tf_key, obs = tf_result
+                        observations[tf_key] = obs
+                        logger.info("Observation traitée pour %s: shape=%s, type=%s",
+                                  tf_key, obs.shape if hasattr(obs, 'shape') else 'invalide',
+                                  type(obs).__name__)
+                    else:
+                        logger.warning("Résultat nul pour le timeframe %s, ignoré", tf)
+                except Exception as e:
+                    logger.error("Erreur lors du traitement du timeframe %s: %s",
+                               tf, str(e), exc_info=True)
 
-        # Ensure the observation has the correct shape
-        n_timeframes, window_size, n_features = self.observation_shape
-        if weighted_observation.shape[1] > window_size:
-            # Take the most recent data
-            weighted_observation = weighted_observation[:, -window_size:, :]
-        elif weighted_observation.shape[1] < window_size:
-            # Pad with zeros at the beginning
-            padding = np.zeros(
-                (n_timeframes, window_size - weighted_observation.shape[1], n_features),
-                dtype=np.float32,
-            )
-            weighted_observation = np.concatenate(
-                [padding, weighted_observation], axis=1
-            )
+            logger.info("\n=== Alignement des observations ===")
+            logger.info("Timeframes à aligner: %s", list(observations.keys()))
 
-        # Ensure correct number of features
-        weighted_observation = weighted_observation[:, :, :n_features]
+            # Aligner les dimensions des observations
+            aligned_obs = self.align_timeframe_dims(observations)
 
-        result["observation"] = weighted_observation
+            # Vérifier que aligned_obs est valide
+            if aligned_obs is None or not isinstance(aligned_obs, np.ndarray):
+                logger.warning("Observation alignée invalide, utilisation d'un tableau de zéros")
+                aligned_obs = np.zeros(self.observation_shape, dtype=np.float32)
 
-        # Add portfolio state if enabled
-        if self.include_portfolio_state and portfolio_manager is not None:
-            portfolio_state = self.build_portfolio_state(portfolio_manager)
+            # Vérifier la forme de l'observation alignée
+            logger.info("Forme de l'observation alignée: %s", aligned_obs.shape)
+            logger.info("Forme attendue: %s", self.observation_shape)
 
-            # Ensure portfolio state has exactly 17 features
-            if portfolio_state.size != 17:
-                logger.warning(
-                    f"Portfolio state size mismatch. Expected 17, got {portfolio_state.size}. Adjusting."
-                )
-                if portfolio_state.size < 17:
-                    portfolio_state = np.pad(
-                        portfolio_state,
-                        (0, 17 - portfolio_state.size),
-                        mode="constant",
-                        constant_values=0,
-                    )
-                else:
-                    portfolio_state = portfolio_state[:17]
+            if aligned_obs.shape != self.observation_shape:
+                logger.error("ERREUR: La forme de l'observation alignée (%s) ne correspond pas à la forme attendue (%s)",
+                           aligned_obs.shape, self.observation_shape)
+                logger.info("Redimensionnement de l'observation pour correspondre à la forme attendue")
 
-            result["portfolio_state"] = portfolio_state.astype(np.float32)
+                # Créer un nouveau tableau avec la forme attendue
+                new_obs = np.zeros(self.observation_shape, dtype=np.float32)
 
-        return result
+                # Copier les données disponibles
+                min_timeframes = min(aligned_obs.shape[0], self.observation_shape[0])
+                min_steps = min(aligned_obs.shape[1], self.observation_shape[1])
+                min_features = min(aligned_obs.shape[2], self.observation_shape[2])
+
+                new_obs[:min_timeframes, :min_steps, :min_features] = \
+                    aligned_obs[:min_timeframes, :min_steps, :min_features]
+
+                aligned_obs = new_obs
+                logger.info("Nouvelle forme de l'observation après redimensionnement: %s", aligned_obs.shape)
+
+            # Créer l'état du portefeuille par défaut
+            portfolio_state = np.zeros(17, dtype=np.float32)
+            if not isinstance(portfolio_state, np.ndarray):
+                logger.warning("État du portefeuille invalide, utilisation d'un tableau de zéros")
+                portfolio_state = np.zeros(17, dtype=np.float32)
+
+            # Créer l'observation finale avec vérification de type
+            final_observation = {
+                'observation': aligned_obs.astype(np.float32),
+                'portfolio_state': portfolio_state.astype(np.float32)
+            }
+
+            # Vérification finale de la forme de l'observation
+            obs_shape = final_observation['observation'].shape
+            logger.info("\n=== Vérification finale de l'observation ===")
+            logger.info("Forme de l'observation: %s", obs_shape)
+            logger.info("Type de l'observation: %s", type(final_observation['observation']))
+            logger.info("Forme de l'état du portefeuille: %s", final_observation['portfolio_state'].shape)
+
+            if len(obs_shape) != 3:
+                logger.error("ERREUR: L'observation doit avoir 3 dimensions, mais a %d", len(obs_shape))
+
+            expected_features = self.observation_shape[2] if len(self.observation_shape) > 2 else 0
+            if obs_shape[2] != expected_features:
+                logger.error("ERREUR: Nombre inattendu de caractéristiques: %d (attendu: %d)",
+                           obs_shape[2], expected_features)
+
+            # Journaliser la forme de l'observation finale
+            obs_shape = final_observation['observation'].shape
+            logger.debug("Observation finale construite: shape=%s, type=%s",
+                        obs_shape, type(final_observation['observation']))
+
+            return final_observation
+
+        except Exception as e:
+            logger.error("Erreur critique dans build_observation: %s", str(e), exc_info=True)
+            # En cas d'erreur, retourner une observation par défaut valide pour éviter un crash
+            default_obs = {
+                'observation': np.zeros(self.observation_shape, dtype=np.float32),
+                'portfolio_state': np.zeros(17, dtype=np.float32)
+            }
+            logger.warning("Utilisation de l'observation par défaut en raison d'une erreur")
+            return default_obs
