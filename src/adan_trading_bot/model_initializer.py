@@ -23,74 +23,74 @@ class AttentionVisualizerCallback(BaseCallback):
         self.output_dir = viz_cfg.get('attention_map_dir', 'attention_maps')
         os.makedirs(self.output_dir, exist_ok=True)
         self.interval = viz_cfg.get('interval', 1000)
-        
+
     def _on_step(self) -> bool:
         if self.num_timesteps % self.interval == 0:
             try:
                 # Récupérer l'environnement
                 env = self.training_env.envs[0] if hasattr(self.training_env, 'envs') else self.training_env
-                
+
                 # Récupérer l'observation actuelle
                 obs = env.render(mode='rgb_array')
-                
+
                 # Récupérer la carte d'attention du modèle
                 if hasattr(self.model.policy.features_extractor, 'get_attention_map'):
                     with torch.no_grad():
                         # Convertir l'observation en tenseur
                         obs_tensor = torch.FloatTensor(obs).unsqueeze(0).to(self.model.device)
                         attention_map = self.model.policy.features_extractor.get_attention_map(obs_tensor)
-                        
+
                         # Sauvegarder la visualisation
                         output_path = os.path.join(
-                            self.output_dir, 
+                            self.output_dir,
                             f'attention_step_{self.num_timesteps}.png'
                         )
                         self._save_attention_visualization(obs, attention_map, output_path)
-                        
+
             except Exception as e:
                 print(f"Erreur lors de la génération de la visualisation d'attention: {e}")
-        
+
         return True
-    
+
     def _save_attention_visualization(self, obs, attention_map, output_path):
         """
         Sauvegarde la visualisation de l'attention superposée à l'observation.
         """
         import matplotlib.pyplot as plt
         from matplotlib import cm
-        
+
         # Créer une figure avec deux sous-graphiques
         fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(15, 5))
-        
+
         # Afficher l'observation originale
         ax1.imshow(obs)
         ax1.set_title('Observation originale')
         ax1.axis('off')
-        
+
         # Afficher la carte d'attention
         if len(attention_map.shape) > 2:
             attention_map = attention_map.mean(dim=1).squeeze()
-        
+
         # Redimensionner la carte d'attention pour correspondre à l'observation
         import cv2
         attention_map_np = attention_map.cpu().numpy()
         resized_attention = cv2.resize(
-            attention_map_np, 
+            attention_map_np,
             (obs.shape[1], obs.shape[0]),
             interpolation=cv2.INTER_CUBIC
         )
-        
+
         # Afficher la carte d'attention
         im = ax2.imshow(resized_attention, cmap='viridis')
         ax2.set_title('Carte d\'attention')
         ax2.axis('off')
         plt.colorbar(im, ax=ax2)
-        
+
         # Sauvegarder la figure
         plt.tight_layout()
         plt.savefig(output_path, bbox_inches='tight', dpi=150)
         plt.close()
-        
+
         if self.verbose > 0:
             print(f"Carte d'attention sauvegardée: {output_path}")
 
@@ -107,7 +107,7 @@ def create_callbacks(config, eval_env=None):
     Crée les callbacks pour l'entraînement.
     """
     callbacks = []
-    
+
     # Callback de sauvegarde des checkpoints
     checkpoint_cb = CheckpointCallback(
         save_freq=config['training']['checkpointing']['save_freq'],
@@ -117,7 +117,7 @@ def create_callbacks(config, eval_env=None):
         save_vecnormalize=True,
     )
     callbacks.append(checkpoint_cb)
-    
+
     # Callback pour la visualisation de l'attention
     if config['model']['diagnostics']['save_attention_maps']:
         attention_cb = AttentionVisualizerCallback(
@@ -125,17 +125,17 @@ def create_callbacks(config, eval_env=None):
             verbose=1
         )
         callbacks.append(attention_cb)
-    
+
     # Callback d'évaluation si un environnement d'évaluation est fourni
     if eval_env is not None:
         eval_cb = EvalCallback(
             eval_env,
             best_model_save_path=os.path.join(
-                config['training']['checkpointing']['save_path'], 
+                config['training']['checkpointing']['save_path'],
                 'best_model'
             ),
             log_path=os.path.join(
-                config['paths']['logs_dir'], 
+                config['paths']['logs_dir'],
                 'eval_logs'
             ),
             eval_freq=10000,
@@ -144,7 +144,7 @@ def create_callbacks(config, eval_env=None):
             n_eval_episodes=10,
         )
         callbacks.append(eval_cb)
-    
+
     return callbacks
 
 def create_model(env, config, device='auto'):
@@ -154,7 +154,7 @@ def create_model(env, config, device='auto'):
     # Extraire la configuration du modèle
     model_cfg = config['model']
     training_cfg = config['training']
-    
+
     # Configuration de l'extracteur de caractéristiques
     features_extractor_kwargs = {
         'cnn_configs': {
@@ -163,7 +163,7 @@ def create_model(env, config, device='auto'):
         },
         'diagnostics': model_cfg.get('diagnostics', {}),
     }
-    
+
     # Configuration de la politique
     policy_kwargs = {
         'features_extractor_class': CustomCNN,
@@ -177,7 +177,7 @@ def create_model(env, config, device='auto'):
         'activation_fn': torch.nn.LeakyReLU,
         'ortho_init': True,
     }
-    
+
     # Créer le modèle PPO
     model = PPO(
         policy="CnnPolicy",
@@ -202,7 +202,7 @@ def create_model(env, config, device='auto'):
         device=device,
         seed=config['general']['random_seed'],
     )
-    
+
     return model
 
 def setup_training(config_path, env, eval_env=None, device='auto'):
@@ -211,13 +211,13 @@ def setup_training(config_path, env, eval_env=None, device='auto'):
     """
     # Charger la configuration
     config = load_config(config_path)
-    
+
     # Créer le modèle
     model = create_model(env, config, device)
-    
+
     # Créer les callbacks
     callbacks = create_callbacks(config, eval_env)
-    
+
     return model, callbacks, config
 
 def train_model(model, total_timesteps, callbacks=None, progress_bar=True):
@@ -230,5 +230,5 @@ def train_model(model, total_timesteps, callbacks=None, progress_bar=True):
         progress_bar=progress_bar,
         reset_num_timesteps=True,
     )
-    
+
     return model

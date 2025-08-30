@@ -30,9 +30,25 @@ from adan_trading_bot.environment.multi_asset_chunked_env import (
     MultiAssetChunkedEnv
 )
 from adan_trading_bot.models.feature_extractors import CustomCNNFeatureExtractor
+from adan_trading_bot.utils.timeout_manager import (
+    TimeoutManager,
+    TimeoutException,
+)
 
 # Configure logger
 logger = utils.get_logger()
+
+
+def validate_environment() -> None:
+    """Basic environment validation before training starts."""
+    import sys
+    try:
+        import gymnasium  # noqa: F401
+        import stable_baselines3  # noqa: F401
+    except Exception as e:
+        raise RuntimeError(f"Missing training dependency: {e}")
+    if sys.version_info < (3, 11):
+        raise RuntimeError("Python >= 3.11 is required for training")
 
 
 class CustomActorCriticPolicy(ActorCriticPolicy):
@@ -214,7 +230,8 @@ def create_envs(
 def train_agent(
     config_path: str,
     custom_config: Optional[Dict[str, Any]] = None,
-    callbacks: Optional[List[BaseCallback]] = None
+    callbacks: Optional[List[BaseCallback]] = None,
+    timeout: Optional[float] = None,
 ) -> PPO:
     """
     Train a PPO agent with the given configuration.
@@ -227,6 +244,9 @@ def train_agent(
     Returns:
         The trained PPO agent.
     """
+    # Validate environment
+    validate_environment()
+
     # Load and merge configuration
     config = utils.load_config(config_path)
     if custom_config:
@@ -284,11 +304,31 @@ def train_agent(
     if callbacks:
         callback_list.extend(callbacks)
 
-    # Train the agent
-    agent.learn(
-        total_timesteps=training_config.total_timesteps,
-        callback=CallbackList(callback_list)
-    )
+    # Train the agent (with optional timeout and graceful checkpoint)
+    def _cleanup_on_timeout() -> None:
+        try:
+            save_dir = training_config.best_model_save_path
+            utils.create_directories([save_dir])
+            agent.save(os.path.join(save_dir, 'timeout_checkpoint'))
+            logger.info("Checkpoint saved on timeout")
+        except Exception:
+            logger.exception("Failed to save checkpoint on timeout")
+
+    if timeout and timeout > 0:
+        tm = TimeoutManager(timeout=float(timeout), cleanup_callback=_cleanup_on_timeout)
+        try:
+            with tm.limit():
+                agent.learn(
+                    total_timesteps=training_config.total_timesteps,
+                    callback=CallbackList(callback_list)
+                )
+        except TimeoutException:
+            logger.warning("Training stopped due to timeout")
+    else:
+        agent.learn(
+            total_timesteps=training_config.total_timesteps,
+            callback=CallbackList(callback_list)
+        )
 
     # Save the environment stats if normalization was used
     if training_config.normalize and hasattr(train_env, 'save'):
@@ -326,6 +366,10 @@ if __name__ == "__main__":
         '--gpu', action='store_true',
         help='Use GPU for training if available'
     )
+    parser.add_argument(
+        '--timeout', type=float, default=None,
+        help='Maximum training duration in seconds (graceful stop with checkpoint)'
+    )
 
     args = parser.parse_args()
 
@@ -336,5 +380,6 @@ if __name__ == "__main__":
             'total_timesteps': args.timesteps,
             'use_gpu': args.gpu,
             'models_dir': args.model_path
-        }
+        },
+        timeout=args.timeout
     )

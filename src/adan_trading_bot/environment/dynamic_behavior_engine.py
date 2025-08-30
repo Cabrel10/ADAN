@@ -4,18 +4,18 @@ Dynamic Behavior Engine (DBE) - Module de contrôle adaptatif pour l'agent de tr
 Ce module implémente un système de modulation dynamique des paramètres de trading
 en fonction des performances et des conditions de marché en temps réel.
 """
-from typing import Dict, Any, Optional, List, Union
+from typing import Dict, Any, Optional, List, Union, Tuple
 import numpy as np
 import json
 import os
-from datetime import datetime # Import datetime
+from datetime import datetime
 from dataclasses import dataclass, field
 import logging
 import pickle
 from pathlib import Path
+from functools import lru_cache
 
 import yaml
-from pathlib import Path
 
 from ..common.utils import get_logger
 from ..common.replay_logger import ReplayLogger
@@ -195,39 +195,48 @@ class DynamicBehaviorEngine:
         """
         try:
             # Mise à jour des métriques de base
-            self.state['current_step'] = live_metrics.get('step', self.state['current_step'] + 1)
-
-            # Mise à jour des métriques du gestionnaire financier si disponible
-            if self.finance_manager and 'current_prices' in live_metrics:
-                self.finance_manager.update_market_value(live_metrics['current_prices'])
+            self.state['current_step'] += 1
+            self.state['volatility'] = live_metrics.get('volatility', 0.0)
+            
+            # Détection du régime de marché avec les paramètres individuels pour le cache
+            rsi = live_metrics.get('rsi')
+            adx = live_metrics.get('adx')
+            ema_ratio = live_metrics.get('ema_ratio')
+            atr = live_metrics.get('atr', 0.0)
+            atr_pct = live_metrics.get('atr_pct')
+            
+            self.state['market_regime'] = self._detect_market_regime(
+                rsi=rsi, adx=adx, ema_ratio=ema_ratio, atr=atr, atr_pct=atr_pct
+            )
+            
+            # Mise à jour des métriques de performance si le gestionnaire financier est disponible
+            if self.finance_manager:
                 portfolio_metrics = self.finance_manager.get_performance_metrics()
-
-                # Mise à jour de l'état avec les métriques financières
-                self.state.update({
-                    'drawdown': portfolio_metrics.get('current_drawdown', 0.0) * 100,  # en pourcentage
-                    'winrate': portfolio_metrics.get('win_rate', 0.0),
-                    'total_trades': portfolio_metrics.get('trade_count', 0)
-                })
-
-            # Détection du régime de marché
-            self.state['market_regime'] = self._detect_market_regime(live_metrics)
-
-            # Mise à jour des métriques de trading si disponibles
-            if 'trade_result' in live_metrics:
-                trade_result = live_metrics['trade_result']
-                self._process_trade_result(trade_result)
-
-            # Ajustement du niveau de risque
+                self.state['winrate'] = portfolio_metrics.get('win_rate', 0.0)
+                self.state['drawdown'] = portfolio_metrics.get('max_drawdown', 0.0) * 100  # En pourcentage
+                
+                # Mise à jour de l'historique des trades
+                if 'recent_trades' in portfolio_metrics:
+                    self.trade_history.extend(portfolio_metrics['recent_trades'])
+                    
+                    # Mise à jour des pertes consécutives
+                    recent_trades = portfolio_metrics['recent_trades']
+                    if recent_trades and not recent_trades[-1].get('is_win', False):
+                        self.state['consecutive_losses'] += 1
+                    else:
+                        self.state['consecutive_losses'] = 0
+                        
+            # Ajustement du niveau de risque en fonction des performances
             self._adjust_risk_level()
-
+            
             # Adaptation du facteur de lissage
             self._adapt_smoothing_factor()
-
-            logger.debug(f"État DBE mis à jour - Step: {self.state['current_step']} | "
-                       f"Régime: {self.state['market_regime']} | "
-                       f"Winrate: {self.state['winrate']*100:.1f}% | "
-                       f"Drawdown: {self.state['drawdown']:.2f}%")
-
+            
+            # Journalisation de l'état actuel
+            logger.debug(f"État DBE mis à jour - Régime: {self.state['market_regime']}, "
+                       f"Risque: {self.state['current_risk_level']:.2f}, "
+                       f"Winrate: {self.state['winrate']*100:.1f}%")
+                       
         except Exception as e:
             logger.error(f"Erreur lors de la mise à jour de l'état du DBE: {e}", exc_info=True)
             raise
@@ -515,23 +524,27 @@ class DynamicBehaviorEngine:
             f"Winrate: {self.state['winrate']*100:.1f}%"
         )
 
-    def _detect_market_regime(self, live_metrics: Dict[str, Any]) -> str:
+    @lru_cache(maxsize=128)
+    def _detect_market_regime(self, rsi: float, adx: float, ema_ratio: float, atr: float, atr_pct: float) -> str:
         """
-        Détecte le régime de marché actuel.
-
+        Détecte le régime de marché actuel à partir des indicateurs techniques.
+        
         Args:
-            live_metrics: Métriques en temps réel du marché
-
+            rsi: Indice de force relative (0-100)
+            adx: Average Directional Index (0-100)
+            ema_ratio: Ratio EMA rapide / lente
+            atr: Average True Range
+            atr_pct: ATR en pourcentage du prix
+            
         Returns:
             Chaîne identifiant le régime de marché
         """
         try:
-            # Récupération des indicateurs techniques
-            rsi = live_metrics.get('rsi', 50)
-            adx = live_metrics.get('adx', 20)
-            ema_ratio = live_metrics.get('ema_ratio', 1.0)  # Ratio EMA rapide / lente
-            atr = live_metrics.get('atr', 0.0)
-            atr_pct = live_metrics.get('atr_pct', 0.0)  # ATR en pourcentage du prix
+            # Nettoyage des entrées
+            rsi = float(rsi) if rsi is not None else 50.0
+            adx = float(adx) if adx is not None else 20.0
+            ema_ratio = float(ema_ratio) if ema_ratio is not None else 1.0
+            atr_pct = float(atr_pct) if atr_pct is not None else 0.0
 
             # Détection du régime de marché
             if adx > 25:  # Marché avec tendance
@@ -599,7 +612,7 @@ class DynamicBehaviorEngine:
         # Calcul des métriques avancées
         if self.trade_history:
             recent_trades = self.trade_history[-100:]  # 100 derniers trades
-            pnls = [t['pnl_pct'] for t in recent_trades if 'pnl_pct' in t]
+            pnls = tuple(t['pnl_pct'] for t in recent_trades if 'pnl_pct' in t)
             wins = [t for t in recent_trades if t.get('is_win', False)]
             losses = [t for t in recent_trades if not t.get('is_win', True)]
 
@@ -607,8 +620,10 @@ class DynamicBehaviorEngine:
             avg_loss = abs(np.mean([t['pnl_pct'] for t in losses])) if losses else 0.0
             win_loss_ratio = avg_win / avg_loss if avg_loss != 0 else float('inf')
 
-            sharpe_ratio = self._calculate_sharpe_ratio(pnls) if pnls else 0.0
-            sortino_ratio = self._calculate_sortino_ratio(pnls) if pnls else 0.0
+            # Utilisation des méthodes mises en cache
+            risk_free_rate = 0.0  # Taux sans risque (peut être paramétré)
+            sharpe_ratio = self._calculate_sharpe_ratio(pnls, risk_free_rate) if pnls else 0.0
+            sortino_ratio = self._calculate_sortino_ratio(pnls, risk_free_rate) if pnls else 0.0
         else:
             avg_win = avg_loss = win_loss_ratio = sharpe_ratio = sortino_ratio = 0.0
 
@@ -647,22 +662,46 @@ class DynamicBehaviorEngine:
 
         return metrics
 
-    def _calculate_sharpe_ratio(self, returns: List[float], risk_free_rate: float = 0.0) -> float:
-        """Calcule le ratio de Sharpe annualisé."""
-        if not returns:
+    @lru_cache(maxsize=128)
+    def _calculate_sharpe_ratio(self, returns_tuple: Tuple[float, ...], risk_free_rate: float = 0.0) -> float:
+        """Calcule le ratio de Sharpe annualisé avec mise en cache des résultats.
+        
+        Args:
+            returns_tuple: Tuple des rendements (doit être hashable pour le cache)
+            risk_free_rate: Taux sans risque annuel (par défaut: 0.0)
+            
+        Returns:
+            Ratio de Sharpe annualisé
+        """
+        if not returns_tuple:
             return 0.0
 
-        returns = np.array(returns)
+        returns = np.array(returns_tuple)
         excess_returns = returns - risk_free_rate / 252  # Taux sans risque journalier
-        sharpe = np.mean(excess_returns) / (np.std(excess_returns) + 1e-9) * np.sqrt(252)
+        std_dev = np.std(excess_returns)
+        
+        # Éviter la division par zéro
+        if std_dev < 1e-9:
+            return 0.0
+            
+        sharpe = np.mean(excess_returns) / std_dev * np.sqrt(252)
         return float(sharpe)
 
-    def _calculate_sortino_ratio(self, returns: List[float], risk_free_rate: float = 0.0) -> float:
-        """Calcule le ratio de Sortino annualisé."""
-        if not returns:
+    @lru_cache(maxsize=128)
+    def _calculate_sortino_ratio(self, returns_tuple: Tuple[float, ...], risk_free_rate: float = 0.0) -> float:
+        """Calcule le ratio de Sortino annualisé avec mise en cache des résultats.
+        
+        Args:
+            returns_tuple: Tuple des rendements (doit être hashable pour le cache)
+            risk_free_rate: Taux sans risque annuel (par défaut: 0.0)
+            
+        Returns:
+            Ratio de Sortino annualisé
+        """
+        if not returns_tuple:
             return 0.0
 
-        returns = np.array(returns)
+        returns = np.array(returns_tuple)
         excess_returns = returns - risk_free_rate / 252  # Taux sans risque journalier
         downside_returns = excess_returns[excess_returns < 0]
 
@@ -670,7 +709,12 @@ class DynamicBehaviorEngine:
             return float('inf') if np.mean(excess_returns) > 0 else 0.0
 
         downside_std = np.std(downside_returns)
-        sortino = np.mean(excess_returns) / (downside_std + 1e-9) * np.sqrt(252)
+        
+        # Éviter la division par zéro
+        if downside_std < 1e-9:
+            return 0.0
+            
+        sortino = np.mean(excess_returns) / downside_std * np.sqrt(252)
         return float(sortino)
 
     def get_decision_history(self, limit: int = 100) -> List[Dict[str, Any]]:

@@ -200,6 +200,40 @@ pytest tests/unit/       # Tests unitaires
 pytest tests/integration # Tests d'intégration
 ```
 
+## ⏱️ Timeout d'entraînement et sauvegarde
+
+ADAN supporte une interruption propre de l'entraînement via un timeout configurable, avec sauvegarde automatique d'un checkpoint.
+
+### Utilisation en ligne de commande
+
+```bash
+python -m adan_trading_bot.training.trainer --config config/train_config.yaml --timeout 3600
+# Interrompt l'entraînement après 3600 secondes (~1h) et sauvegarde models/best/timeout_checkpoint
+```
+
+### Utilisation programmatique
+
+Le `TimeoutManager` fournit un context manager et un décorateur:
+
+```python
+from adan_trading_bot.utils.timeout_manager import TimeoutManager, TimeoutException
+
+tm = TimeoutManager(timeout=1800)  # 30 min
+try:
+    with tm.limit():
+        # Votre boucle d'entraînement
+        agent.learn(total_timesteps=...
+                    )
+except TimeoutException:
+    print("Entraînement interrompu par timeout")
+```
+
+Dans `trainer.py`, lorsque `--timeout` est spécifié, l'appel à `agent.learn()` est encapsulé dans `TimeoutManager`. En cas de timeout, un checkpoint est sauvegardé automatiquement dans `best_model_save_path/timeout_checkpoint`.
+
+Notes:
+- Sur Linux, l'implémentation utilise `SIGALRM`; sur autres plateformes, un fallback `threading.Timer` est appliqué.
+- Le dossier de sauvegarde est créé si nécessaire.
+
 ## 🕵️ Surveillance et débogage
 
 ### Surveillance des performances
@@ -294,13 +328,13 @@ Le système est conçu pour évoluer avec vos besoins :
 1. **Mélange de précision** :
    ```python
    from torch.cuda.amp import autocast, GradScaler
-   
+
    scaler = GradScaler()
-   
+
    with autocast():
        outputs = model(inputs)
        loss = criterion(outputs, targets)
-   
+
    scaler.scale(loss).backward()
    scaler.step(optimizer)
    scaler.update()
@@ -370,10 +404,10 @@ Le système est conçu pour évoluer avec vos besoins :
    ```python
    from fastapi import FastAPI
    import torch
-   
+
    app = FastAPI()
    model = torch.jit.load("model.pt")
-   
+
    @app.post("/predict")
    async def predict(data: dict):
        with torch.no_grad():
@@ -457,9 +491,9 @@ Le système est conçu pour évoluer avec vos besoins :
    ```yaml
    # .github/workflows/tests.yml
    name: Tests
-   
+
    on: [push, pull_request]
-   
+
    jobs:
      test:
        runs-on: ubuntu-latest
@@ -483,11 +517,11 @@ Le système est conçu pour évoluer avec vos besoins :
    ```yaml
    # .github/workflows/deploy.yml
    name: Deploy
-   
+
    on:
      release:
        types: [published]
-   
+
    jobs:
      deploy:
        runs-on: ubuntu-latest
@@ -684,10 +718,10 @@ html_theme = 'sphinx_rtd_theme'
    # Vérification du style
    black --check .
    flake8 .
-   
+
    # Vérification des types
    mypy .
-   
+
    # Tests
    pytest
    ```
@@ -714,7 +748,7 @@ html_theme = 'sphinx_rtd_theme'
    ```bash
    # Mettre à jour une dépendance
    uv pip install --upgrade package_name
-   
+
    # Geler les dépendances
    uv pip freeze > requirements.txt
    ```
@@ -724,7 +758,7 @@ html_theme = 'sphinx_rtd_theme'
    # Créer un environnement
    conda create -n trading_env python=3.10
    conda activate trading_env
-   
+
    # Installer les dépendances
    uv pip install -r requirements.txt
    ```
@@ -778,11 +812,11 @@ def test_chargement_donnees(tmp_path):
     })
     test_file = tmp_path / "test_data.csv"
     df_test.to_csv(test_file, index=False)
-    
+
     # Teste le chargement
     loader = DataLoader(str(test_file))
     df_loaded = loader.load()
-    
+
     # Vérifications
     assert not df_loaded.empty
     assert 'close' in df_loaded.columns
@@ -890,7 +924,7 @@ logger = logging.getLogger(__name__)
    try:
        execute_trade(order)
    except ExecutionError as e:
-       logger.error("Échec de l'exécution de l'ordre", 
+       logger.error("Échec de l'exécution de l'ordre",
                    exc_info=True,
                    extra={'order': order.to_dict()})
        raise
@@ -945,18 +979,18 @@ class Config:
     def __init__(self, config_path="config/config.yaml"):
         self.config_path = Path(config_path)
         self._load_config()
-        
+
     def _load_config(self):
         # Charger les variables d'environnement
         load_dotenv()
-        
+
         # Charger la configuration YAML
         with open(self.config_path) as f:
             self._config = yaml.safe_load(f)
-        
+
         # Remplacer les variables d'environnement
         self._resolve_env_vars(self._config)
-    
+
     def _resolve_env_vars(self, config):
         if isinstance(config, dict):
             for key, value in config.items():
@@ -969,7 +1003,7 @@ class Config:
             for item in config:
                 if isinstance(item, (dict, list)):
                     self._resolve_env_vars(item)
-    
+
     def __getattr__(self, name):
         if name in self._config:
             return self._config[name]
@@ -1055,7 +1089,7 @@ Le projet suit le [Semantic Versioning](https://semver.org/) (SemVer) :
    ```python
    # ❌ À éviter
    api_key = "ma-cle-api-tres-secrete"
-   
+
    # ✅ À privilégier
    import os
    api_key = os.getenv("EXCHANGE_API_KEY")

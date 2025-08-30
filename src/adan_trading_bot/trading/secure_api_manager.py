@@ -9,6 +9,7 @@ import logging
 import hashlib
 import base64
 import hmac
+import re
 from typing import Dict, List, Any, Optional, Tuple
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -129,6 +130,12 @@ class SecureAPIManager:
         self._exchange_info_last_updated: Dict[ExchangeType, datetime] = {}
         self._cache_lock = threading.Lock()
 
+        # Perform security validation at startup
+        self._validate_security_at_startup()
+        
+        # Load credentials from environment variables first
+        self._load_credentials_from_env()
+        
         logger.info("SecureAPIManager initialized")
 
     def get_exchange_info(self, exchange: ExchangeType, force_refresh: bool = False) -> Optional[Dict[str, Any]]:
@@ -609,6 +616,301 @@ class SecureAPIManager:
             except Exception as e:
                 logger.error(f"Error in connection callback: {e}")
 
+    def _validate_security_at_startup(self) -> None:
+        """Valide la sécurité au démarrage pour prévenir les clés hardcodées"""
+        logger.info("Performing security validation at startup...")
+        
+        # Liste des fichiers à vérifier pour les clés hardcodées
+        suspicious_files = [
+            "gemini_api_keys.txt",
+            "api_keys.txt", 
+            "keys.txt",
+            "secrets.txt"
+        ]
+        
+        # Patterns de clés API communes
+        api_key_patterns = [
+            r'AIzaSy[A-Za-z0-9_-]{33}',  # Google API keys
+            r'sk-[A-Za-z0-9]{48}',       # OpenAI API keys
+            r'[A-Za-z0-9]{64}',          # Generic 64-char keys
+            r'[A-Za-z0-9]{32}',          # Generic 32-char keys
+        ]
+        
+        security_violations = []
+        
+        # Vérifier les fichiers suspects
+        for file_name in suspicious_files:
+            file_path = Path(file_name)
+            if file_path.exists():
+                try:
+                    content = file_path.read_text()
+                    # Vérifier si le fichier contient des patterns de clés API
+                    for pattern in api_key_patterns:
+                        if re.search(pattern, content):
+                            security_violations.append(f"Hardcoded API keys detected in {file_name}")
+                            break
+                except Exception as e:
+                    logger.warning(f"Could not read {file_name}: {e}")
+        
+        # Vérifier les variables d'environnement pour des patterns suspects
+        for env_var, value in os.environ.items():
+            if env_var.upper().endswith(('_KEY', '_SECRET', '_TOKEN')) and value:
+                # Vérifier si la valeur ressemble à une clé hardcodée dans le code
+                for pattern in api_key_patterns:
+                    if re.match(pattern, value):
+                        logger.info(f"Found API key in environment variable: {env_var}")
+                        break
+        
+        if security_violations:
+            error_msg = "SECURITY VIOLATION: " + "; ".join(security_violations)
+            logger.error(error_msg)
+            raise SecurityError(error_msg + "\n\nPlease move all API keys to environment variables and remove hardcoded files.")
+        
+        logger.info("Security validation passed - no hardcoded API keys detected")
+
+    def _load_credentials_from_env(self) -> None:
+        """Charge les credentials depuis les variables d'environnement (priorité sur les fichiers chiffrés)"""
+        logger.info("Loading credentials from environment variables...")
+        
+        # Mapping des exchanges vers leurs variables d'environnement
+        env_mappings = {
+            ExchangeType.BINANCE: {
+                'api_key': 'BINANCE_API_KEY',
+                'api_secret': 'BINANCE_API_SECRET',
+                'sandbox': 'BINANCE_SANDBOX'
+            },
+            ExchangeType.BINANCE_FUTURES: {
+                'api_key': 'BINANCE_FUTURES_API_KEY',
+                'api_secret': 'BINANCE_FUTURES_API_SECRET',
+                'sandbox': 'BINANCE_FUTURES_SANDBOX'
+            },
+            ExchangeType.BITGET: {
+                'api_key': 'BITGET_API_KEY',
+                'api_secret': 'BITGET_API_SECRET',
+                'passphrase': 'BITGET_PASSPHRASE',
+                'sandbox': 'BITGET_SANDBOX'
+            },
+            ExchangeType.BYBIT: {
+                'api_key': 'BYBIT_API_KEY',
+                'api_secret': 'BYBIT_API_SECRET',
+                'sandbox': 'BYBIT_SANDBOX'
+            },
+            ExchangeType.OKEX: {
+                'api_key': 'OKEX_API_KEY',
+                'api_secret': 'OKEX_API_SECRET',
+                'passphrase': 'OKEX_PASSPHRASE',
+                'sandbox': 'OKEX_SANDBOX'
+            },
+            ExchangeType.KRAKEN: {
+                'api_key': 'KRAKEN_API_KEY',
+                'api_secret': 'KRAKEN_API_SECRET',
+                'sandbox': 'KRAKEN_SANDBOX'
+            }
+        }
+        
+        loaded_count = 0
+        
+        for exchange, env_vars in env_mappings.items():
+            api_key = os.getenv(env_vars['api_key'])
+            api_secret = os.getenv(env_vars['api_secret'])
+            
+            if api_key and api_secret:
+                # Récupérer les paramètres optionnels
+                passphrase = os.getenv(env_vars.get('passphrase'))
+                sandbox = os.getenv(env_vars.get('sandbox', 'true')).lower() in ('true', '1', 'yes')
+                
+                # Créer les credentials
+                credentials = APICredentials(
+                    exchange=exchange,
+                    api_key=api_key,
+                    api_secret=api_secret,
+                    passphrase=passphrase,
+                    sandbox=sandbox,
+                    name="Environment"
+                )
+                
+                # Ajouter aux credentials (sans chiffrement car déjà en env)
+                cred_id = f"{exchange.value}_Environment"
+                self.credentials[cred_id] = credentials
+                loaded_count += 1
+                
+                logger.info(f"Loaded credentials for {exchange.value} from environment variables")
+        
+        if loaded_count > 0:
+            logger.info(f"Successfully loaded {loaded_count} credentials from environment variables")
+        else:
+            logger.info("No credentials found in environment variables")
+
+    def get_credentials(self, exchange: ExchangeType, name: str = "Default") -> Optional[APICredentials]:
+        """Récupère des credentials (priorité: Environment > Default)"""
+        # Priorité aux credentials d'environnement
+        env_cred_id = f"{exchange.value}_Environment"
+        if env_cred_id in self.credentials:
+            return self.credentials[env_cred_id]
+        
+        # Fallback vers les credentials par défaut
+        cred_id = f"{exchange.value}_{name}"
+        return self.credentials.get(cred_id)
+
+    def create_env_setup_guide(self, output_path: str = "ENVIRONMENT_SETUP.md") -> None:
+        """Crée un guide de configuration des variables d'environnement"""
+        guide_content = """# Environment Variables Setup Guide
+
+## Overview
+
+This guide explains how to securely configure API keys using environment variables instead of hardcoded files.
+
+## Required Environment Variables
+
+### Binance
+```bash
+export BINANCE_API_KEY="your_binance_api_key"
+export BINANCE_API_SECRET="your_binance_api_secret"
+export BINANCE_SANDBOX="true"  # Set to "false" for production
+```
+
+### Binance Futures
+```bash
+export BINANCE_FUTURES_API_KEY="your_binance_futures_api_key"
+export BINANCE_FUTURES_API_SECRET="your_binance_futures_api_secret"
+export BINANCE_FUTURES_SANDBOX="true"  # Set to "false" for production
+```
+
+### Bitget
+```bash
+export BITGET_API_KEY="your_bitget_api_key"
+export BITGET_API_SECRET="your_bitget_api_secret"
+export BITGET_PASSPHRASE="your_bitget_passphrase"
+export BITGET_SANDBOX="true"  # Set to "false" for production
+```
+
+### Bybit
+```bash
+export BYBIT_API_KEY="your_bybit_api_key"
+export BYBIT_API_SECRET="your_bybit_api_secret"
+export BYBIT_SANDBOX="true"  # Set to "false" for production
+```
+
+### OKEx
+```bash
+export OKEX_API_KEY="your_okex_api_key"
+export OKEX_API_SECRET="your_okex_api_secret"
+export OKEX_PASSPHRASE="your_okex_passphrase"
+export OKEX_SANDBOX="true"  # Set to "false" for production
+```
+
+### Kraken
+```bash
+export KRAKEN_API_KEY="your_kraken_api_key"
+export KRAKEN_API_SECRET="your_kraken_api_secret"
+export KRAKEN_SANDBOX="true"  # Set to "false" for production
+```
+
+## Setup Methods
+
+### Method 1: .env File (Recommended for Development)
+
+1. Create a `.env` file in your project root:
+```bash
+# .env file
+BINANCE_API_KEY=your_binance_api_key
+BINANCE_API_SECRET=your_binance_api_secret
+BINANCE_SANDBOX=true
+```
+
+2. Add `.env` to your `.gitignore` file to prevent committing secrets:
+```bash
+echo ".env" >> .gitignore
+```
+
+3. Load the .env file in your application:
+```python
+from dotenv import load_dotenv
+load_dotenv()
+```
+
+### Method 2: System Environment Variables
+
+#### Linux/macOS
+Add to your `~/.bashrc` or `~/.zshrc`:
+```bash
+export BINANCE_API_KEY="your_binance_api_key"
+export BINANCE_API_SECRET="your_binance_api_secret"
+```
+
+Then reload your shell:
+```bash
+source ~/.bashrc  # or ~/.zshrc
+```
+
+#### Windows
+```cmd
+setx BINANCE_API_KEY "your_binance_api_key"
+setx BINANCE_API_SECRET "your_binance_api_secret"
+```
+
+### Method 3: Docker Environment Variables
+
+```dockerfile
+ENV BINANCE_API_KEY=your_binance_api_key
+ENV BINANCE_API_SECRET=your_binance_api_secret
+```
+
+Or using docker-compose:
+```yaml
+environment:
+  - BINANCE_API_KEY=your_binance_api_key
+  - BINANCE_API_SECRET=your_binance_api_secret
+```
+
+## Security Best Practices
+
+1. **Never commit API keys to version control**
+2. **Use different keys for development and production**
+3. **Regularly rotate your API keys**
+4. **Set appropriate permissions on your exchange accounts**
+5. **Monitor API key usage and set up alerts**
+6. **Use sandbox/testnet environments for development**
+
+## Verification
+
+To verify your environment variables are set correctly:
+
+```bash
+# Check if variables are set (will show masked values)
+echo $BINANCE_API_KEY | sed 's/./*/g'
+echo $BINANCE_API_SECRET | sed 's/./*/g'
+```
+
+## Migration from Hardcoded Files
+
+If you have existing hardcoded API keys:
+
+1. Copy your API keys to environment variables using one of the methods above
+2. Remove any files containing hardcoded keys (e.g., `gemini_api_keys.txt`)
+3. Restart your application
+4. Verify the application loads credentials from environment variables
+
+## Troubleshooting
+
+### Common Issues
+
+1. **Environment variables not loaded**: Make sure to restart your terminal/application after setting variables
+2. **Permission denied**: Check that your API keys have the correct permissions on the exchange
+3. **Sandbox mode**: Ensure `SANDBOX` variables are set to "true" for testing
+
+### Validation
+
+The SecureAPIManager will automatically validate that no hardcoded API keys exist in your codebase at startup.
+"""
+
+        try:
+            with open(output_path, 'w') as f:
+                f.write(guide_content)
+            logger.info(f"Environment setup guide created at: {output_path}")
+        except Exception as e:
+            logger.error(f"Failed to create environment setup guide: {e}")
+
     def shutdown(self) -> None:
         """Arrêt propre du gestionnaire"""
         logger.info("Shutting down SecureAPIManager...")
@@ -622,3 +924,8 @@ class SecureAPIManager:
             self._save_credentials()
 
         logger.info("SecureAPIManager shutdown completed")
+
+
+class SecurityError(Exception):
+    """Exception levée lors de violations de sécurité"""
+    pass

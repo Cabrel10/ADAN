@@ -59,27 +59,27 @@ DEFAULT_WINDOW_SIZE = 100
 # Position sizing tiers (capital in base currency)
 CAPITAL_TIERS = {
     "Micro": {
-        "min": 11.0, 
-        "max": 30.0, 
-        "max_position_size_pct": 30, 
+        "min": 11.0,
+        "max": 30.0,
+        "max_position_size_pct": 30,
         "risk_per_trade_pct": 5.0
     },
     "Small": {
-        "min": 30.0, 
-        "max": 100.0, 
-        "max_position_size_pct": 20, 
+        "min": 30.0,
+        "max": 100.0,
+        "max_position_size_pct": 20,
         "risk_per_trade_pct": 2.0
     },
     "Medium": {
-        "min": 100.0, 
-        "max": 300.0, 
-        "max_position_size_pct": 15, 
+        "min": 100.0,
+        "max": 300.0,
+        "max_position_size_pct": 15,
         "risk_per_trade_pct": 1.5
     },
     "Large": {
-        "min": 300.0, 
-        "max": float('inf'), 
-        "max_position_size_pct": 10, 
+        "min": 300.0,
+        "max": float('inf'),
+        "max_position_size_pct": 10,
         "risk_per_trade_pct": 1.0
     }
 }

@@ -119,7 +119,7 @@ class SharedExperienceBuffer:
             if hasattr(self, 'orchestrator'):
                 self.orchestrator.metrics['buffer_additions'] += 1
     
-    def sample(self, batch_size: int) -> Tuple[List[Dict[str, Any]], np.ndarray, np.ndarray]:
+    def sample(self, batch_size: int) -> Tuple[Dict[str, Any], np.ndarray, np.ndarray]:
         """
         Échantillonne un lot d'expériences du buffer de manière thread-safe.
         
@@ -128,7 +128,8 @@ class SharedExperienceBuffer:
             
         Returns:
             Tuple contenant:
-                - Liste des expériences échantillonnées
+                - Dictionnaire des expériences échantillonnées, regroupées par clé
+                  (ex: {'state': np.ndarray, 'action': np.ndarray, ...})
                 - Tableau des indices des expériences
                 - Tableau des poids d'importance
         """
@@ -158,10 +159,22 @@ class SharedExperienceBuffer:
             if len(weights) > 0:
                 weights /= weights.max()  # Normaliser
 
-            # Extraire le batch
-            batch = []
+            # Extraire le batch (liste de dictionnaires)
+            batch_list: List[Dict[str, Any]] = []
             for idx in indices:
-                batch.append(self.buffer[idx])
+                batch_list.append(self.buffer[idx])
+
+            # Regrouper par clé pour retourner un dictionnaire de tableaux
+            batch: Dict[str, Any] = {}
+            if len(batch_list) > 0:
+                keys = set().union(*[exp.keys() for exp in batch_list])
+                for k in keys:
+                    values = [exp.get(k) for exp in batch_list]
+                    # Convertir en numpy array lorsque c'est possible
+                    try:
+                        batch[k] = np.asarray(values)
+                    except Exception:
+                        batch[k] = values
 
             # Mettre à jour beta
             self.beta = min(1.0, self.beta + self.beta_increment)

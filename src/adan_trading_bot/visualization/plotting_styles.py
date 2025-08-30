@@ -10,7 +10,7 @@ COLORS = {
     'candle_down': "#E74C3C",    # Rouge
     'wick': "#34495E",           # Gris foncé
     'close': "#3498DB",          # Bleu
-    
+
     # Moyennes mobiles
     'ma_short': "#F1C40F",       # Jaune
     'ma_medium': "#3498DB",      # Bleu
@@ -18,12 +18,12 @@ COLORS = {
     'bb_upper': "#E67E22",       # Orange
     'bb_middle': "#2980B9",      # Bleu foncé
     'bb_lower': "#E67E22",       # Orange
-    
+
     # Volume
     'volume_up': "#2ECC71",      # Vert clair
     'volume_down': "#E74C3C",    # Rouge clair
     'volume_alpha': 0.3,         # Transparence
-    
+
     # Indicateurs
     'rsi': "#9B59B6",            # Violet
     'rsi_overbought': "#E74C3C", # Rouge
@@ -56,7 +56,7 @@ COLORS = {
 def get_mpl_style() -> Dict[str, Any]:
     """
     Retourne les paramètres de style pour matplotlib.
-    
+
     Returns:
         Dictionnaire de paramètres de style
     """

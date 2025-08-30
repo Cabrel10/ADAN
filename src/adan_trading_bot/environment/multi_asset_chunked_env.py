@@ -6,32 +6,62 @@ Environnement de trading multi-actifs avec chargement par morceaux.
 Ce module implémente un environnement de trading pour plusieurs actifs
 avec chargement efficace des données par lots.
 """
+# Standard library imports
 import json
 import logging
 import os
 import time
 from datetime import datetime
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import Any, Dict, List, Optional, Tuple, TypeVar
 
+# Third-party imports
 import gymnasium as gym
 import numpy as np
 import pandas as pd
-from stable_baselines3.common.vec_env import DummyVecEnv, SubprocVecEnv
+from gymnasium import spaces
 
-from adan_trading_bot.data_processing.data_loader import ChunkedDataLoader
-from adan_trading_bot.data_processing.state_builder import StateBuilder, TimeframeConfig
-from adan_trading_bot.portfolio.portfolio_manager import PortfolioManager
-
-# Importations locales
+# Local application imports
+from ..data_processing.data_loader import ChunkedDataLoader
 from .dynamic_behavior_engine import DynamicBehaviorEngine
+from ..data_processing.observation_validator import ObservationValidator
 from .order_manager import OrderManager
-from adan_trading_bot.portfolio.portfolio_manager import PortfolioManager as Portfolio
+from ..portfolio.portfolio_manager import PortfolioManager
 from .reward_calculator import RewardCalculator
-from .reward_shaper import RewardShaper
+try:
+    # Import from data_processing (canonical location)
+    from adan_trading_bot.data_processing.state_builder import StateBuilder, TimeframeConfig
+except Exception:
+    # Fallback for compatibility (should not be used under normal conditions)
+    from adan_trading_bot.environment.state_builder import StateBuilder, TimeframeConfig  # pragma: no cover
 
+# Type variables for generics
+T = TypeVar('T')
+
+# Constants
+DEFAULT_PORTFOLIO_STATE_SIZE = 17
+DEFAULT_WINDOW_SIZE = 50
+DEFAULT_INITIAL_BALANCE = 10000.0
+MAX_STEPS = 10000
 
 # Configuration du logger
 logger = logging.getLogger(__name__)
+
+# Désactiver la propagation des logs des bibliothèques tierces
+logging.getLogger('matplotlib').setLevel(logging.WARNING)
+logging.getLogger('PIL').setLevel(logging.WARNING)
+logging.getLogger('urllib3').setLevel(logging.WARNING)
+
+# Si le logger n'a pas encore de handlers, on le configure
+if not logger.handlers:
+    # Utiliser la configuration de base pour éviter les conflits avec Rich
+    logging.basicConfig(
+        level=logging.INFO,
+        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+        force=True
+    )
+    
+    # Désactiver la propagation pour éviter les doublons
+    logger.propagate = False
 
 
 class MultiAssetChunkedEnv(gym.Env):
@@ -52,33 +82,53 @@ class MultiAssetChunkedEnv(gym.Env):
 
     def __init__(
         self,
-        config: Dict[str, Any],
-        worker_config: Dict[str, Any],
-        data_loader_instance: Optional[Any] = None,
-        shared_buffer: Optional[Any] = None,
-        worker_id: int = 0,
+        data: Dict[str, Dict[str, pd.DataFrame]],
+        timeframes: List[str],
+        window_size: int,
+        features_config: Dict[str, List[str]],
+        max_steps: int = 1000,
+        initial_balance: float = 10000.0,
+        commission: float = 0.001,
+        reward_scaling: float = 1.0,
+        render_mode: Optional[str] = None,
+        enable_logging: bool = True,
+        log_dir: str = "logs",
+        **kwargs
     ) -> None:
         """Initialise l'environnement de trading multi-actifs.
 
         Args:
-            config: Configuration principale de l'application (déjà résolue).
-            worker_config: Configuration spécifique au worker (déjà résolue).
-            data_loader_instance: Instance de ChunkedDataLoader (optionnel).
-            shared_buffer: Instance du SharedExperienceBuffer (optionnel).
+            data: Données de trading sous forme de dictionnaire.
+            timeframes: Liste des intervalles de temps pour les données.
+            window_size: Taille de la fenêtre pour les observations.
+            features_config: Configuration des caractéristiques pour chaque intervalle de temps.
+            max_steps: Nombre maximum d'étapes par épisode.
+            initial_balance: Balance initiale du portefeuille.
+            commission: Commission pour chaque transaction.
+            reward_scaling: Échelle de récompense pour les récompenses.
+            render_mode: Mode de rendu pour l'environnement.
+            enable_logging: Activation de la journalisation.
+            log_dir: Répertoire pour les fichiers de logs.
         """
         super().__init__()
 
         # Initialize logger
         self.logger = logging.getLogger(__name__)
-        self.config = config
-        self.worker_config = worker_config
-        self.data_loader_instance = data_loader_instance
-        self.shared_buffer = shared_buffer
 
-        # Initialize self.assets from worker_config
-        self.assets = worker_config.get("assets", [])
+        # Initialize configuration attributes
+        self.worker_config = kwargs.get('worker_config', {})
+        self.config = kwargs.get('config', {})
+        
+        # Initialize shared_buffer to avoid AttributeError in step()
+        self.shared_buffer = None
+        
+        # Initialize strict_validation flag with a default value
+        self.strict_validation = kwargs.get('strict_validation', False)
+        
+        # Initialize self.assets from data
+        self.assets = list(next(iter(data.values())))
         if not self.assets:
-            raise ValueError("No assets specified in worker_config.")
+            raise ValueError("No assets found in the provided data.")
 
         # Configuration du cache d'observations
         self._observation_cache = {}  # Cache des observations
@@ -86,7 +136,20 @@ class MultiAssetChunkedEnv(gym.Env):
         self._cache_hits = 0  # Succès du cache
         self._cache_misses = 0  # Échecs du cache
         self._current_observation = None  # Observation courante
+        # Ensure attribute exists for downstream access in _get_observation
+        self._current_obs = None
         self._cache_access = {}  # Suivi de l'utilisation
+        
+        # Initialisation du validateur d'observations
+        n_features = len(next(iter(features_config.values())))
+        validator_config = {
+            'timeframes': timeframes,
+            'n_assets': len(self.assets),
+            'window_size': window_size,
+            'n_features': n_features,
+            'portfolio_state_size': DEFAULT_PORTFOLIO_STATE_SIZE
+        }
+        self.observation_validator = ObservationValidator(validator_config)
 
         # Initialisation des compteurs et états
         self.current_chunk = 0
@@ -94,6 +157,9 @@ class MultiAssetChunkedEnv(gym.Env):
         self.done = False  # État done
         self.global_step = 0  # Compteur global d'étapes
         self.current_step = 0  # Étape courante dans l'épisode
+        
+        # Initialisation du chargeur de données
+        self.data_loader_instance = None
 
         # Suivi des paliers
         self.current_tier = None
@@ -116,13 +182,37 @@ class MultiAssetChunkedEnv(gym.Env):
             self.logger.error("Erreur lors de l'initialisation: %s", str(e))
             raise
 
+    def _epoch_reset(self, force: bool = False):
+        """
+        Centralized call to portfolio.reset(...) with config-driven threshold.
+        Use force=True only in emergency handlers.
+        """
+        min_cap = getattr(self, "config", {}).get("min_capital_before_reset", 11.0)
+        try:
+            # explicit args to new PortfolioManager.reset signature
+            self.portfolio.reset(new_epoch=True, force=force, min_capital_before_reset=min_cap)
+        except TypeError:
+            # Backwards compatibility: if portfolio.reset only accepted (new_epoch)
+            # fallback to the older call (full reset)
+            if force:
+                self.portfolio.reset(new_epoch=True)
+            else:
+                # try soft-close fallback if available
+                try:
+                    if hasattr(self.portfolio, "_soft_reset_epoch_state"):
+                        self.portfolio._soft_reset_epoch_state()
+                    else:
+                        self.portfolio.reset(new_epoch=True)
+                except Exception:
+                    self.portfolio.reset(new_epoch=True)
+
     def _initialize_components(self) -> None:
         """Initialize all environment components in the correct order."""
-        # 1. Initialize data loader FIRST to know the data structure
-        if self.data_loader_instance is not None:
-            self.data_loader = self.data_loader_instance
-        else:
-            self._init_data_loader(self.assets)
+        # Initialize data loader FIRST to know the data structure
+        if not hasattr(self, 'data_loader_instance') or self.data_loader_instance is None:
+            # Initialize data loader with correct assets
+            self.data_loader_instance = self._init_data_loader(self.assets)
+        self.data_loader = self.data_loader_instance
 
         # 2. Create TimeframeConfig from loaded data
         timeframe_configs = []
@@ -182,10 +272,10 @@ class MultiAssetChunkedEnv(gym.Env):
             "window_sizes",
             {"5m": 20, "1h": 10, "4h": 5}  # Valeurs par défaut si non spécifiées
         )
-        
+
         # Utiliser la taille de fenêtre du timeframe 5m comme valeur par défaut
         default_window_size = window_sizes.get("5m", 20)
-        
+
         # Configurer les tailles de fenêtres spécifiques pour chaque timeframe
         timeframe_configs = {}
         for tf in features_config.keys():
@@ -197,7 +287,7 @@ class MultiAssetChunkedEnv(gym.Env):
                 normalize=True
             )
             self.logger.info(f"Configuration de la fenêtre pour {tf}: {tf_window_size} périodes")
-        
+
         # Initialiser le StateBuilder avec la configuration des timeframes
         self.state_builder = StateBuilder(
             features_config=features_config,
@@ -205,7 +295,7 @@ class MultiAssetChunkedEnv(gym.Env):
             include_portfolio_state=True,
             normalize=True
         )
-        
+
         # Configurer les tailles de fenêtres spécifiques dans le StateBuilder
         for tf, config in timeframe_configs.items():
             self.state_builder.set_timeframe_config(tf, config.window_size, config.features)
@@ -217,8 +307,12 @@ class MultiAssetChunkedEnv(gym.Env):
         # 6. Initialize max_steps and max_chunks_per_episode from config
         self.max_steps = self.config.get("environment", {}).get("max_steps", 1000)
         self.max_chunks_per_episode = self.config.get("environment", {}).get("max_chunks_per_episode", 10)
-        self.logger.info(f"Initialized max_steps to {self.max_steps} and max_chunks_per_episode to {self.max_chunks_per_episode}")
         
+        # Initialize total_chunks from data_loader if available
+        self.total_chunks = getattr(self.data_loader, 'total_chunks', 10)  # Default to 10 if not available
+        
+        self.logger.info(f"Initialized max_steps to {self.max_steps} and max_chunks_per_episode to {self.max_chunks_per_episode}")
+
         # Log the chunking configuration
         self.logger.info(f"Chunk configuration - Total chunks: {self.total_chunks}, Max chunks per episode: {self.max_chunks_per_episode}")
 
@@ -252,6 +346,9 @@ class MultiAssetChunkedEnv(gym.Env):
     def _init_data_loader(self, assets: List[str]) -> Any:
         """Initialize the chunked data loader using worker-specific config.
 
+        Args:
+            assets: List of assets to load data for
+            
         Returns:
             Initialized ChunkedDataLoader instance
 
@@ -294,46 +391,29 @@ class MultiAssetChunkedEnv(gym.Env):
                 f"worker={worker_timeframes}"
             )
 
-        # Create a copy of the config with resolved paths
-        loader_config = {
-            **self.config,
-            "data": {
-                **self.config.get("data", {}),
-                "features_per_timeframe": self.config.get("data", {}).get(
-                    "features_per_timeframe", {}
-                ),
-                "assets": mapped_assets,  # Use mapped_assets here
-            },
+        # Create a worker config with the correct assets and timeframes
+        worker_config = {
+            **self.worker_config,
+            "assets": mapped_assets,
+            "timeframes": self.timeframes,
+            "data_split_override": self.worker_config.get("data_split", "train"),
         }
 
-        # Ensure we have features configured for each timeframe
-        features_config = loader_config["data"]["features_per_timeframe"]
-        for tf in self.timeframes:
-            if tf not in features_config:
-                logger.warning(
-                    f"No features configured for timeframe {tf}, "
-                    "using default features"
-                )
-                features_config[tf] = ["open", "high", "low", "close", "volume"]
-
-        # Initialize the data loader
+        # Initialize the data loader with the correct config
+        from ..data_processing.data_loader import ChunkedDataLoader
+        
         self.data_loader = ChunkedDataLoader(
-            config=loader_config,
-            worker_config={
-                **self.worker_config,
-                "assets": mapped_assets,  # Use mapped_assets here
-                "timeframes": self.timeframes,
-            },
+            config=self.config,
+            worker_config=worker_config
         )
-
-        # Get total chunks from the data loader
-        self.total_chunks = self.data_loader.total_chunks
-        logger.debug(f"MultiAssetChunkedEnv timeframes: {self.timeframes}")
 
         logger.info(
-            f"Initialized data loader with {len(self.assets)} assets: {', '.join(self.assets)}"
+            f"Initialized data loader with {len(mapped_assets)} assets: {', '.join(mapped_assets)}"
         )
         logger.debug(f"Available timeframes: {', '.join(self.timeframes)}")
+        
+        # Update assets list with mapped assets
+        self.assets = mapped_assets
 
         return self.data_loader
 
@@ -352,24 +432,14 @@ class MultiAssetChunkedEnv(gym.Env):
             dtype=np.float32,
         )
 
-        # Configure observation space based on StateBuilder
+        # Configure observation space with fixed shape (3 timeframes, 20 window_size, 15 features)
         try:
-            # Get the observation shape from StateBuilder (returns 3 values)
-            (
-                n_timeframes,
-                window_size,
-                n_features,
-            ) = self.state_builder.get_observation_shape()
-
-            # Get portfolio state dimension from StateBuilder
-            portfolio_dim = self.state_builder.get_portfolio_state_dim()
-
-            # Store the shape information
-            self.observation_shape = (n_timeframes, window_size, n_features)
-            self.portfolio_state_dim = portfolio_dim
+            # Define fixed observation shape
+            self.observation_shape = (3, 20, 15)  # (timeframes, window_size, features)
+            self.portfolio_state_dim = 17  # Fixed portfolio state dimension
 
             # Log the dimensions for debugging
-            logger.info(f"Observation shape: {self.observation_shape}")
+            logger.info(f"Using fixed observation shape: {self.observation_shape}")
             logger.info(f"Portfolio state dimension: {self.portfolio_state_dim}")
 
             # Create observation space dictionary
@@ -390,11 +460,102 @@ class MultiAssetChunkedEnv(gym.Env):
                 }
             )
 
-            logger.info(f"Observation space: {self.observation_space}")
+            logger.info(f"Observation space configured: {self.observation_space}")
 
         except Exception as e:
             logger.error(f"Error setting up observation space: {str(e)}")
             raise
+
+    def _get_initial_observation(self) -> Dict[str, np.ndarray]:
+        """Get the initial observation after environment reset.
+
+        This method ensures we have a valid observation before starting the episode,
+        with proper error handling and logging. The observation shape is fixed to (3, 20, 15)
+        where:
+        - 3 timeframes (5m, 1h, 4h)
+        - 20 window size
+        - 15 features per timeframe
+
+        Returns:
+            Dict[str, np.ndarray]: Initial observation dictionary with 'observation' and 'portfolio_state' keys
+        """
+        # Define the expected observation shape (timeframes, window_size, features)
+        expected_shape = (3, 20, 15)
+        
+        # Initialize default observation with correct shape
+        default_observation = {
+            'observation': np.zeros(expected_shape, dtype=np.float32),
+            'portfolio_state': np.zeros(17, dtype=np.float32)  # Fixed portfolio state size
+        }
+        
+        try:
+            # Get market data for the current chunk
+            market_data = self.data_loader.load_chunk(0)
+            
+            # Check for empty or invalid market data
+            if not market_data or not any(market_data[asset] for asset in market_data):
+                logger.error("No valid market data available for initial observation")
+                return default_observation
+                
+            # Build observation using state_builder
+            observation_dict = self.state_builder.build_observation(0, market_data)
+            
+            # Validate and extract the observation array
+            if not isinstance(observation_dict, dict) or 'observation' not in observation_dict:
+                logger.error("Invalid observation format from state_builder.build_observation()")
+                return default_observation
+                
+            observation = observation_dict['observation']
+            
+            # Ensure observation is a numpy array
+            if not isinstance(observation, np.ndarray):
+                logger.error(f"Observation is not a numpy array, got {type(observation)}")
+                return default_observation
+                
+            # Log observation statistics
+            logger.info(f"Raw observation shape: {observation.shape}")
+            logger.info(f"Observation min/max/mean: {np.min(observation):.4f}/{np.max(observation):.4f}/{np.mean(observation):.4f}")
+            
+            # Check for all zeros after transformation
+            if np.all(observation == 0):
+                logger.warning("Initial observation is entirely zero after transformation")
+            
+            # Ensure observation has the correct shape (3, 20, 15)
+            if observation.shape != expected_shape:
+                logger.warning(
+                    f"Observation shape {observation.shape} does not match expected shape {expected_shape}, "
+                    f"padding/truncating to match expected shape"
+                )
+                
+                # Create output array with correct shape
+                output = np.zeros(expected_shape, dtype=np.float32)
+                
+                # Calculate the slices to copy data safely
+                slices = [
+                    slice(0, min(observation.shape[i], expected_shape[i])) 
+                    for i in range(len(expected_shape))
+                ]
+                
+                # Copy data with broadcasting
+                output[tuple(slices)] = observation[tuple(slices)]
+                observation = output
+            
+            # Ensure data type is float32
+            observation = observation.astype(np.float32)
+            
+            # Validate observation values
+            if np.any(np.isnan(observation)) or np.any(np.isinf(observation)):
+                logger.warning("Observation contains NaN or Inf values, replacing with zeros")
+                observation = np.nan_to_num(observation, nan=0.0, posinf=0.0, neginf=0.0)
+            
+            return {
+                'observation': observation,
+                'portfolio_state': np.zeros(17, dtype=np.float32)  # Fixed portfolio state size
+            }
+            
+        except Exception as e:
+            logger.error(f"Error in _get_initial_observation: {str(e)}", exc_info=True)
+            return default_observation
 
     def reset(self, *, seed=None, options=None):
         """Reset the environment to start a new episode.
@@ -415,16 +576,51 @@ class MultiAssetChunkedEnv(gym.Env):
         self.step_in_chunk = 0
 
         # Reset portfolio and load initial data chunk
-        # Ensure starting from configured initial balance at each new episode
-        # and clear last trade tracking
         if hasattr(self, "last_trade_step"):
             self.last_trade_step = -1
-        self.portfolio.reset(new_epoch=True)
+            
+        self._epoch_reset(force=False)
         self.current_chunk_idx = 0
         self.current_data = self.data_loader.load_chunk(self.current_chunk_idx)
 
-        # Get initial observation and info
-        observation = self._get_observation()
+        # Position the step within the chunk to ensure a non-empty observation window
+        try:
+            # Prefer the StateBuilder's effective window size (usually max across timeframes)
+            warmup = int(getattr(self.state_builder, "window_size", getattr(self, "window_size", 20)))
+            min_len = None
+
+            if isinstance(self.current_data, dict) and self.current_data:
+                lengths = []
+                for asset_dict in self.current_data.values():
+                    if not isinstance(asset_dict, dict):
+                        continue
+                    for tf in getattr(self, "timeframes", []):
+                        df = asset_dict.get(tf)
+                        if isinstance(df, pd.DataFrame):
+                            lengths.append(len(df))
+                if lengths:
+                    min_len = min(lengths)
+
+            if min_len is not None and min_len > 1:
+                # Clamp warmup to available length-1 to leave at least 1 row ahead
+                self.step_in_chunk = max(1, min(warmup, min_len - 1))
+            else:
+                # Fallback to warmup; _build_observation will still be defensive
+                self.step_in_chunk = warmup
+
+            logger.debug(
+                f"Reset warmup positioning: warmup={warmup}, min_len={min_len}, step_in_chunk={self.step_in_chunk}"
+            )
+        except Exception as e:
+            logger.warning(f"Failed to set warmup step_in_chunk on reset: {e}")
+
+        # Get initial observation using the robust _get_initial_observation method
+        observation = self._get_initial_observation()
+        
+        # Store the current observation for future reference
+        self._current_obs = observation
+        
+        # Get additional info
         info = self._get_info()
 
         return observation, info
@@ -623,7 +819,7 @@ class MultiAssetChunkedEnv(gym.Env):
 
         # Reset portfolio and order manager
         # Use new_epoch=hard_reset to control whether to reset capital
-        self.portfolio.reset(new_epoch=hard_reset)
+        self._epoch_reset(force=True)
         self.order_manager.reset()
 
         # Load initial chunk of data
@@ -723,17 +919,17 @@ class MultiAssetChunkedEnv(gym.Env):
 
     def step(self, action: np.ndarray) -> tuple:
         """Execute one time step within the environment.
-        
+
         This method handles the main environment loop, including:
         - Action validation and processing
         - Portfolio updates and trading
         - Reward calculation
         - Episode termination conditions
         - Chunk transitions and surveillance mode management
-        
+
         Args:
             action: Array of actions for each asset in the portfolio
-            
+
         Returns:
             tuple: (observation, reward, terminated, truncated, info)
         """
@@ -756,7 +952,7 @@ class MultiAssetChunkedEnv(gym.Env):
 
         if not self._is_initialized:
             raise RuntimeError("Environment not initialized. Call reset() first.")
-            
+
         # Vérifier les conditions d'urgence avant l'exécution de l'étape
         if hasattr(self, "portfolio_manager"):
             emergency_reset = self.portfolio_manager.check_emergency_condition(self.current_step)
@@ -783,7 +979,7 @@ class MultiAssetChunkedEnv(gym.Env):
         # Log current step and action with detailed information
         chunk_info = f"chunk {self.current_chunk_idx + 1}/{self.total_chunks}" if hasattr(self, 'total_chunks') else ""
         logger.debug("[STEP LOG] step=%d, action=%s, current_chunk=%d, step_in_chunk=%d",
-                    self.current_step, np.array2string(action, precision=6), 
+                    self.current_step, np.array2string(action, precision=6),
                     self.current_chunk_idx, self.step_in_chunk)
         logger.info(f"[STEP {self.current_step} - {chunk_info}] Executing step with action: {action}")
 
@@ -791,7 +987,7 @@ class MultiAssetChunkedEnv(gym.Env):
         if hasattr(self, "portfolio_manager"):
             try:
                 pv = float(self.portfolio_manager.get_portfolio_value())
-                
+
                 # Vérifier l'état de surveillance et mettre à jour si nécessaire
                 if hasattr(self.portfolio_manager, '_check_surveillance_status'):
                     needs_reset = self.portfolio_manager._check_surveillance_status(self.current_step)
@@ -801,7 +997,7 @@ class MultiAssetChunkedEnv(gym.Env):
                         info = self._get_info()
                         info["termination_reason"] = "surveillance_reset"
                         return observation, 0.0, True, False, info
-                        
+
                 # Log surveillance status if in surveillance mode
                 if hasattr(self.portfolio_manager, '_surveillance_mode') and self.portfolio_manager._surveillance_mode:
                     logger.warning(
@@ -957,10 +1153,10 @@ class MultiAssetChunkedEnv(gym.Env):
             if self.step_in_chunk >= data_length:
                 self.current_chunk_idx += 1
                 self.current_chunk += 1
-                
+
                 # Vérifier si on a atteint le nombre maximum de chunks pour cet épisode
                 chunks_limit = min(self.total_chunks, self.max_chunks_per_episode)
-                
+
                 if self.current_chunk_idx >= chunks_limit:
                     done = True
                     self.done = True
@@ -976,17 +1172,17 @@ class MultiAssetChunkedEnv(gym.Env):
                     )
                     self.current_data = self.data_loader.load_chunk(self.current_chunk_idx)
                     self.step_in_chunk = 0
-                    
+
                     # Réinitialiser les composants pour le nouveau chunk si nécessaire
                     if hasattr(self.dbe, "_reset_for_new_chunk"):
                         logger.debug("[DBE] Resetting DBE for new chunk")
                         self.dbe._reset_for_new_chunk()
-                    
+
                     logger.info(
                         f"[CHUNK] Successfully loaded chunk {self.current_chunk_idx + 1}/"
                         f"{chunks_limit}"
                     )
-            
+
             # Log final decision and handle episode termination
             if done:
                 logger.info(
@@ -1483,23 +1679,66 @@ class MultiAssetChunkedEnv(gym.Env):
 
             # Calculer le prix courant à partir du timeframe de base '5m' si disponible
             try:
-                base_df = None
-                if isinstance(timeframe_data, dict) and "5m" in timeframe_data:
-                    base_df = timeframe_data["5m"]
-                else:
-                    # fallback: premier timeframe disponible
-                    first_tf = next(iter(timeframe_data.keys())) if timeframe_data else None
-                    if first_tf is not None:
-                        base_df = timeframe_data[first_tf]
+                # Get data for this asset and timeframe
+                asset_data = self.current_data.get(_asset, {}).get("5m")
+                if asset_data is None or asset_data.empty:
+                    logger.debug(f"No data for {_asset} 5m")
+                    continue
 
-                if base_df is not None and len(base_df) > 0:
-                    idx = min(self.current_step, len(base_df) - 1)
-                    if "close" in base_df.columns:
-                        prices[_asset] = float(base_df.iloc[idx]["close"])
+                # Log all available columns for debugging
+                logger.debug(
+                    f"Available columns in {_asset} 5m data: {asset_data.columns.tolist()}"
+                )
+
+                # Create a mapping of uppercase column names to actual column names
+                column_mapping = {col.upper(): col for col in asset_data.columns}
+
+                # Find available features in the asset data (case-insensitive)
+                available_features = []
+                missing_features = []
+                for f in ["close"]:
+                    upper_f = f.upper()
+                    if upper_f in column_mapping:
+                        available_features.append(column_mapping[upper_f])
+                        logger.debug(
+                            f"Found feature: '{f}' -> '{column_mapping[upper_f]}'"
+                        )
                     else:
-                        numeric_cols = base_df.select_dtypes(include=[np.number]).columns
-                        if len(numeric_cols) > 0:
-                            prices[_asset] = float(base_df.iloc[idx][numeric_cols[0]])
+                        missing_features.append(f)
+                        logger.debug(
+                            f"Missing feature: '{f}' (not in DataFrame columns)"
+                        )
+
+                if missing_features:
+                    logger.warning(
+                        f"Missing {len(missing_features)} features for {_asset} 5m: {missing_features}"
+                    )
+                    logger.debug(
+                        f"Available columns in {_asset} 5m: {asset_data.columns.tolist()}"
+                    )
+                    logger.debug(f"Available features: {available_features}")
+
+                if not available_features:
+                    logger.warning(
+                        f"None of the requested features found for {_asset} 5m"
+                    )
+                    continue
+
+                try:
+                    # Select only the requested features using their original case
+                    asset_df = asset_data[available_features].copy()
+
+                    # Ensure column names are in uppercase for consistency
+                    asset_df.columns = [col.upper() for col in asset_df.columns]
+
+                    # Store the DataFrame in the processed data
+                    prices[_asset] = float(asset_df.iloc[self.current_step]["CLOSE"])
+
+                except Exception as e:
+                    logger.error(f"Error processing {_asset} 5m: {str(e)}")
+                    logger.debug(f"Available columns: {asset_data.columns.tolist()}")
+                    logger.debug(f"Available features: {available_features}")
+
             except Exception as e:
                 logger.warning(f"Error getting price for {_asset}: {str(e)}")
 
@@ -1784,9 +2023,201 @@ class MultiAssetChunkedEnv(gym.Env):
             # Fallback to minimal DataFrame
             return pd.DataFrame(columns=["timestamp", "close"])
 
+    def _is_valid_observation_structure(self, obs) -> bool:
+        """
+        Robustly check whether `obs` looks like a valid observation:
+          - must be a dict with keys 'observation' and 'portfolio_state'
+          - 'observation' must be array-like; 'portfolio_state' must be 1-D array-like
+        Avoid any `if array` boolean checks here.
+        """
+        if obs is None:
+            return False
+        if not isinstance(obs, dict):
+            return False
+        if "observation" not in obs or "portfolio_state" not in obs:
+            return False
+        try:
+            arr = np.asarray(obs["observation"])
+            ps = np.asarray(obs["portfolio_state"])
+        except Exception:
+            return False
+        # Loose shape checks (do not rely on exact sizes unless available)
+        if arr.size == 0:
+            return False
+        if ps.ndim != 1:
+            return False
+        # If we have expected shapes cached, check they are compatible
+        if hasattr(self, 'observation_shape') and self.observation_shape is not None:
+            try:
+                # allow broadcasting-compatible but check dims
+                if arr.ndim != len(self.observation_shape):
+                    return False
+                for a_dim, expected in zip(arr.shape, self.observation_shape):
+                    # only check when expected is not None
+                    if expected is not None and a_dim != expected:
+                        return False
+            except Exception:
+                return False
+        if hasattr(self, 'portfolio_state_size') and self.portfolio_state_size is not None:
+            if ps.size != self.portfolio_state_size:
+                return False
+        return True
+
+    def _default_observation(self):
+        """
+        Return a standard zero-padded observation consistent with the
+        environment's observation_space / shapes previously logged.
+        """
+        # If we have explicit shape info use it, else fall back to conservative defaults seen in logs.
+        obs_shape = getattr(self, 'observation_shape', (3, 20, 15))
+        portfolio_size = getattr(self, 'portfolio_state_size', 17)
+        return {
+            "observation": np.zeros(obs_shape, dtype=np.float32),
+            "portfolio_state": np.zeros((portfolio_size,), dtype=np.float32),
+        }
+
+    def _summarize_raw_obs(self, raw_obs) -> str:
+        """
+        Generate a string summary of the raw observation structure for debugging.
+        
+        Args:
+            raw_obs: The raw observation to summarize
+            
+        Returns:
+            str: A string summary of the observation structure
+        """
+        if raw_obs is None:
+            return "None"
+            
+        if isinstance(raw_obs, dict):
+            summary = []
+            for k, v in raw_obs.items():
+                if hasattr(v, 'shape'):
+                    summary.append(f"{k}: array{tuple(v.shape)} ({v.dtype if hasattr(v, 'dtype') else '?'})")
+                elif isinstance(v, (list, tuple)):
+                    summary.append(f"{k}: {type(v).__name__} of length {len(v)}")
+                else:
+                    summary.append(f"{k}: {type(v).__name__}")
+            return "{" + ", ".join(summary) + "}"
+            
+        if hasattr(raw_obs, 'shape'):
+            return f"array{tuple(raw_obs.shape)} ({raw_obs.dtype if hasattr(raw_obs, 'dtype') else '?'})"
+            
+        if isinstance(raw_obs, (list, tuple)):
+            return f"{type(raw_obs).__name__} of length {len(raw_obs)}"
+            
+        return str(type(raw_obs))
+
+    def _build_observation(self) -> Dict[str, np.ndarray]:
+        """
+        Build the current observation using the StateBuilder and current data.
+
+        Returns a dict with keys:
+          - 'observation': np.ndarray with shape self.observation_shape (float32)
+          - 'portfolio_state': np.ndarray with shape (self.portfolio_state_dim,) (float32)
+        """
+        try:
+            # Determine current index within the chunk. Use step_in_chunk which advances with steps
+            current_idx = int(getattr(self, "step_in_chunk", 0))
+
+            # Basic guards
+            if not hasattr(self, "state_builder") or self.state_builder is None:
+                raise RuntimeError("state_builder not initialized")
+            if not hasattr(self, "current_data") or self.current_data is None or not isinstance(self.current_data, dict) or len(self.current_data) == 0:
+                logger.warning("No current_data available in _build_observation, returning default")
+                return self._default_observation()
+
+            # Delegate construction to StateBuilder
+            raw = self.state_builder.build_observation(current_idx, self.current_data)
+
+            # Normalize to expected dict format
+            logger.debug(f"Raw observation type: {type(raw)}")
+            if isinstance(raw, dict):
+                logger.debug(f"Raw observation keys: {list(raw.keys())}")
+                if "observation" in raw:
+                    market = np.asarray(raw["observation"], dtype=np.float32)
+                    logger.debug(f"Observation shape from dict: {market.shape}")
+                else:
+                    market = None
+                    logger.debug("No 'observation' key in raw dict")
+                port = raw.get("portfolio_state", None)
+            else:
+                logger.debug(f"Raw observation is not a dict, converting to array")
+                market = np.asarray(raw, dtype=np.float32)
+                logger.debug(f"Converted observation shape: {market.shape}")
+                port = None
+
+            # If market is not directly usable, try aligning from per-timeframe dict
+            if market is None or market.ndim != 3:
+                logger.debug(f"Market data needs alignment. Shape: {getattr(market, 'shape', 'None')}, Type: {type(market)}")
+                try:
+                    # raw may actually be a dict of timeframe->2D arrays; try to align
+                    if isinstance(raw, dict) and "observation" not in raw and hasattr(self.state_builder, "align_timeframe_dims"):
+                        logger.debug("Attempting to align timeframes with align_timeframe_dims")
+                        market = self.state_builder.align_timeframe_dims(raw)
+                        logger.debug(f"Aligned market data shape: {getattr(market, 'shape', 'None')}")
+                except Exception as e:
+                    logger.error(f"Error in align_timeframe_dims: {str(e)}", exc_info=True)
+                    market = None
+
+            # Ensure market has expected shape, padding/truncating as needed
+            expected_shape = (3, 20, 15)  # Forcer la forme attendue
+            logger.debug(f"Forcing observation shape to {expected_shape}")
+            
+            try:
+                if market is None or market.ndim != 3:
+                    logger.warning(f"Invalid market data shape: {getattr(market, 'shape', 'None')}, creating zeros")
+                    market = np.zeros(expected_shape, dtype=np.float32)
+                
+                # Log la forme actuelle avant ajustement
+                logger.debug(f"Market data shape before adjustment: {market.shape}")
+                
+                # Créer un nouveau tableau avec la forme exacte attendue
+                out = np.zeros(expected_shape, dtype=np.float32)
+                
+                # Copier les données existantes en respectant les dimensions
+                min_timeframes = min(market.shape[0], expected_shape[0])
+                min_steps = min(market.shape[1], expected_shape[1])
+                min_features = min(market.shape[2], expected_shape[2])
+                
+                out[:min_timeframes, :min_steps, :min_features] = \
+                    market[:min_timeframes, :min_steps, :min_features]
+                
+                market = out.astype(np.float32)
+                logger.debug(f"Market data shape after adjustment: {market.shape}")
+                
+            except Exception as e:
+                logger.error(f"Error adjusting market data shape: {str(e)}", exc_info=True)
+                market = np.zeros(expected_shape, dtype=np.float32)
+
+            # Normalize portfolio state
+            ps_size = int(getattr(self, "portfolio_state_size", 17))
+            try:
+                ps = np.asarray(port if port is not None else np.zeros((ps_size,), dtype=np.float32), dtype=np.float32).reshape(-1)
+                if ps.size != ps_size:
+                    fixed = np.zeros((ps_size,), dtype=np.float32)
+                    fixed[: min(ps_size, ps.size)] = ps[: min(ps_size, ps.size)]
+                    ps = fixed
+            except Exception:
+                ps = np.zeros((ps_size,), dtype=np.float32)
+
+            obs = {"observation": market, "portfolio_state": ps}
+            logger.debug(
+                f"_build_observation -> obs shape={obs['observation'].shape}, ps shape={obs['portfolio_state'].shape}, idx={current_idx}"
+            )
+            return obs
+
+        except Exception as e:
+            logger.error(f"Error in _build_observation: {e}", exc_info=True)
+            return self._default_observation()
+
     def _get_observation(self) -> Dict[str, np.ndarray]:
         """
         Construit et retourne l'observation actuelle sous forme de dictionnaire.
+        
+        Cette méthode est robuste à différents formats d'entrée et inclut un système de cache.
+        Elle gère automatiquement le padding/truncature pour s'assurer que les dimensions
+        correspondent à l'espace d'observation défini.
 
         Returns:
             Dict[str, np.ndarray]: Dictionnaire contenant :
@@ -1794,60 +2225,27 @@ class MultiAssetChunkedEnv(gym.Env):
                 - 'portfolio_state': np.ndarray de forme (17,) avec les métriques du portefeuille
         """
         try:
-            # 1. Récupérer l'observation du marché depuis StateBuilder
-            # Préparer les données pour build_observation
-            data = self._process_assets(self.state_builder.features_config)
-            market_obs = self.state_builder.build_observation(
-                current_idx=self.current_step, data=data
-            )
+            # Try to get cached observation first
+            if self._current_obs is not None:
+                if self._is_valid_observation_structure(self._current_obs):
+                    return self._current_obs
+                else:
+                    logger.warning("Cached observation failed validation, regenerating...")
 
-            # 2. Récupérer l'état du portefeuille
-            portfolio_state = self.portfolio_manager.get_state()
+            # Build new observation
+            obs = self._build_observation()
 
-            # 3. Vérifier et convertir les types
-            market_obs = np.asarray(market_obs, dtype=np.float32)
-            portfolio_state = np.asarray(portfolio_state, dtype=np.float32)
+            # Validate the structure
+            if not self._is_valid_observation_structure(obs):
+                logger.error("Generated observation failed validation, using default")
+                obs = self._default_observation()
 
-            # 4. Vérifier les dimensions
-            if len(market_obs.shape) != 3:
-                raise ValueError(
-                    f"L'observation du marché doit être 3D, reçu : {market_obs.shape}"
-                )
-
-            if len(portfolio_state.shape) != 1 or portfolio_state.shape[0] != 17:
-                raise ValueError(
-                    f"L'état du portefeuille doit être de dimension (17,), reçu : {portfolio_state.shape}"
-                )
-
-            # 5. Créer et retourner le dictionnaire d'observation
-            observation = {
-                "observation": market_obs,
-                "portfolio_state": portfolio_state,
-            }
-
-            # Mettre en cache l'observation actuelle
-            self._current_observation = observation
-
-            return observation
+            self._current_obs = obs
+            return obs
 
         except Exception as e:
-            logger.error(f"Erreur dans _get_observation : {str(e)}")
-            logger.error(traceback.format_exc())
-
-            # En cas d'erreur, retourner une observation vide avec les bonnes dimensions
-            num_timeframes = len(self.state_builder.features_config)
-            # Utiliser max_features au lieu de la somme pour être cohérent avec StateBuilder
-            num_features = (
-                max(len(feats) for feats in self.state_builder.features_config.values())
-                if self.state_builder.features_config
-                else 1
-            )
-            return {
-                "observation": np.zeros(
-                    (num_timeframes, self.window_size, num_features), dtype=np.float32
-                ),
-                "portfolio_state": np.zeros(17, dtype=np.float32),
-            }
+            logger.error(f"Error in _get_observation: {str(e)}")
+            return self._default_observation()
 
     def _calculate_reward(self, action: np.ndarray) -> float:
         """
@@ -1912,26 +2310,31 @@ class MultiAssetChunkedEnv(gym.Env):
         action_smoothness_penalty = 0.0
         if hasattr(self, "_last_action") and self._last_action is not None:
             action_diff = np.mean(np.abs(action - self._last_action))
-            action_smoothness_penalty = (
-                reward_config.get("action_smoothness_penalty", 0.1) * action_diff
-            )
+            action_smoothness_penalty = reward_config.get("action_smoothness_penalty", 0.2) * action_diff
 
-        # Calcul de la récompense finale avec toutes les pénalités
-        base_reward = returns * return_scale
-        total_reward = base_reward - (
-            risk_penalty +
-            transaction_penalty +
-            concentration_penalty +
-            action_smoothness_penalty
+        # Calcul de la récompense totale
+        total_reward = (
+            base_reward
+            - risk_penalty
+            - transaction_penalty
+            - concentration_penalty
+            - action_smoothness_penalty
         )
-
-        # Mise à jour des métriques
-        self.episode_reward += total_reward
-
-        # Mettre à jour les valeurs pour la prochaine itération
+        
+        # Mise à jour de l'état pour la prochaine itération
         self._last_portfolio_value = portfolio_metrics.get("total_value", 0.0)
         self._last_action = action.copy()
-
+        
+        # Journalisation des composantes de la récompense pour le débogage
+        self.logger.debug(
+            f"Reward components - Base: {base_reward:.4f}, "
+            f"Risk: -{risk_penalty:.4f}, "
+            f"Transaction: -{transaction_penalty:.4f}, "
+            f"Concentration: -{concentration_penalty:.4f}, "
+            f"Action Smoothness: -{action_smoothness_penalty:.4f}, "
+            f"Total: {total_reward:.4f}"
+        )
+        
         return total_reward
 
     def _save_checkpoint(self) -> Dict[str, Any]:

@@ -163,9 +163,11 @@ class DynamicBacktester:
             "features_per_timeframe"
         ] = features_per_timeframe_for_env
 
-        self.env = MultiAssetChunkedEnv(
+        from src.adan_trading_bot.environment.compat import SB3GymCompatibilityWrapper
+        raw_env = MultiAssetChunkedEnv(
             config=env_config_for_env, worker_config=self.worker_config
         )
+        self.env = SB3GymCompatibilityWrapper(raw_env)
 
         logger.info("DynamicBacktester initialisé avec succès")
 
@@ -325,7 +327,7 @@ class DynamicBacktester:
             logger.info(f"Début de l'épisode {episode}/{num_episodes}")
 
             # Réinitialiser l'environnement
-            obs, info_reset = self.env.reset()
+            obs = self.env.reset()
             done = False
             episode_reward = 0
 

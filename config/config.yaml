@@ -1,178 +1,186 @@
-# ==============================================================================
-# FICHIER DE CONFIGURATION UNIQUE POUR ADAN
-# ==============================================================================
-# Ce fichier centralise toutes les configurations du projet ADAN, y compris
-# les données, l'environnement, l'agent, l'entraînement, et le logging.
-
-# ------------------------------------------------------------------------------
-# Paramètres Généraux du Projet
-# ------------------------------------------------------------------------------
 general:
-  project_name: "ADAN"
+  project_name: ADAN
   random_seed: 42
-  timezone: "UTC"
+  timezone: UTC
   debug_mode: false
   n_jobs: -1
-
-# ------------------------------------------------------------------------------
-# Gestion des Chemins et Répertoires
-# ------------------------------------------------------------------------------
 paths:
-  base_dir: "${TRADING_BOT_DIR:-/home/morningstar/Documents/trading/bot}"
-  data_dir: "${TRADING_DATA_DIR:-${TRADING_BOT_DIR:-/home/morningstar/Documents/trading}/data}"
-  raw_data_dir: "${TRADING_RAW_DATA_DIR:-${TRADING_DATA_DIR:-${TRADING_BOT_DIR:-/home/morningstar/Documents/trading}/data}/raw}"
-  processed_data_dir: "${TRADING_PROCESSED_DATA_DIR:-${TRADING_DATA_DIR:-${TRADING_BOT_DIR:-/home/morningstar/Documents/trading}/data}/processed}"
-  indicators_data_dir: "${TRADING_INDICATORS_DIR:-${TRADING_BOT_DIR:-/home/morningstar/Documents/trading/bot}/data/processed/indicators}"
-  final_data_dir: "${TRADING_FINAL_DATA_DIR:-${TRADING_DATA_DIR:-${TRADING_BOT_DIR:-/home/morningstar/Documents/trading}/data}/final}"
-  models_dir: "${TRADING_MODELS_DIR:-${TRADING_BOT_DIR:-/home/morningstar/Documents/trading/bot}/models}"
-  trained_models_dir: "${TRADING_TRAINED_MODELS_DIR:-${TRADING_MODELS_DIR:-${TRADING_BOT_DIR:-/home/morningstar/Documents/trading/bot}/models}/rl_agents}"
-  logs_dir: "${TRADING_LOGS_DIR:-${TRADING_BOT_DIR:-/home/morningstar/Documents/trading/bot}/logs}"
-  reports_dir: "${TRADING_REPORTS_DIR:-${TRADING_BOT_DIR:-/home/morningstar/Documents/trading/bot}/reports}"
-  figures_dir: "${TRADING_REPORTS_DIR:-${TRADING_BOT_DIR:-/home/morningstar/Documents/trading/bot}/reports}/figures"
-  metrics_dir: "${TRADING_REPORTS_DIR:-${TRADING_BOT_DIR:-/home/morningstar/Documents/trading/bot}/reports}/metrics"
-
-# ------------------------------------------------------------------------------
-# Configuration du Modèle
-# ------------------------------------------------------------------------------
+  base_dir: /home/morningstar/Documents/trading/bot
+  data_dir: /home/morningstar/Documents/trading/bot/data
+  raw_data_dir: /home/morningstar/Documents/trading/bot/data/raw
+  processed_data_dir: /home/morningstar/Documents/trading/bot/data/processed
+  indicators_data_dir: /home/morningstar/Documents/trading/bot/data/processed/indicators
+  final_data_dir: /home/morningstar/Documents/trading/bot/data/final
+  models_dir: /home/morningstar/Documents/trading/bot/models
+  trained_models_dir: /home/morningstar/Documents/trading/bot/models/rl_agents
+  logs_dir: /home/morningstar/Documents/trading/bot/logs
+  reports_dir: /home/morningstar/Documents/trading/bot/reports
+  figures_dir: /home/morningstar/Documents/trading/bot/reports/figures
+  metrics_dir: /home/morningstar/Documents/trading/bot/reports/metrics
 model:
-  # Architecture du CNN
   architecture:
-    # Block A: Convolutions séparées par canal
     block_a:
       out_channels: 64
       kernel_size: 3
       padding: 1
       leaky_relu_negative_slope: 0.01
       dropout: 0.1
-    
-    # Block B: Multi-échelle avec connexions résiduelles et SE
     block_b:
       multi_scale:
-        - {kernel_size: 3, dilation: 1, padding: 1}
-        - {kernel_size: 5, dilation: 1, padding: 2}
-        - {kernel_size: 3, dilation: 2, padding: 2}
-      se_ratio: 16  # Réduction pour le squeeze-and-excitation
+      - kernel_size: 3
+        dilation: 1
+        padding: 1
+      - kernel_size: 5
+        dilation: 1
+        padding: 2
+      - kernel_size: 3
+        dilation: 2
+        padding: 2
+      se_ratio: 16
       dropout: 0.2
-    
-    # Attention temporelle multi-tête
     attention:
       num_heads: 4
       dropout: 0.1
       use_residual: true
-    
-    # Tête de classification finale
     head:
-      hidden_units: [256, 128]
+      hidden_units:
+      - 256
+      - 128
       dropout: 0.3
-      activation: 'leaky_relu'
-  
-  # Configuration pour les diagnostics d'attention
+      activation: leaky_relu
   diagnostics:
     use_grad_cam: true
     use_integrated_gradients: true
-    target_layer: 'block_b.conv3'  # Dernière couche convolutive
+    target_layer: block_b.conv3
     save_attention_maps: true
-    attention_map_dir: '${paths.models_dir}/attention_maps'
-    
-    # Volumes
-    volume_up: "#95A5A6"      # Gris avec bord vert
-    volume_down: "#BDC3C7"    # Gris clair avec bord rouge
-    
-    # Moyennes mobiles
-    ma_short: "#F1C40F"       # Jaune (9 périodes)
-    ma_medium: "#3498DB"      # Bleu (21 périodes)
-    ma_long: "#8E44AD"        # Violet (50/200 périodes)
-    
-    # Bandes de Bollinger
-    bollinger_mid: "#2980B9"  # Bleu
-    bollinger_band: "#85C1E9" # Bleu clair (pointillé)
-    
-    # RSI
-    rsi_line: "#34495E"       # Gris foncé
-    rsi_overbought: "#E67E22" # Orange (ligne 70)
-    rsi_oversold: "#2ECC71"   # Vert (ligne 30)
-    
-    # MACD
-    macd_line: "#2E86C1"      # Bleu
-    signal_line: "#F39C12"    # Orange
-    histogram_up: "#2ECC71"   # Vert
-    histogram_down: "#E74C3C" # Rouge
-    
-    # Arrière-plan et grille
-    background: "#FFFFFF"     # Blanc (ou #0F1724 pour dark mode)
-    grid: "#ECF0F1"           # Gris clair (ou #1F2937 pour dark mode)
-  
-  # Paramètres des graphiques
+    attention_map_dir: ${paths.models_dir}/attention_maps
+    volume_up: '#95A5A6'
+    volume_down: '#BDC3C7'
+    ma_short: '#F1C40F'
+    ma_medium: '#3498DB'
+    ma_long: '#8E44AD'
+    bollinger_mid: '#2980B9'
+    bollinger_band: '#85C1E9'
+    rsi_line: '#34495E'
+    rsi_overbought: '#E67E22'
+    rsi_oversold: '#2ECC71'
+    macd_line: '#2E86C1'
+    signal_line: '#F39C12'
+    histogram_up: '#2ECC71'
+    histogram_down: '#E74C3C'
+    background: '#FFFFFF'
+    grid: '#ECF0F1'
   style:
-    figure_facecolor: 'white'
-    axes_facecolor: 'white'
+    figure_facecolor: white
+    axes_facecolor: white
     grid_alpha: 0.3
-    font_family: 'sans-serif'
+    font_family: sans-serif
     font_size: 10
-    
-    # Tailles des éléments
     candle_width: 0.8
     volume_alpha: 0.3
     line_width: 1.0
-    
-    # Légende
-    legend_loc: 'upper left'
+    legend_loc: upper left
     legend_frameon: true
-    legend_facecolor: 'white'
+    legend_facecolor: white
     legend_edgecolor: '#DDDDDD'
-    
-    # Marges et espacement
     left_margin: 0.05
     right_margin: 0.95
     top_margin: 0.95
     bottom_margin: 0.1
     hspace: 0.2
-
-# ------------------------------------------------------------------------------
-# Configuration des Données
-# ------------------------------------------------------------------------------
 data:
-  data_dir: "/home/morningstar/Documents/trading/bot/data/processed/indicators"
-  # Structure des fichiers de données
+  data_dir: /home/morningstar/Documents/trading/bot/data/processed/indicators
   file_structure:
-    pattern: "{asset}/{timeframe}.parquet"
-    assets: ["BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT", "ADAUSDT"]
-    timeframes: ["5m", "1h", "4h"]
+    pattern: '{asset}/{timeframe}.parquet'
+    assets:
+    - BTCUSDT
+    - ETHUSDT
+    - SOLUSDT
+    - XRPUSDT
+    - ADAUSDT
+    timeframes:
+    - 5m
+    - 1h
+    - 4h
+  train_dir: /home/morningstar/Documents/trading/bot/data/processed/indicators/train
+  val_dir: /home/morningstar/Documents/trading/bot/data/processed/indicators/val
+  test_dir: /home/morningstar/Documents/trading/bot/data/processed/indicators/test
   features_per_timeframe:
-    "5m": ["OPEN", "HIGH", "LOW", "CLOSE", "VOLUME", "RSI_14", "STOCHk_14_3_3", "STOCHd_14_3_3", "CCI_20_0.015", "ROC_9", "MFI_14", "EMA_5", "EMA_20", "SUPERTREND_14_2.0", "PSAR_0.02_0.2"]
-    "1h": ["OPEN", "HIGH", "LOW", "CLOSE", "VOLUME", "RSI_14", "CCI_20_0.015", "MFI_14", "EMA_50", "EMA_100", "SMA_200"]
-    "4h": ["OPEN", "HIGH", "LOW", "CLOSE", "VOLUME", "RSI_14", "CCI_20_0.015", "MFI_14", "EMA_50", "SMA_200"]
-
+    5m:
+    - OPEN
+    - HIGH
+    - LOW
+    - CLOSE
+    - VOLUME
+    - RSI_14
+    - STOCHk_14_3_3
+    - STOCHd_14_3_3
+    - CCI_20_0.015
+    - ROC_9
+    - MFI_14
+    - EMA_5
+    - EMA_20
+    - SUPERTREND_14_2.0
+    - PSAR_0.02_0.2
+    1h:
+    - OPEN
+    - HIGH
+    - LOW
+    - CLOSE
+    - VOLUME
+    - RSI_14
+    - CCI_20_0.015
+    - MFI_14
+    - EMA_50
+    - EMA_100
+    - SMA_200
+    - STOCHk_14_3_3
+    - STOCHd_14_3_3
+    - ROC_9
+    - PADDING_1
+    4h:
+    - OPEN
+    - HIGH
+    - LOW
+    - CLOSE
+    - VOLUME
+    - RSI_14
+    - CCI_20_0.015
+    - MFI_14
+    - EMA_50
+    - EMA_100
+    - SMA_200
+    - STOCHk_14_3_3
+    - STOCHd_14_3_3
+    - ROC_9
+    - PADDING_1
 portfolio:
   initial_balance: 20.0
-  include_portfolio_state: true  # Inclure l'état du portefeuille dans les observations
+  include_portfolio_state: true
   portfolio_state_features:
-    - cash_available
-    - total_equity
-    - total_return_pct
-    - sharpe_ratio
-    - max_drawdown_pct
-    - num_positions
-    - largest_positions: 5  # Nombre de plus grandes positions à inclure
-
-# ------------------------------------------------------------------------------
-# Configuration des Workers
-# ------------------------------------------------------------------------------
-# Chaque worker définit un profil d'agent pour une stratégie de trading spécifique.
+  - cash_available
+  - total_equity
+  - total_return_pct
+  - sharpe_ratio
+  - max_drawdown_pct
+  - num_positions
+  - largest_positions: 5
 workers:
-  w1: # Worker 1 - Tendance long terme
-    name: "Temporal Precision"
-    description: "Scalping optimisé sur micro-régimes de marché."
-    assets: ["BTCUSDT", "ETHUSDT"]
-    timeframes: ["5m"]
-    data_split: "train"
-    trading_mode: "spot"
+  w1:
+    name: Temporal Precision
+    description: Scalping optimisé sur micro-régimes de marché.
+    assets:
+    - BTCUSDT
+    - ETHUSDT
+    timeframes:
+    - 5m
+    data_split: train
+    trading_mode: spot
     trading_config:
-      stop_loss_pct: 0.05      # 5% stop-loss
-      take_profit_pct: 0.15    # 15% take-profit
-      # Les valeurs de position_risk et max_position_size seront dérivées de capital_tiers
-      position_risk_offset: 0.0    # Ajustement par rapport à la valeur de base
-      position_size_offset: -0.5   # Réduction de 0.5% par rapport à la valeur de base
+      stop_loss_pct: 0.05
+      take_profit_pct: 0.15
+      position_risk_offset: 0.0
+      position_size_offset: -0.5
     reward_config:
       trend_following_bonus: 0.2
       holding_reward: 0.0001
@@ -183,21 +191,24 @@ workers:
       learning_rate: 1e-4
       ent_coef: 0.01
     model_config:
-      cnn_config: "5m"  # Référence à la configuration CNN pour ce timeframe
-
-  w2: # Worker 2 - Macro-Regime Explorer
-    name: "Low-Frequency Sentinel"
-    description: "Apprentissage des tendances de fond (bull/bear/range)."
-    assets: ["BTCUSDT", "ETHUSDT", "SOLUSDT"]
-    timeframes: ["1h", "4h"]
-    data_split: "train"
-    trading_mode: "spot"
+      cnn_config: 5m
+  w2:
+    name: Low-Frequency Sentinel
+    description: Apprentissage des tendances de fond (bull/bear/range).
+    assets:
+    - BTCUSDT
+    - ETHUSDT
+    - SOLUSDT
+    timeframes:
+    - 1h
+    - 4h
+    data_split: train
+    trading_mode: spot
     trading_config:
-      stop_loss_pct: 0.05     # 5% stop-loss
-      take_profit_pct: 0.15    # 15% take-profit
-      # Les valeurs de position_risk et max_position_size seront dérivées de capital_tiers
-      position_risk_offset: 0.5    # Augmentation de 0.5% par rapport à la valeur de base
-      position_size_offset: 1.0    # Augmentation de 1% par rapport à la valeur de base
+      stop_loss_pct: 0.05
+      take_profit_pct: 0.15
+      position_risk_offset: 0.5
+      position_size_offset: 1.0
     reward_config:
       short_term_profit_bonus: 0.3
       frequency_penalty: -0.001
@@ -208,21 +219,25 @@ workers:
       learning_rate: 3e-4
       ent_coef: 0.05
     model_config:
-      cnn_config: "1h"  # Référence à la configuration CNN pour ce timeframe
-
-  w3: # Worker 3 - Stress Testeur
-    name: "Rug-Pull Resistant"
-    description: "Entraînement sur des conditions de marché extrêmes."
-    assets: ["BTCUSDT", "ETHUSDT", "XRPUSDT", "ADAUSDT"]
-    timeframes: ["5m", "1h"]
-    data_split: "train"
-    trading_mode: "spot"
+      cnn_config: 1h
+  w3:
+    name: Rug-Pull Resistant
+    description: Entraînement sur des conditions de marché extrêmes.
+    assets:
+    - BTCUSDT
+    - ETHUSDT
+    - XRPUSDT
+    - ADAUSDT
+    timeframes:
+    - 5m
+    - 1h
+    data_split: train
+    trading_mode: spot
     trading_config:
-      stop_loss_pct: 0.05      # 5% stop-loss
-      take_profit_pct: 0.15    # 15% take-profit
-      # Les valeurs de position_risk et max_position_size seront dérivées de capital_tiers
-      position_risk_offset: 0.0    # Pas d'ajustement par rapport à la valeur de base
-      position_size_offset: 0.0    # Pas d'ajustement par rapport à la valeur de base
+      stop_loss_pct: 0.05
+      take_profit_pct: 0.15
+      position_risk_offset: 0.0
+      position_size_offset: 0.0
       indicators:
         use_rsi: true
         rsi_overbought: 70
@@ -238,21 +253,26 @@ workers:
       learning_rate: 2e-4
       ent_coef: 0.03
     model_config:
-      cnn_config: "5m"  # Référence à la configuration CNN pour ce timeframe
-
-  w4: # Worker 4 - Cross-Market Arbitrageur
-    name: "Multi-Asset Optimizer"
-    description: "Optimisation de l'allocation entre plusieurs actifs."
-    assets: ["BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT", "ADAUSDT"]
-    timeframes: ["5m", "4h"]
-    data_split: "train"
-    trading_mode: "spot"
+      cnn_config: 5m
+  w4:
+    name: Multi-Asset Optimizer
+    description: Optimisation de l'allocation entre plusieurs actifs.
+    assets:
+    - BTCUSDT
+    - ETHUSDT
+    - SOLUSDT
+    - XRPUSDT
+    - ADAUSDT
+    timeframes:
+    - 5m
+    - 4h
+    data_split: train
+    trading_mode: spot
     trading_config:
-      stop_loss_pct: 0.05      # 5% stop-loss
-      take_profit_pct: 0.15    # 15% take-profit
-      # Les valeurs de position_risk et max_position_size seront dérivées de capital_tiers
-      position_risk_offset: -0.5   # Réduction de 0.5% par rapport à la valeur de base
-      position_size_offset: -0.5   # Réduction de 0.5% par rapport à la valeur de base
+      stop_loss_pct: 0.05
+      take_profit_pct: 0.15
+      position_risk_offset: -0.5
+      position_size_offset: -0.5
       filters:
         use_atr_breakout: true
         atr_window: 14
@@ -264,161 +284,131 @@ workers:
       volatility_impact: 2.5
       drawdown_risk_multiplier: 2.0
     agent_config:
-      learning_rate: 2.5e-4
+      learning_rate: 0.00025
       ent_coef: 0.04
     model_config:
-      cnn_config: "4h"  # Référence à la configuration CNN pour ce timeframe
-
-# ------------------------------------------------------------------------------
-# Configuration du Prétraitement des Données
-# ------------------------------------------------------------------------------
+      cnn_config: 4h
 preprocessing:
-  # Configuration de la normalisation
   normalization:
-    method: "robust"  # 'zscore' ou 'robust'
-    clip_values: [-5, 5]  # Valeurs de clipping pour éviter les outliers extrêmes
-    scale_per_asset: true  # Si true, normalisation séparée par actif
-    scale_per_timeframe: true  # Si true, normalisation séparée par timeframe
-    
-  # Configuration de la stationnarisation
+    method: robust
+    clip_values:
+    - -5
+    - 5
+    scale_per_asset: true
+    scale_per_timeframe: true
   stationarity:
-    price_transform: "log_returns"  # 'log_returns', 'returns' ou 'none'
-    volume_transform: "log1p"  # 'log1p' ou 'none'
-    
-  # Configuration des fenêtres temporelles
+    price_transform: log_returns
+    volume_transform: log1p
   window_config:
-    # Taille des fenêtres par timeframe (5m, 1h, 4h)
     window_sizes:
-      "5m": 20   # 20 périodes pour le 5 minutes (plus réactif)
-      "1h": 10   # 10 périodes pour le 1 heure
-      "4h": 5    # 5 périodes pour le 4 heures (tendance plus lente)
-    min_window_size: 5  # Taille minimale requise pour le traitement
-    step_size: 1  # Pas de décalage entre les fenêtres
-    
-  # Configuration des indicateurs techniques
+      5m: 20
+      1h: 10
+      4h: 5
+    min_window_size: 5
+    step_size: 1
   technical_indicators:
-    # Indicateurs de prix
     use_price_indicators: true
     price_indicators:
-      - "sma_20"
-      - "sma_50"
-      - "ema_12"
-      - "ema_26"
-      - "rsi_14"
-      - "macd"
-      - "bollinger_bands"
-      - "atr_14"
-    
-    # Indicateurs de volume
-    use_volume_indicators: true
-    volume_indicators:
-      - "volume_sma_20"
-      - "obv"  # On-Balance Volume
-    
-    # Indicateurs de volatilité
-    use_volatility_indicators: true
-    volatility_indicators:
-      - "returns_std_20"  # Écart-type des rendements sur 20 périodes
-      - "atr_14"  # Average True Range
-
-# ------------------------------------------------------------------------------
-# Configuration du Feature Engineering
-# ------------------------------------------------------------------------------
+    - RSI_14
+    - STOCH_14_3  # Indicateur composite qui génère STOCHk_14_3 et STOCHd_14_3
+    - CCI_20_0.015
+    - ROC_9
+    - MFI_14
+    - EMA_5
+    - EMA_20
+    - SUPERTREND_14_2.0
+    - PSAR_0.02_0.2
+    - ATR_14  # Ajout de l'ATR pour compléter les 15 features
+    use_volume_indicators: false
+    volume_indicators: []
+    use_volatility_indicators: false
+    volatility_indicators: []
 feature_engineering:
-  timeframes: ["5m", "1h", "4h"]
+  timeframes:
+  - 5m
+  - 1h
+  - 4h
   columns_to_normalize:
-    - "open"
-    - "high"
-    - "low"
-    - "close"
-    - "volume"
+  - open
+  - high
+  - low
+  - close
+  - volume
   indicators:
-    # Configuration des indicateurs par timeframe
     timeframes:
-      # --- 5 minutes (scalping / micro-tendances) ---
-      "5m":
+      5m:
         momentum:
-          - "RSI_14"
-          - "STOCH_14_3"
-          - "CCI_20"
-          - "ROC_9"
-          - "MFI_14"
+        - RSI_14
+        - STOCHk_14_3  # Composante %K de STOCH
+        - STOCHd_14_3  # Composante %D de STOCH
+        - CCI_20_0.015
+        - ROC_9
+        - MFI_14
         trend:
-          - "EMA_5"
-          - "EMA_20"
-          - "SUPERTREND_14_2.0"
-          - "PSAR_0.02_0.2"
+        - EMA_5
+        - EMA_20
+        - SUPERTREND_14_2.0
+        - PSAR_0.02_0.2
         volatility:
-          - "ATR_14"
-          - "BB_20_2.0"
+        - ATR_14  # Ajout de l'ATR pour la volatilité
+        - ATR_14
+        - BB_20_2.0
         volume:
-          - "VWAP"
-          - "OBV"
-
-      # --- 1 heure (swing-trading / tendance moyenne) ---
-      "1h":
+        - VWAP
+        - OBV
+      1h:
         momentum:
-          - "RSI_14"
-          - "MACD_12_26_9"
-          - "MACD_HIST_12_26_9"
-          - "CCI_20"
-          - "MFI_14"
+        - RSI_14
+        - MACD_12_26_9
+        - MACD_HIST_12_26_9
+        - CCI_20
+        - MFI_14
         trend:
-          - "EMA_50"
-          - "EMA_100"
-          - "SMA_200"
-          - "ICHIMOKU_9_26_52"
-          - "PSAR_0.02_0.2"
+        - EMA_50
+        - EMA_100
+        - SMA_200
+        - ICHIMOKU_9_26_52
+        - PSAR_0.02_0.2
         volatility:
-          - "ATR_14"
-          - "BB_20_2.0"
+        - ATR_14
+        - BB_20_2.0
         volume:
-          - "OBV"
-          - "VWAP"
-
-      # --- 4 heures (position-trading / tendance long terme) ---
-      "4h":
+        - OBV
+        - VWAP
+      4h:
         momentum:
-          - "RSI_14"
-          - "MACD_12_26_9"
-          - "CCI_20"
-          - "MFI_14"
+        - RSI_14
+        - MACD_12_26_9
+        - CCI_20
+        - MFI_14
         trend:
-          - "SMA_200"
-          - "EMA_50"
-          - "ICHIMOKU_9_26_52"
-          - "SUPERTREND_14_3.0"
-          - "PSAR_0.02_0.2"
+        - SMA_200
+        - EMA_50
+        - ICHIMOKU_9_26_52
+        - SUPERTREND_14_3.0
+        - PSAR_0.02_0.2
         volatility:
-          - "ATR_14"
-          - "BB_20_2.0"
+        - ATR_14
+        - BB_20_2.0
         volume:
-          - "OBV"
-          - "VWAP_DAILY"
-          - "VWAP_WEEKLY"
-
-    # Paramètres généraux des indicateurs
+        - OBV
+        - VWAP_DAILY
+        - VWAP_WEEKLY
     common:
-      # Paramètres pour les bandes de Bollinger
       bollinger:
         window: 20
         window_dev: 2.0
-      # Paramètres pour le RSI
       rsi:
         window: 14
-      # Paramètres pour le MACD
       macd:
         fast: 12
         slow: 26
         signal: 9
-      # Paramètres pour l'ATR
       atr:
         window: 14
-      # Paramètres pour le SuperTrend
       supertrend:
         window: 14
-        multiplier: 2.0  # Valeur par défaut, peut être écrasé par timeframe spécifique
-      # Paramètres pour le SAR Parabolique
+        multiplier: 2.0
       psar:
         step: 0.02
         max_step: 0.2
@@ -437,68 +427,40 @@ feature_engineering:
     max_nan_percentage: 0.05
     check_feature_correlation: true
     max_correlation_threshold: 0.95
-
-# ------------------------------------------------------------------------------
-# Configuration de l'Environnement de Trading
-# ------------------------------------------------------------------------------
 environment:
   initial_balance: 20.0
   trading_fees: 0.01
   max_steps: 500
-  max_chunks_per_episode: 10  # Nombre maximum de chunks à charger par épisode
-  assets: ["BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT", "ADAUSDT"]
+  max_chunks_per_episode: 10
+  assets:
+  - BTCUSDT
+  - ETHUSDT
+  - SOLUSDT
+  - XRPUSDT
+  - ADAUSDT
   observation:
-    # Format: [timeframes, window_size, features]
-    # timeframes: 3 (5m, 1h, 4h)
-    # window_size: variable selon le timeframe
-    # features: max 36 indicateurs
-    shape: [3, 20, 36]  # Utilise la plus grande taille de fenêtre (5m) comme référence
+    shape: [3, 20, 15]
     window_sizes:
-      "5m": 20   # 20 périodes pour le 5 minutes (plus réactif)
-      "1h": 10   # 10 périodes pour le 1 heure
-      "4h": 5    # 5 périodes pour le 4 heures (tendance plus lente)
-    warmup_steps: 200    # Doit être >= window_size
-    timeframes: ["5m", "1h", "4h"]  # Les 3 timeframes utilisés
+      5m: 20
+      1h: 10
+      4h: 5
+    warmup_steps: 50
+    timeframes: ["5m", "1h", "4h"]
     features:
-      base: ["OPEN", "HIGH", "LOW", "CLOSE", "VOLUME", "returns"]
+      base: ["OPEN", "HIGH", "LOW", "CLOSE", "VOLUME"]
       indicators:
-        "5m":
-          - "RSI_14"
-          - "STOCHk_14_3_3"
-          - "STOCHd_14_3_3"
-          - "CCI_20_0.015"
-          - "ROC_9"
-          - "MFI_14"
-          - "EMA_5"
-          - "EMA_20"
-          - "SUPERTREND_14_2.0"
-          - "PSAR_0.02_0.2"
-        "1h":
-          - "RSI_14"
-          - "CCI_20_0.015"
-          - "MFI_14"
-          - "EMA_50"
-          - "EMA_100"
-          - "SMA_200"
-        "4h":
-          - "RSI_14"
-          - "CCI_20_0.015"
-          - "MFI_14"
-          - "SMA_200"
-          - "EMA_50"
-          - "VWAP_D"
-          - "VWAP_W"
-  mode: "backtest"
-  base_currency: "USDT"
+        5m: ["RSI_14", "STOCHk_14_3_3", "STOCHd_14_3_3", "CCI_20_0.015", "ROC_9", "MFI_14", "EMA_5", "EMA_20", "SUPERTREND_14_2.0", "PSAR_0.02_0.2"]
+        1h: ["RSI_14", "CCI_20_0.015", "MFI_14", "EMA_50", "EMA_100", "SMA_200", "STOCHk_14_3_3", "STOCHd_14_3_3", "ROC_9", "PADDING_1"]
+        4h: ["RSI_14", "CCI_20_0.015", "MFI_14", "EMA_50", "EMA_100", "SMA_200", "STOCHk_14_3_3", "STOCHd_14_3_3", "ROC_9", "PADDING_1"]
+  mode: backtest
+  base_currency: USDT
   memory:
-    # Augmentation de la taille des chunks pour améliorer les performances
-    chunk_size: 10000  # Augmenté de 5000 à 10000
-    max_chunks_in_memory: 2  # Garder à 2 pour limiter l'utilisation mémoire
+    chunk_size: 10000
+    max_chunks_in_memory: 2
     aggressive_cleanup: true
     force_gc_after_chunk: true
-    # Ajustement des seuils mémoire
-    memory_warning_threshold_mb: 8000  # Augmenté de 5600
-    memory_critical_threshold_mb: 9000  # Augmenté de 6300
+    memory_warning_threshold_mb: 8000
+    memory_critical_threshold_mb: 9000
     num_workers: 1
     pin_memory: false
     batch_size: 32
@@ -506,7 +468,6 @@ environment:
     shuffle: true
     drop_last: true
     include_portfolio_state: true
-
   risk_management:
     position_sizing:
       max_risk_per_trade_pct: 5.0
@@ -531,101 +492,80 @@ environment:
   reward_shaping:
     realized_pnl_multiplier: 1.0
     unrealized_pnl_multiplier: 0.1
-    reward_clipping_range: [-3.0, 3.0]
+    reward_clipping_range:
+    - -3.0
+    - 3.0
     optimal_trade_bonus: 2.0
     performance_threshold: 0.6
-    chunk_size: 5000  # Augmenter pour s'assurer d'avoir assez de données pour le warm-up
+    chunk_size: 5000
     use_ewc: true
     ewc_lambda: 0.2
     use_prioritized_replay: true
-
-# ------------------------------------------------------------------------------
-# Configuration des Règles de Trading
-# ------------------------------------------------------------------------------
 trading_rules:
-  # Paramètres généraux
-  futures_enabled: false      # on reste en spot
-  leverage: 1.0               # levier 1×
-  commission_pct: 0.001       # 0.1 % par trade
+  futures_enabled: false
+  leverage: 1.0
+  commission_pct: 0.001
   min_order_value_usdt: 10
   slippage_pct: 0.001
-
-  # — Ordres stop & take-profit par défaut pour tout le monde —
-  stop_loss_pct: 0.05         # 5 % de stop-loss
-  take_profit_pct: 0.15       # 15 % de take-profit
-  trailing_stop: 0.01         # trailing stop à 1 %
-
-# ------------------------------------------------------------------------------
-# Configuration des Paliers de Capital
-# ------------------------------------------------------------------------------
+  stop_loss_pct: 0.05
+  take_profit_pct: 0.15
+  trailing_stop: 0.01
 capital_tiers:
-  - name: "Micro Capital"
-    min_capital: 11.0
-    max_capital: 30.0
-    max_position_size_pct: 90
-    leverage: 1.0
-    risk_per_trade_pct: 5.0  # Augmenté de 1% à 5% pour plus d'agressivité
-    max_drawdown_pct: 50.0
-    max_concurrent_positions: 1  # Moins de positions pour les petits capitaux
-
-  - name: "Small Capital"
-    min_capital: 30.0
-    max_capital: 100.0
-    max_position_size_pct: 70
-    leverage: 1.0
-    risk_per_trade_pct: 1.5
-    max_drawdown_pct: 4.0
-    max_concurrent_positions: 2
-
-  - name: "Medium Capital"
-    min_capital: 100.0
-    max_capital: 300.0
-    max_position_size_pct: 60
-    leverage: 1.0
-    risk_per_trade_pct: 2.0
-    max_drawdown_pct: 3.5
-    max_concurrent_positions: 3
-
-  - name: "High Capital"
-    min_capital: 300.0
-    max_capital: 1000.0
-    max_position_size_pct: 35
-    leverage: 1.0
-    risk_per_trade_pct: 2.5
-    max_drawdown_pct: 3.0
-    max_concurrent_positions: 4
-
-  - name: "Enterprise"
-    min_capital: 1000.0
-    max_capital: null  # Pas de limite supérieure
-    max_position_size_pct: 20
-    leverage: 1.0
-    risk_per_trade_pct: 3.0
-    max_drawdown_pct: 2.5
-    max_concurrent_positions: 5  # Plus de positions pour les gros capitaux
-
-# ------------------------------------------------------------------------------
-# Configuration de l'Agent RL
-# ------------------------------------------------------------------------------
+- name: Micro Capital
+  min_capital: 11.0
+  max_capital: 30.0
+  max_position_size_pct: 90
+  leverage: 1.0
+  risk_per_trade_pct: 5.0
+  max_drawdown_pct: 50.0
+  max_concurrent_positions: 1
+- name: Small Capital
+  min_capital: 30.0
+  max_capital: 100.0
+  max_position_size_pct: 70
+  leverage: 1.0
+  risk_per_trade_pct: 1.5
+  max_drawdown_pct: 4.0
+  max_concurrent_positions: 2
+- name: Medium Capital
+  min_capital: 100.0
+  max_capital: 300.0
+  max_position_size_pct: 60
+  leverage: 1.0
+  risk_per_trade_pct: 2.0
+  max_drawdown_pct: 3.5
+  max_concurrent_positions: 3
+- name: High Capital
+  min_capital: 300.0
+  max_capital: 1000.0
+  max_position_size_pct: 35
+  leverage: 1.0
+  risk_per_trade_pct: 2.5
+  max_drawdown_pct: 3.0
+  max_concurrent_positions: 4
+- name: Enterprise
+  min_capital: 1000.0
+  max_capital: null
+  max_position_size_pct: 20
+  leverage: 1.0
+  risk_per_trade_pct: 3.0
+  max_drawdown_pct: 2.5
+  max_concurrent_positions: 5
 agent:
-  algorithm: "PPO"
-  policy: "MultiInputPolicy"
-
-  # Configuration de stabilité
-  learning_rate: 3e-4  # Taux d'apprentissage initial plus élevé pour exploration
-  n_steps: 4096        # Nombre de pas par mise à jour
-  batch_size: 8192     # Taille du batch (peut rester à 8192 ou être ajusté si nécessaire)
-  n_epochs: 4          # Nombre d'époques par itération (réduit)
-  gamma: 0.995         # Facteur de remise long-terme
-  gae_lambda: 0.95     # Paramètre GAE
-  clip_range: 0.1      # Plage de clipping réduite
-  clip_range_vf: 0.1   # Plage de clipping pour la fonction de valeur
-  ent_coef: 0.01       # Coefficient d'entropie pour l'exploration
-  vf_coef: 0.5         # Poids de la fonction de valeur
-  max_grad_norm: 0.5   # Écrêtage des gradients
-  target_kl: 0.03      # Seuil KL pour l'arrêt précoce
-
-  # Configuration du débogage et du suivi
+  algorithm: PPO
+  policy: MultiInputPolicy
+  learning_rate: 3e-4
+  n_steps: 4096
+  batch_size: 8192
+  n_epochs: 4
+  gamma: 0.995
+  gae_lambda: 0.95
+  clip_range: 0.1
+  clip_range_vf: 0.1
+  ent_coef: 0.01
+  vf_coef: 0.5
+  max_grad_norm: 0.5
+  target_kl: 0.03
   seed: 42
   verbose: 1
   deterministic_inference: true
@@ -633,240 +573,162 @@ agent:
   eval_freq: 2500
   eval_episodes: 10
   checkpoint_freq: 5000
-  n_envs: 4            # 4 environnements parallèles
-  buffer_size: 100000   # Taille du buffer de rejeu
-  window_size: 100      # Taille de la fenêtre d'observation
+  n_envs: 4
+  buffer_size: 100000
+  window_size: 100
   features_extractor_kwargs:
     cnn_configs:
-      "5m":
-        # Nouvelle structure: [groupes, temps, features]
-        input_shape: [3, 20, 5]  # [prix/volume/indicateurs, pas de temps, features/groupe]
-        
-        # Configuration des groupes de caractéristiques
-        channel_groups:
-          price: 
-            indices: [0, 1, 2, 3]  # OHLC
+      5m:
+        input_shape: [3, 20, 15]  # [timeframes, window_size, features]
+        channel_groups: 15
+        groups:
+          price:
+            indices: [0, 1, 2, 3]  # OPEN, HIGH, LOW, CLOSE
             out_channels: 32
-            kernel_size: [1, 3]     # [temps, features]
-            padding: 'same'
-            
-          volume: 
-            indices: [4]           # Volume
+            kernel_size: [1, 3]
+            padding: same
+          volume:
+            indices: [4]  # VOLUME
             out_channels: 16
-            kernel_size: [1, 1]     # Pas de convolution sur le volume seul
-            padding: 'same'
-            
-          indicators: 
+            kernel_size: [1, 1]
+            padding: same
+          indicators:
+            indices: [5, 6, 7, 8, 9, 10, 11, 12, 13, 14]  # Indicateurs techniques
+            out_channels: 32
+            kernel_size: [1, 3]
+            padding: same
+      1h:
+        input_shape: [3, 10, 15]  # [timeframes, window_size, features]
+        channel_groups: 15
+        groups:
+          price:
+            indices: [0, 1, 2, 3]
+            out_channels: 32
+            kernel_size: [1, 3]
+            padding: same
+          volume:
+            indices: [4]
+            out_channels: 16
+            kernel_size: [1, 1]
+            padding: same
+          indicators:
             indices: [5, 6, 7, 8, 9, 10, 11, 12, 13, 14]
             out_channels: 32
-            kernel_size: [1, 3]     # Convolution sur les indicateurs
-            padding: 'same'
-        
-        # Architecture du réseau
-        conv_blocks:
-          # Bloc 1: Traitement séparé par groupe
-          - type: 'grouped'
-            filters: 32
-            kernel_size: [1, 3]    # Convolution temporelle uniquement
-            padding: 'same'
-            activation: 'leaky_relu'
-            batch_norm: true
-            se_block: true         # Squeeze-and-Excitation
-            dropout: 0.1
-            
-          # Bloc 2: Connexion résiduelle multi-échelle
-          - type: 'inception'
-            filters: 64
-            kernel_sizes: 
-              - [1, 3]
-              - [1, 5]
-              - [1, 7]
-            pool_size: [1, 2]      # Réduction temporelle
-            residual: true         # Connexion résiduelle
-            activation: 'leaky_relu'
-            batch_norm: true
-            dropout: 0.2
-            
-          # Bloc 3: Attention temporelle
-          - type: 'attention'
-            num_heads: 4
-            key_dim: 64
-            dropout: 0.1
-            
-        # Configuration globale
-        activation: 'leaky_relu'
-        batch_norm: true
-        final_dropout: 0.25
-        
-      # Configuration similaire pour 1h avec adaptation des dimensions
-      "1h":
-        input_shape: [3, 100, 4]  # [groupes, temps, features/groupe]
-        channel_groups:
-          price: 
-            indices: [0, 1, 2, 3]  # OHLC
+            kernel_size: [1, 3]
+            padding: same
+      4h:
+        input_shape: [3, 5, 15]  # [timeframes, window_size, features]
+        channel_groups: 15
+        groups:
+          price:
+            indices: [0, 1, 2, 3]  # OPEN, HIGH, LOW, CLOSE
             out_channels: 32
             kernel_size: [1, 3]
-            padding: 'same'
-            
-          volume: 
-            indices: [4]
+            padding: same
+          volume:
+            indices: [4]  # VOLUME
             out_channels: 16
             kernel_size: [1, 1]
-            padding: 'same'
-            
-          indicators: 
-            indices: [5, 6, 7, 8, 9, 10]
+            padding: same
+          indicators:
+            indices: [5, 6, 7, 8, 9, 10, 11, 12, 13, 14]  # 10 indicateurs techniques
             out_channels: 32
             kernel_size: [1, 3]
-            padding: 'same'
-        
-        # Architecture du réseau
+            padding: same
         conv_blocks:
-          - type: 'grouped'
-            filters: 32
-            kernel_size: [1, 3]
-            padding: 'same'
-            activation: 'leaky_relu'
-            batch_norm: true
-            se_block: true
-            dropout: 0.1
-            
-          - type: 'inception'
-            filters: 64
-            kernel_sizes: 
-              - [1, 3]
-              - [1, 5]
-            pool_size: [1, 2]
-            residual: true
-            activation: 'leaky_relu'
-            batch_norm: true
-            dropout: 0.2
-            
-          - type: 'attention'
-            num_heads: 4
-            key_dim: 64
-            dropout: 0.1
-            
-        # Configuration globale
-        activation: 'leaky_relu'
-        batch_norm: true
-        final_dropout: 0.25
-        use_channel_attention: true
-        use_temporal_attention: true
-        temporal_attention_heads: 4
-        
-      "4h":
-        # Structure: [groupes, temps, features]
-        input_shape: [3, 10, 4]  # [prix/volume/indicateurs, pas de temps, features/groupe]
-        
-        # Configuration des groupes de caractéristiques
-        channel_groups:
-          price: 
-            indices: [0, 1, 2, 3]  # OHLC
-            out_channels: 32
-            kernel_size: [1, 3]
-            padding: 'same'
-            
-          volume: 
-            indices: [4]
-            out_channels: 16
-            kernel_size: [1, 1]
-            padding: 'same'
-            
-          indicators: 
-            indices: [5, 6, 7, 8, 9]
-            out_channels: 32
-            kernel_size: [1, 3]
-            padding: 'same'
-        
-        # Architecture du réseau
-        conv_blocks:
-          # Bloc 1: Traitement séparé par groupe
-          - type: 'grouped'
-            filters: 32
-            kernel_size: [1, 3]
-            padding: 'same'
-            activation: 'leaky_relu'
-            batch_norm: true
-            se_block: true
-            dropout: 0.1
-            
-          # Bloc 2: Connexion résiduelle multi-échelle
-          - type: 'inception'
-            filters: 64
-            kernel_sizes: 
-              - [1, 3]
-              - [1, 5]
-            pool_size: [1, 2]
-            residual: true
-            activation: 'leaky_relu'
-            batch_norm: true
-            dropout: 0.2
-            
-        # Configuration globale
-        activation: 'leaky_relu'
+        - type: grouped
+          filters: 32
+          kernel_size:
+          - 1
+          - 3
+          padding: same
+          activation: leaky_relu
+          batch_norm: true
+          se_block: true
+          dropout: 0.1
+        - type: inception
+          filters: 64
+          kernel_sizes:
+          - - 1
+            - 3
+          - - 1
+            - 5
+          - - 1
+            - 7
+          pool_size:
+          - 1
+          - 2
+          residual: true
+          activation: leaky_relu
+          batch_norm: true
+          dropout: 0.2
+        - type: attention
+          num_heads: 4
+          key_dim: 64
+          dropout: 0.1
+        activation: leaky_relu
         batch_norm: true
         final_dropout: 0.25
         use_channel_attention: true
         use_temporal_attention: false
         temporal_attention_heads: 4
-    
-    # Couches entièrement connectées après l'extracteur CNN
-    fc_layers: [256, 128]
-    
-    # Paramètres d'attention
+    fc_layers:
+    - 256
+    - 128
     attention:
       num_heads: 4
       dropout: 0.1
       use_relative_positions: true
-      
-    # Paramètres de normalisation
     normalization:
       use_batch_norm: true
       use_layer_norm: false
-      
-    # Paramètres d'initialisation
     initialization:
-      conv: 'he_normal'
-      dense: 'glorot_uniform'
-      bias: 'zeros'
+      conv: he_normal
+      dense: glorot_uniform
+      bias: zeros
     dropout: 0.2
-    activation: "leaky_relu"
+    activation: leaky_relu
     policy_kwargs:
       net_arch:
-        shared: [256, 128]
-        pi: [64, 32]
-        vf: [64, 32]
-      activation_fn: "leaky_relu"
+        shared:
+        - 256
+        - 128
+        pi:
+        - 64
+        - 32
+        vf:
+        - 64
+        - 32
+      activation_fn: leaky_relu
       gamma: 0.99
       gae_lambda: 0.95
       ent_coef: 0.01
-      ent_coef_annealing: True
+      ent_coef_annealing: true
       learning_rate: 3e-4
       n_steps: 4096
-      batch_size: 8192  # Peut être ajusté à 16384 (4096×4) si nécessaire
+      batch_size: 8192
       n_epochs: 4
       nminibatches: 4
-      clip_range: "lambda f: f * 0.2" # Correction pour le clip_range
+      clip_range: 'lambda f: f * 0.2'
       clip_range_vf: 0.2
       l2_penalty: 0.0
       dropout: 0.1
-      batch_norm: True
+      batch_norm: true
       target_update_interval: 1
       target_update_freq: 1000
       exploration_noise: 0.1
-      exploration_noise_type: 'normal'
+      exploration_noise_type: normal
       ou_params:
         mu: 0.0
         theta: 0.15
         sigma: 0.2
       random_exploration: 10000
-      exploration_strategy: 'gaussian'
+      exploration_strategy: gaussian
       normalize_observations: false
       normalize_rewards: false
     ppo:
       n_steps: 4096
-      batch_size: 8192  # Peut être ajusté à 16384 (4096×4) si nécessaire
+      batch_size: 8192
       n_epochs: 4
       gae_lambda: 0.95
       clip_range: 0.1
@@ -874,140 +736,104 @@ agent:
       ent_coef: 0.01
       vf_coef: 0.5
       max_grad_norm: 0.5
-      normalize_advantage: True
-      use_sde: False
+      normalize_advantage: true
+      use_sde: false
       sde_sample_freq: -1
-      use_reparameterization: False
-
-  # Schedulers recommandés
+      use_reparameterization: false
   learning_rate_schedule:
-    type: "linear"
+    type: linear
     start: 3e-4
     end: 1e-6
   ent_coef_schedule:
-    type: "linear"
+    type: linear
     start: 0.01
     end: 0.0001
-
-# ------------------------------------------------------------------------------
-# Configuration du Prétraitement des Données
-# ------------------------------------------------------------------------------
 data_processing:
-  # Taille de la fenêtre de lookahead pour le calcul des indicateurs
   max_lookahead: 100
-  
-  # Configuration des transformations temporelles
   temporal_transforms:
     enabled: true
-    # Types de transformations à appliquer
-    diffs: ["close", "volume"]  # Colonnes pour les différences premières
-    moving_averages: ["ma5", "ma10", "ma20"]  # Moyennes mobiles à calculer
-    rolling_windows: [5, 10, 20, 50]  # Fenêtres pour les indicateurs mobiles
-    
-    # Paramètres des indicateurs techniques
+    diffs:
+    - close
+    - volume
+    moving_averages:
+    - ma5
+    - ma10
+    - ma20
+    rolling_windows:
+    - 5
+    - 10
+    - 20
+    - 50
     rsi_window: 14
     macd_fast: 12
     macd_slow: 26
     macd_signal: 9
     bollinger_window: 20
     bollinger_std: 2.0
-
-# ------------------------------------------------------------------------------
-# Configuration de l'Augmentation des Données
-# ------------------------------------------------------------------------------
 data_augmentation:
-  enabled: true  # Activer/désactiver l'augmentation des données
-  
-  # Warping temporel (distorsions temporelles)
+  enabled: true
   time_warping:
     enabled: true
-    window: 10  # Taille de la fenêtre de warping
-    sigma: 0.2  # Écart-type pour le facteur de warping
-    exclude_columns: 
-      - volume
-      - trades
-  
-  # Bruit gaussien
+    window: 10
+    sigma: 0.2
+    exclude_columns:
+    - volume
+    - trades
   gaussian_noise:
     enabled: true
-    std: 0.01  # Écart-type du bruit (en proportion de l'écart-type des données)
-    exclude_columns: 
-      - volume
-      - trades
-  
-  # Permutation de fenêtres
+    std: 0.01
+    exclude_columns:
+    - volume
+    - trades
   window_permutation:
     enabled: false
-    window_size: 5  # Taille des fenêtres à permuter
-    n_permutations: 1  # Nombre de permutations à effectuer
-    exclude_columns: 
-      - volume
-      - trades
-  
-  # Scaling aléatoire
+    window_size: 5
+    n_permutations: 1
+    exclude_columns:
+    - volume
+    - trades
   random_scaling:
     enabled: false
-    scale_range: [0.9, 1.1]  # Plage de valeurs pour le facteur d'échelle
-    exclude_columns: 
-      - volume
-      - trades
-  
-  # Ajout de tendances
+    scale_range:
+    - 0.9
+    - 1.1
+    exclude_columns:
+    - volume
+    - trades
   trend_augmentation:
     enabled: false
-    max_trend: 0.01  # Pente maximale de la tendance à ajouter
-    exclude_columns: 
-      - volume
-      - trades
-  
-  # Mélange temporel partiel
+    max_trend: 0.01
+    exclude_columns:
+    - volume
+    - trades
   partial_shuffle:
     enabled: false
-    segment_size: 5  # Taille des segments à mélanger
-    exclude_columns: 
-      - volume
-      - trades
-  
-  # Ajout d'impulsions aléatoires
+    segment_size: 5
+    exclude_columns:
+    - volume
+    - trades
   random_impulses:
     enabled: false
-    probability: 0.01  # Probabilité d'ajouter une impulsion à un point
-    max_impulse: 0.1  # Amplitude maximale de l'impulsion (en proportion de l'écart-type)
-    exclude_columns: 
-      - volume
-      - trades
-  
-  # Ordre d'application des transformations
+    probability: 0.01
+    max_impulse: 0.1
+    exclude_columns:
+    - volume
+    - trades
   apply_order:
-    - time_warping
-    - gaussian_noise
-    - window_permutation
-    - random_scaling
-    - trend_augmentation
-    - partial_shuffle
-    - random_impulses
-
-# ------------------------------------------------------------------------------
-# Configuration de la Régularisation
-# ------------------------------------------------------------------------------
+  - time_warping
+  - gaussian_noise
+  - window_permutation
+  - random_scaling
+  - trend_augmentation
+  - partial_shuffle
+  - random_impulses
 regularization:
-  # Dropout
-  dropout_rate: 0.3  # Taux de dropout pour les couches denses
-  
-  # Batch Normalization
+  dropout_rate: 0.3
   use_batch_norm: true
   batch_norm_momentum: 0.99
   batch_norm_epsilon: 1e-5
-  
-  # Poids de la régularisation L2
   weight_decay: 1e-5
-  
-  # Gradient clipping
-  gradient_clip: 1.0  # Valeur maximale pour le clipping du gradient
-
-# ------------------------------------------------------------------------------
-# Configuration de l'Entraînement
-# ------------------------------------------------------------------------------
+  gradient_clip: 1.0
 training:
   num_instances: 4
   timesteps_per_instance: 1250000
@@ -1016,94 +842,75 @@ training:
   checkpointing:
     enabled: true
     save_freq: 50000
-    model_name: "adan_model"  # Nom du modèle pour les sauvegardes
-    save_path: "/home/morningstar/Documents/trading/bot/models/rl_agents/adan_model"  # Chemin direct pour éviter les problèmes d'interpolation
-
-# ------------------------------------------------------------------------------
-# Configuration des Récompenses
-# ------------------------------------------------------------------------------
+    model_name: adan_model
+    save_path: /home/morningstar/Documents/trading/bot/models/rl_agents/adan_model
+  progress_bar: false  # Désactivé pour éviter les conflits avec le callback personnalisé
+  use_custom_progress: true  # Activer le callback personnalisé
 reward_shaping:
-  # Facteurs de façonnage de base
   risk_factor: 1.0
   volatility_factor: 1.0
   drawdown_penalty: 0.1
   sharpe_factor: 0.5
-
-  # Récompenses et pénalités
   position_reward: 1.0
   commission_reward: -0.1
   slippage_reward: -0.1
   profit_factor_bonus: 0.5
-
-  # Paramètres de gestion du risque
   risk_reward_ratio: 2.0
   max_position_size: 0.1
   max_order_size: 0.01
   min_order_value_usdt: 10
-  
-  # Paramètres de trading
   commission_pct: 0.001
-  commission_penalty: 1.5  # Multiplicateur de pénalité pour les commissions
-  min_profit_multiplier: 3.0  # Multiplicateur minimum du profit par rapport aux commissions
+  commission_penalty: 1.5
+  min_profit_multiplier: 3.0
   slippage_pct: 0.001
-  
-  # Configuration du DBE (Dynamic Budgeting Engine)
   dbe:
-    initial_risk: 0.3  # Niveau de risque initial (0.1 à 1.0)
-    min_risk: 0.1      # Niveau de risque minimum
-    max_risk: 1.0      # Niveau de risque maximum
-    winrate_decay: 0.9  # Facteur de décroissance pour le calcul du winrate
-    drawdown_impact: 1.2  # Impact du drawdown sur le risque
-    cash_utilization_impact: 0.5  # Impact de l'utilisation de la trésorerie sur le risque
-
-  # Récompenses et pénalités pour les paliers
+    initial_risk: 0.3
+    min_risk: 0.1
+    max_risk: 1.0
+    winrate_decay: 0.9
+    drawdown_impact: 1.2
+    cash_utilization_impact: 0.5
   tier_rewards:
-    promotion_bonus: 50.0       # Récompense pour la montée de palier
-    demotion_penalty: -20.0     # Pénalité pour la descente de palier
-    checkpoint_on_promotion: true  # Créer un checkpoint à chaque promotion
-    checkpoint_dir: "/home/morningstar/Documents/trading/bot/models/rl_agents/checkpoints"
-
-    # Paramètres de progression entre paliers
-    min_episodes_for_promotion: 5  # Nombre minimum d'épisodes avant de pouvoir monter de palier
-    min_profit_for_promotion: 0.1  # Profit minimum requis (en pourcentage) pour la promotion
-
-    # Récompenses basées sur la performance par palier
+    promotion_bonus: 50.0
+    demotion_penalty: -20.0
+    checkpoint_on_promotion: true
+    checkpoint_dir: /home/morningstar/Documents/trading/bot/models/rl_agents/checkpoints
+    min_episodes_for_promotion: 5
+    min_profit_for_promotion: 0.1
     tier_performance_multipliers:
-      - tier: "Micro Capital"
-        multiplier: 1.0
-      - tier: "Small Capital"
-        multiplier: 1.2
-      - tier: "Medium Capital"
-        multiplier: 1.5
-      - tier: "High Capital"
-        multiplier: 2.0
-      - tier: "Enterprise"
-        multiplier: 2.5
-
-  # Configuration du Logging
-  # ------------------------------------------------------------------------------
+    - tier: Micro Capital
+      multiplier: 1.0
+    - tier: Small Capital
+      multiplier: 1.2
+    - tier: Medium Capital
+      multiplier: 1.5
+    - tier: High Capital
+      multiplier: 2.0
+    - tier: Enterprise
+      multiplier: 2.5
   logging:
     version: 1
     disable_existing_loggers: false
     log_dirs:
-      base: "logs"
-      dbe_replay: "logs/dbe_replay"
-      metrics: "logs/metrics"
-      models: "logs/models"
-      performance: "logs/performance"
-      data_quality: "logs/data_quality"
-      memory: "logs/memory"
+      base: logs
+      dbe_replay: logs/dbe_replay
+      metrics: logs/metrics
+      models: logs/models
+      performance: logs/performance
+      data_quality: logs/data_quality
+      memory: logs/memory
     formatters:
       standard:
-        format: "%(asctime)s - %(name)-25s - %(levelname)-8s - %(message)s"
-        datefmt: "%Y-%m-%d %H:%M:%S"
+        format: '%(asctime)s - %(name)-25s - %(levelname)-8s - %(message)s'
+        datefmt: '%Y-%m-%d %H:%M:%S'
       detailed:
-        format: "%(asctime)s - %(name)-25s - %(levelname)-8s - %(filename)s:%(lineno)d - %(message)s"
-        datefmt: "%Y-%m-%d %H:%M:%S"
+        format: '%(asctime)s - %(name)-25s - %(levelname)-8s - %(filename)s:%(lineno)d
+          - %(message)s'
+        datefmt: '%Y-%m-%d %H:%M:%S'
       json:
         class: pythonjsonlogger.jsonlogger.JsonFormatter
-        format: "%(asctime)s %(name)s %(levelname)s %(filename)s %(lineno)s %(message)s"
-        datefmt: "%Y-%m-%d %H:%M:%S"
+        format: '%(asctime)s %(name)s %(levelname)s %(filename)s %(lineno)s %(message)s'
+        datefmt: '%Y-%m-%d %H:%M:%S'
     handlers:
       console:
         class: logging.StreamHandler
@@ -1115,10 +922,10 @@ reward_shaping:
         level: DEBUG
         formatter: detailed
         filename: logs/adan.log
-        when: 'midnight'
+        when: midnight
         backupCount: 30
         encoding: utf-8
-        utc: True
+        utc: true
       error_file_handler:
         class: logging.handlers.RotatingFileHandler
         level: ERROR
@@ -1136,31 +943,44 @@ reward_shaping:
         backupCount: 10
         encoding: utf-8
     loggers:
-      '':
-        level: WARNING
-        handlers: [console, file_handler, error_file_handler]
-        propagate: no
+      ? ''
+      : level: WARNING
+        handlers:
+        - console
+        - file_handler
+        - error_file_handler
+        propagate: false
       adan:
         level: DEBUG
-        handlers: [console, file_handler, json_file_handler]
-        propagate: no
+        handlers:
+        - console
+        - file_handler
+        - json_file_handler
+        propagate: false
       tensorflow:
         level: WARNING
-        handlers: [file_handler]
-        propagate: no
+        handlers:
+        - file_handler
+        propagate: false
       stable_baselines3:
         level: INFO
-        handlers: [file_handler]
-        propagate: no
+        handlers:
+        - file_handler
+        propagate: false
       urllib3:
         level: WARNING
-        handlers: [file_handler]
-        propagate: no
+        handlers:
+        - file_handler
+        propagate: false
       pyarrow:
         level: WARNING
-        handlers: [file_handler]
-        propagate: no
+        handlers:
+        - file_handler
+        propagate: false
     root:
       level: WARNING
-      handlers: [console, file_handler, error_file_handler]
-      propagate: no
+      handlers:
+      - console
+      - file_handler
+      - error_file_handler
+      propagate: false

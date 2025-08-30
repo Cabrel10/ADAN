@@ -31,6 +31,11 @@ from gymnasium.wrappers import FlattenObservation
 from stable_baselines3 import PPO
 from stable_baselines3.common.logger import configure as sb3_logger_configure
 from stable_baselines3.common.callbacks import BaseCallback, EvalCallback
+from stable_baselines3.common.vec_env import VecEnv
+from typing import Dict, Any, Optional, Union, List, Tuple
+import time
+import numpy as np
+from datetime import datetime, timedelta
 from stable_baselines3.common.env_checker import check_env
 from stable_baselines3.common.monitor import Monitor
 from stable_baselines3.common.vec_env import (
@@ -529,6 +534,142 @@ class ResetObsAdapter:
         return None
 
 
+class TrainingProgressCallback(BaseCallback):
+    """
+    A custom callback that prints a detailed training progress table.
+    Displays training metrics, performance, portfolio value, and learning stats.
+    """
+
+    def __init__(self,
+                 check_freq: int = 1000,  # Check every N time steps
+                 verbose: int = 1):
+        super(TrainingProgressCallback, self).__init__(verbose)
+        self.check_freq = check_freq
+        self.start_time = time.time()
+        self.last_time = self.start_time
+        self.episode_rewards = []
+        self.episode_lengths = []
+        self.episode_times = []
+        self.total_steps = 0
+        self.last_log_steps = 0
+
+    def _on_training_start(self) -> None:
+        """Print the header when training starts."""
+        self.start_time = time.time()
+        self.last_time = self.start_time
+        print("\n" + "="*100)
+        print("DÉMARRAGE DE L'ENTRAÎNEMENT")
+        print("="*100)
+        self._print_header()
+
+    def _on_step(self) -> bool:
+        """Called at each environment step."""
+        # Update counters
+        self.total_steps = self.num_timesteps
+
+        # Log every check_freq steps
+        if self.n_calls % self.check_freq == 0:
+            self._log_progress()
+
+        return True
+
+    def _on_rollout_end(self) -> None:
+        """Called at the end of each rollout."""
+        # Get rollout information
+        if len(self.model.ep_info_buffer) > 0 and len(self.model.ep_info_buffer[0]) > 0:
+            ep_info = self.model.ep_info_buffer[0][0]  # Get first env's first episode
+            if 'r' in ep_info and 'l' in ep_info:
+                self.episode_rewards.append(ep_info['r'])
+                self.episode_lengths.append(ep_info['l'])
+                self.episode_times.append(time.time() - self.last_time)
+                self.last_time = time.time()
+
+    def _log_progress(self) -> None:
+        """Log training progress with detailed metrics."""
+        # Calculate metrics
+        current_time = time.time()
+        elapsed_time = current_time - self.start_time
+        steps_per_sec = (self.total_steps - self.last_log_steps) / (current_time - self.last_time) if current_time > self.last_time else 0
+
+        # Get environment statistics
+        if hasattr(self.model.get_env(), 'envs') and len(self.model.get_env().envs) > 0:
+            env = self.model.get_env().envs[0]
+            if hasattr(env, 'env'):  # Handle potential wrappers
+                env = env.env
+
+            # Get portfolio metrics if available
+            portfolio_value = getattr(env, 'portfolio_value', 0)
+            initial_balance = getattr(env, 'initial_balance', 1)  # Avoid division by zero
+            roi = ((portfolio_value - initial_balance) / initial_balance) * 100 if initial_balance > 0 else 0
+        else:
+            portfolio_value = 0
+            roi = 0
+
+        # Calculate episode statistics
+        avg_reward = np.mean(self.episode_rewards[-10:]) if self.episode_rewards else 0
+        avg_length = np.mean(self.episode_lengths[-10:]) if self.episode_lengths else 0
+        fps = self.total_steps / elapsed_time if elapsed_time > 0 else 0
+
+        # Get learning statistics
+        learning_stats = {}
+        if hasattr(self.model, 'logger') and hasattr(self.model.logger, 'name_to_value'):
+            learning_stats = self.model.logger.name_to_value
+
+        # Calculate ETA
+        total_steps = self.model._total_timesteps
+        progress = (self.total_steps / total_steps) * 100 if total_steps > 0 else 0
+        remaining_steps = max(0, total_steps - self.total_steps)
+        eta_seconds = (remaining_steps / steps_per_sec) if steps_per_sec > 0 else 0
+        eta_str = str(timedelta(seconds=int(eta_seconds)))
+
+        # Print progress table
+        print("\n" + "-"*100)
+        print(f"PROGRESSION: {progress:.1f}% | ETA: {eta_str} | FPS: {fps:.1f}")
+        print("-"*100)
+
+        # Print status table
+        print("\nSTATUT:")
+        print(f"Étape: {self.total_steps:,}/{total_steps:,} ({progress:.1f}%)")
+        print(f"Temps écoulé: {str(timedelta(seconds=int(elapsed_time)))}")
+        print(f"Temps restant estimé: {eta_str}")
+        print(f"Vitesse: {steps_per_sec:.1f} étapes/seconde")
+
+        # Print performance metrics
+        print("\nPERFORMANCE:")
+        print(f"Récompense moyenne (10 épisodes): {avg_reward:,.2f}")
+        print(f"Longueur moyenne des épisodes: {avg_length:.1f} pas")
+        print(f"Portefeuille: ${portfolio_value:,.2f} (ROI: {roi:+.2f}%)")
+
+        # Print learning metrics if available
+        if learning_stats:
+            print("\nAPPRENTISSAGE:")
+            for key, value in learning_stats.items():
+                if 'loss' in key.lower() or 'entropy' in key.lower() or 'value' in key.lower():
+                    print(f"{key}: {value:.4f}")
+
+        # Print system info
+        print("\nSYSTÈME:")
+        print(f"Utilisation CPU: {psutil.cpu_percent()}%")
+        try:
+            process = psutil.Process()
+            mem_info = process.memory_info()
+            print(f"Utilisation mémoire: {mem_info.rss / 1024 / 1024:.1f} MB")
+        except Exception as e:
+            print(f"Erreur lors de la lecture de l'utilisation mémoire: {str(e)}")
+
+        # Update last log time
+        self.last_log_steps = self.total_steps
+        self.last_time = current_time
+
+    def _print_header(self) -> None:
+        """Print the table header."""
+        print("\n" + "="*100)
+        print("SUIVI DE L'ENTRAÎNEMENT - ADAN TRADING BOT")
+        print("="*100)
+        print("Démarrage à:", datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+        print("-"*100)
+
+
 class SB3GymCompatibilityWrapper(gym.Wrapper):
     """
     Wrapper pour assurer la compatibilité entre Gymnasium et Stable Baselines 3.
@@ -873,7 +1014,7 @@ class SB3GymCompatibilityWrapper(gym.Wrapper):
         return default_obs
 
 
-def make_env(rank: int, seed: int = 0, config: Optional[Dict] = None, worker_config: Optional[Dict] = None) -> Callable:
+def make_env(rank: int, seed: Optional[int] = None, config: Optional[Dict] = None, worker_config: Optional[Dict] = None) -> gym.Env:
     """
     Crée et configure un environnement pour un worker donné.
 
@@ -884,114 +1025,120 @@ def make_env(rank: int, seed: int = 0, config: Optional[Dict] = None, worker_con
         worker_config: Configuration spécifique au worker
 
     Returns:
-        Fonction qui crée et retourne un environnement
+        Un environnement Gym valide
     """
-    def _init() -> gym.Env:
-        # Configuration du worker si non fournie
-        nonlocal worker_config
-        if worker_config is None:
-            # Récupérer la liste des actifs depuis la configuration
-            data_config = config.get("data", {})
-            file_structure = data_config.get("file_structure", {})
-            assets = file_structure.get("assets", ["BTCUSDT"])
-            timeframes = file_structure.get("timeframes", ["5m", "1h", "4h"])
-
-            worker_config = {
-                "rank": rank,
-                "num_workers": config.get("num_workers", 1) if config else 1,
-                "assets": assets,
-                "timeframes": timeframes,
-                "data_loader": {
-                    "batch_size": config.get("batch_size", 32) if config else 32,
-                    "shuffle": True,
-                    "num_workers": 0  # Désactiver le multithreading pour éviter les problèmes
-                }
-            }
-
-        # Extraire les paramètres nécessaires de la configuration
+    # Configuration du worker si non fournie
+    if worker_config is None:
+        # Récupérer la liste des actifs depuis la configuration
         data_config = config.get("data", {})
-        env_config = config.get("environment", {})
+        file_structure = data_config.get("file_structure", {})
+        assets = file_structure.get("assets", ["BTCUSDT"])
+        timeframes = file_structure.get("timeframes", ["5m", "1h", "4h"])
 
-        # Récupérer les paramètres requis
-        timeframes = data_config.get("file_structure", {}).get("timeframes", ["5m", "1h", "4h"])
-        window_size = env_config.get("window_size", 100)
-        features_config = env_config.get("features_config", {
-            "5m": ["OPEN", "HIGH", "LOW", "CLOSE", "VOLUME"],
-            "1h": ["OPEN", "HIGH", "LOW", "CLOSE", "VOLUME"],
-            "4h": ["OPEN", "HIGH", "LOW", "CLOSE", "VOLUME"]
-        })
+        worker_config = {
+            "rank": rank,
+            "num_workers": config.get("num_workers", 1) if config else 1,
+            "assets": assets,
+            "timeframes": timeframes,
+            "data_loader": {
+                "batch_size": config.get("batch_size", 32) if config else 32,
+                "shuffle": True,
+                "num_workers": 0  # Désactiver le multithreading pour éviter les problèmes
+            }
+        }
 
-        # Define the base data directory
-        base_data_dir = "data/processed/indicators/val"
-        data = {}
-        data_found = False
+    # Extraire les paramètres nécessaires de la configuration
+    data_config = config.get("data", {})
+    env_config = config.get("environment", {})
 
-        # Load data for each asset and timeframe
-        for asset in worker_config.get("assets", ["BTCUSDT"]):
-            data[asset] = {}
-            for tf in timeframes:
-                # Construct the path to the data file
-                file_path = os.path.join(base_data_dir, asset, f"{tf}.parquet")
+    # Récupérer les paramètres requis
+    timeframes = data_config.get("file_structure", {}).get("timeframes", ["5m", "1h", "4h"])
+    window_size = env_config.get("window_size", 100)
+    features_config = env_config.get("features_config", {
+        "5m": ["OPEN", "HIGH", "LOW", "CLOSE", "VOLUME"],
+        "1h": ["OPEN", "HIGH", "LOW", "CLOSE", "VOLUME"],
+        "4h": ["OPEN", "HIGH", "LOW", "CLOSE", "VOLUME"]
+    })
 
-                if os.path.exists(file_path):
-                    try:
-                        df = pd.read_parquet(file_path)
-                        data[asset][tf] = df
-                        logger.info(f"Données chargées depuis {file_path}: {len(df)} lignes")
-                        data_found = True
-                    except Exception as e:
-                        logger.error(f"Erreur lors du chargement de {file_path}: {str(e)}")
-                else:
-                    logger.warning(f"Fichier non trouvé: {file_path}")
+    # Define the base data directory
+    base_data_dir = "data/processed/indicators/val"
+    data = {}
+    data_found = False
 
-        if not any(data.values()):
-            raise ValueError("Aucune donnée n'a pu être chargée. Vérifiez les chemins des fichiers de données.")
+    # Load data for each asset and timeframe
+    for asset in worker_config.get("assets", ["BTCUSDT"]):
+        data[asset] = {}
+        for tf in timeframes:
+            # Construct the path to the data file
+            file_path = os.path.join(base_data_dir, asset, f"{tf}.parquet")
 
-        # Créer l'environnement avec les données chargées
-        env = MultiAssetChunkedEnv(
-            data=data,
-            timeframes=timeframes,
-            window_size=window_size,
-            features_config=features_config,
-            max_steps=env_config.get("max_steps", 1000),
-            initial_balance=env_config.get("initial_balance", 10000.0),
-            commission=env_config.get("commission", 0.001),
-            reward_scaling=env_config.get("reward_scaling", 1.0),
-            render_mode=None,
-            enable_logging=config.get("enable_logging", True),
-            log_dir=config.get("log_dir", "logs"),
-            # Passer les configurations nécessaires
-            worker_config=worker_config,
-            config=config
-        )
+            if os.path.exists(file_path):
+                try:
+                    df = pd.read_parquet(file_path)
+                    data[asset][tf] = df
+                    logger.info(f"Données chargées depuis {file_path}: {len(df)} lignes")
+                    data_found = True
+                except Exception as e:
+                    logger.error(f"Erreur lors du chargement de {file_path}: {str(e)}")
+            else:
+                logger.warning(f"Fichier non trouvé: {file_path}")
 
-        # Appliquer les wrappers dans le bon ordre
-        # 1. D'abord le wrapper ResetObsAdapter pour gérer les retours de reset
-        env = ResetObsAdapter(env)
+    if not any(data.values()):
+        raise ValueError("Aucune donnée n'a pu être chargée. Vérifiez les chemins des fichiers de données.")
 
-        # 2. Ensuite le wrapper de compatibilité SB3 pour traiter l'observation
-        env = SB3GymCompatibilityWrapper(env)
+    # Créer l'environnement avec les données chargées
+    env = MultiAssetChunkedEnv(
+        data=data,
+        timeframes=timeframes,
+        window_size=window_size,
+        features_config=features_config,
+        max_steps=env_config.get("max_steps", 1000),
+        initial_balance=env_config.get("initial_balance", 10000.0),
+        commission=env_config.get("commission", 0.001),
+        reward_scaling=env_config.get("reward_scaling", 1.0),
+        render_mode=None,
+        enable_logging=config.get("enable_logging", True),
+        log_dir=config.get("log_dir", "logs"),
+        worker_config=worker_config,
+        config=config
+    )
 
-        # 3. Enfin, le wrapper GymnasiumToGymWrapper pour assurer la compatibilité avec SB3
-        # (ce wrapper doit être le plus externe pour gérer correctement les retours de reset et step)
-        env = GymnasiumToGymWrapper(env)
+    # Appliquer les wrappers dans le bon ordre
+    # 1. D'abord le wrapper ResetObsAdapter pour gérer les retours de reset
+    env = ResetObsAdapter(env)
 
-        # Configurer la graine pour la reproductibilité sans toucher aux attributs dépréciés
+    # 2. Ensuite le wrapper de compatibilité SB3 pour traiter l'observation
+    env = SB3GymCompatibilityWrapper(env)
+
+    # 3. Enfin, le wrapper GymnasiumToGymWrapper pour assurer la compatibilité avec SB3
+    # (ce wrapper doit être le plus externe pour gérer correctement les retours de reset et step)
+    env = GymnasiumToGymWrapper(env)
+
+    # Configurer la graine pour la reproductibilité
+    if seed is not None:
         try:
+            # Essayer d'utiliser np.random pour la graine
+            import numpy as np
+            np.random.seed(seed)
+
+            # Configurer la graine de l'environnement si possible
             base = getattr(env, 'unwrapped', env)
             if hasattr(base, 'seed'):
-                base.seed(seed + rank)
-        except Exception:
-            pass
-        try:
+                base.seed(seed)
+
+            # Configurer la graine de l'espace d'action
             if hasattr(env, 'action_space') and hasattr(env.action_space, 'seed'):
-                env.action_space.seed(seed + rank)
-        except Exception:
-            pass
+                env.action_space.seed(seed)
 
-        return env
+            # Configurer la graine de l'espace d'observation
+            if hasattr(env, 'observation_space') and hasattr(env.observation_space, 'seed'):
+                env.observation_space.seed(seed)
 
-    return _init
+        except Exception as e:
+            logger.warning(f"Impossible de configurer la graine pour l'environnement {rank}: {str(e)}")
+
+    logger.info(f"Environnement {rank} créé avec succès")
+    return env
 
 def main(
     config_path: str = "config/config.yaml",
@@ -1033,41 +1180,74 @@ def main(
         # Activer ou non la barre de progression pendant l'entraînement (config training.progress_bar)
         progress_bar = bool(config.get('training', {}).get('progress_bar', False))
 
-        # Créer les environnements vectorisés
-        VecEnvClass = SubprocVecEnv if use_subproc else DummyVecEnv
-
-            # Récupérer la liste des actifs et timeframes depuis la configuration
+        # Récupérer la liste des actifs et timeframes depuis la configuration
         data_config = config.get("data", {})
         file_structure = data_config.get("file_structure", {})
         assets = file_structure.get("assets", ["BTCUSDT"])
         timeframes = file_structure.get("timeframes", ["5m", "1h", "4h"])
+        seed = config.get('seed', 42)
 
         # Configuration commune pour tous les workers
         base_worker_config = {
             "num_workers": num_envs,
             "assets": assets,  # Liste des actifs
             "timeframes": timeframes,  # Liste des timeframes
-            # Réduire la taille des chunks pour s'adapter aux petits fichiers de données
-            "chunk_sizes": {tf: 50 for tf in timeframes},
+            "chunk_sizes": {tf: 50 for tf in timeframes},  # Taille réduite des chunks
             "data_loader": {
                 "batch_size": config.get("batch_size", 32),
                 "shuffle": True,
-                "num_workers": 0  # Désactiver le multithreading pour éviter les problèmes
-            }
+                "num_workers": 0  # Important: laisser à 0 pour éviter les problèmes de fork
+            },
+            "use_subproc": use_subproc  # Passer l'info au worker
         }
 
-        env_fns = [
-            make_env(
-                rank=i,
-                seed=config.get('seed', 42),
-                config=config,
-                worker_config={"rank": i, **base_worker_config}
-            )
-            for i in range(num_envs)
-        ]
+        # Choisir la classe d'environnement vectorisé
+        VecEnvClass = SubprocVecEnv if use_subproc else DummyVecEnv
 
-        # Créer l'environnement vectorisé
-        env = VecEnvClass(env_fns)
+        # Configurer les arguments pour SubprocVecEnv
+        vec_env_kwargs = {}
+        if use_subproc:
+            # Configuration spécifique pour le mode multiprocessus
+            vec_env_kwargs.update({
+                'start_method': 'forkserver',  # Meilleur que 'spawn' pour les performances
+                'daemon': False  # Permet aux processus enfants de se terminer correctement
+            })
+            logger.info(f"Utilisation de SubprocVecEnv avec {num_envs} processus parallèles")
+        else:
+            logger.info(f"Utilisation de DummyVecEnv (sans parallélisme réel)")
+
+        # Créer les fonctions de création d'environnement
+        def make_env_fn(rank: int, seed_val: int) -> Callable[[], gym.Env]:
+            """Crée une fonction d'initialisation d'environnement pour un rang donné."""
+            def _init() -> gym.Env:
+                try:
+                    env = make_env(
+                        rank=rank,
+                        seed=seed_val,
+                        config=config,
+                        worker_config={"rank": rank, **base_worker_config}
+                    )
+                    logger.info(f"Environnement {rank} initialisé avec succès")
+                    return env
+                except Exception as e:
+                    logger.error(f"Erreur lors de la création de l'environnement {rank}: {str(e)}")
+                    raise
+            return _init
+
+        # Créer les environnements avec des seeds uniques
+        env_fns = []
+        for i in range(num_envs):
+            # Chaque environnement a une seed unique basée sur la seed de base + son rang
+            env_seed = seed + i * 1000 if seed is not None else None
+            env_fns.append(make_env_fn(i, env_seed))
+
+        # Créer l'environnement vectorisé avec la configuration appropriée
+        try:
+            env = VecEnvClass(env_fns, **vec_env_kwargs)
+            logger.info(f"Environnement vectorisé créé avec succès: {env}")
+        except Exception as e:
+            logger.error(f"Erreur lors de la création de l'environnement vectorisé: {str(e)}")
+            raise
 
         # Ajouter la normalisation des observations si nécessaire
         if config.get('normalize_observations', True):
@@ -1148,6 +1328,15 @@ def main(
         # Créer ou charger le modèle PPO
         model = None
         latest_checkpoint = None
+
+        # Afficher des informations sur le parallélisme
+        logger.info("\n" + "="*80)
+        logger.info(f"Configuration de l'entraînement:")
+        logger.info(f"- Nombre d'environnements parallèles: {num_envs}")
+        logger.info(f"- Type d'environnement: {'SubprocVecEnv' if use_subproc else 'DummyVecEnv'}")
+        logger.info(f"- Seed de base: {config.get('seed', 42)}")
+        logger.info(f"- Device: {'auto'}")
+        logger.info("="*80 + "\n")
 
         # Vérifier si on doit reprendre depuis un checkpoint
         if resume and checkpoint_manager.list_checkpoints():
@@ -1429,14 +1618,13 @@ def main(
         # Initialiser la liste des callbacks avec le checkpoint
         callbacks = [checkpoint_callback]
 
-        # Ajouter le callback de progression si demandé
-        if progress_bar:
-            from stable_baselines3.common.callbacks import ProgressBarCallback
-            progress_callback = ProgressBarCallback()
+        # Ajouter le callback de progression personnalisé si activé dans la config
+        use_custom_progress = config.get('training', {}).get('use_custom_progress', False)
+        if use_custom_progress:
+            # Créer une instance de notre callback personnalisé
+            progress_callback = TrainingProgressCallback(check_freq=1000, verbose=1)
             callbacks.append(progress_callback)
-
-            # Configurer le logging pour la barre de progression
-            logger.info("Barre de progression activée pour le suivi de l'entraînement")
+            logger.info("Barre de progression personnalisée activée pour le suivi de l'entraînement")
 
         # Créer un CallbackList pour gérer plusieurs callbacks
         from stable_baselines3.common.callbacks import CallbackList
@@ -1491,7 +1679,7 @@ def main(
                             total_timesteps=remaining_timesteps,
                             callback=callback,  # Utilisation du CallbackList
                             reset_num_timesteps=False,  # Ne pas réinitialiser le compteur d'étapes
-                            progress_bar=progress_bar  # Utiliser la barre de progression configurée
+                            progress_bar=False  # Désactivé pour éviter les conflits avec notre callback personnalisé
                         )
                 else:
                     model.learn(

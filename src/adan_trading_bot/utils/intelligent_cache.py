@@ -220,40 +220,59 @@ class IntelligentCache:
         return hashlib.sha256(key_str.encode()).hexdigest()
     
     def get(self, func_name: str, args: Tuple, kwargs: Dict) -> Optional[Any]:
-        """Récupère une valeur du cache (mémoire puis disque)"""
+        """Récupère une valeur depuis le cache"""
         key = self._generate_key(func_name, args, kwargs)
-        
-        # Try memory cache first
+        logger.debug(f"\nGET - Clé générée: {key}")
+        logger.debug(f"GET - func_name: {func_name}")
+        logger.debug(f"GET - args: {args}")
+        logger.debug(f"GET - kwargs: {kwargs}")
+            
+        # Essayer d'abord le cache mémoire
         result = self.memory_cache.get(key)
         if result is not None:
             self.memory_hits += 1
+            logger.debug(f"Trouvé dans le cache mémoire - memory_hits: {self.memory_hits}")
             return result
-        
-        # Try disk cache
+            
+        # Ensuite essayer le cache disque
         result = self.disk_cache.get(key)
         if result is not None:
             self.disk_hits += 1
-            # Promote to memory cache
+            logger.debug(f"Trouvé dans le cache disque - disk_hits: {self.disk_hits}")
+            # Remonter en mémoire pour les accès futurs
             self.memory_cache.put(key, result)
             return result
-        
+            
+        # Si non trouvé
         self.total_misses += 1
+        logger.debug(f"Non trouvé - total_misses: {self.total_misses}")
+        # Afficher les statistiques après chaque opération
+        stats = self.get_comprehensive_stats()
+        logger.debug(f"Statistiques après GET manqué: {stats}")
         return None
-    
+        
     def put(self, func_name: str, args: Tuple, kwargs: Dict, value: Any, 
             persist_to_disk: bool = True) -> None:
         """Sauvegarde une valeur dans le cache"""
         key = self._generate_key(func_name, args, kwargs)
-        
+        logger.debug(f"PUT - Clé générée: {key}")
+        logger.debug(f"PUT - func_name: {func_name}")
+        logger.debug(f"PUT - args: {args}")
+        logger.debug(f"PUT - kwargs: {kwargs}")
+            
         # Always put in memory cache
         self.memory_cache.put(key, value)
-        
+            
         # Optionally put in disk cache for expensive computations
         if persist_to_disk:
             self.disk_cache.put(key, value)
-        
+            
         # Auto cleanup if needed
         self._auto_cleanup()
+        
+        # Afficher les statistiques après chaque opération
+        stats = self.get_comprehensive_stats()
+        logger.debug(f"Statistiques après PUT: {stats}")
     
     def _auto_cleanup(self) -> None:
         """Nettoyage automatique périodique"""

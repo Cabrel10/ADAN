@@ -2494,13 +2494,14 @@ class StateBuilder:
                                  tf, missing_cols)
                     logger.debug("Colonnes disponibles: %s", available_cols)
 
-                # 4. Exclure le timestamp des features
-                if 'timestamp' in df.columns:
-                    timestamps = df['timestamp'].copy()
-                    df = df.drop(columns=['timestamp'])
-                    logger.debug("Timestamp extrait et retiré des features")
+                # 4. Exclure le timestamp des features (gestion de la casse)
+                timestamp_col = next((col for col in df.columns if col.upper() == 'TIMESTAMP'), None)
+                if timestamp_col is not None:
+                    timestamps = df[timestamp_col].copy()
+                    df = df.drop(columns=[timestamp_col])
+                    logger.debug("Timestamp extrait et retiré des features (colonne: %s)", timestamp_col)
                 else:
-                    logger.warning("Aucune colonne 'timestamp' trouvée dans les données")
+                    logger.warning("Aucune colonne 'timestamp' (insensible à la casse) trouvée dans les données")
 
                 # 5. Créer un nouveau DataFrame avec les colonnes dans l'ordre attendu
                 # et remplir avec des zéros les colonnes manquantes

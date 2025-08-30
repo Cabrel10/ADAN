@@ -12,6 +12,7 @@ from stable_baselines3 import PPO
 from stable_baselines3.common.callbacks import BaseCallback
 from stable_baselines3.common.policies import ActorCriticPolicy
 from stable_baselines3.common.type_aliases import MaybeCallback, Schedule
+from stable_baselines3.common.vec_env import VecEnv
 
 # Suppress unused imports for type checking
 if TYPE_CHECKING:

@@ -35,7 +35,9 @@ class TestPortfolioManager(unittest.TestCase):
                 }
             }
         }
-        self.portfolio = PortfolioManager(env_config=self.env_config)
+        # Extraire la liste des actifs de la configuration
+        assets = self.env_config.get('assets', ['BTCUSDT', 'ETHUSDT'])
+        self.portfolio = PortfolioManager(env_config=self.env_config, assets=assets)
 
     def test_initial_state(self):
         self.assertEqual(self.portfolio.initial_capital, 1000.0)
@@ -80,7 +82,9 @@ class TestPortfolioManager(unittest.TestCase):
         self.env_config['trading_rules']['futures_enabled'] = True
         self.env_config['trading_rules']['futures_commission_pct'] = 0.0004
         self.env_config['trading_rules']['leverage'] = 10
-        self.portfolio = PortfolioManager(env_config=self.env_config)
+        # Extraire la liste des actifs de la configuration
+        assets = self.env_config.get('assets', ['BTCUSDT', 'ETHUSDT'])
+        self.portfolio = PortfolioManager(env_config=self.env_config, assets=assets)
 
         # Open a futures position
         self.portfolio.open_position('BTCUSDT', 20000, 0.01) # Notional value 200
@@ -106,7 +110,9 @@ class TestPortfolioManager(unittest.TestCase):
         # ETH allocation: 400/1000 = 0.4 (40%)
         # Let's change max_single_asset to 0.3 for ETH to be over
         self.env_config['risk_management']['position_sizing']['concentration_limits']['max_single_asset'] = 0.3
-        self.portfolio = PortfolioManager(env_config=self.env_config)
+        # Extraire la liste des actifs de la configuration
+        assets = self.env_config.get('assets', ['BTCUSDT', 'ETHUSDT'])
+        self.portfolio = PortfolioManager(env_config=self.env_config, assets=assets)
         self.portfolio.cash = 500 # Reset cash for this test
         self.portfolio.positions['BTCUSDT'].open(20000, 0.005)
         self.portfolio.positions['ETHUSDT'].open(2000, 0.2)
@@ -122,7 +128,9 @@ class TestPortfolioManager(unittest.TestCase):
         self.env_config['trading_rules']['futures_enabled'] = True
         self.env_config['trading_rules']['leverage'] = 10
         self.env_config['trading_rules']['liquidation_threshold'] = 0.1 # 10% margin level
-        self.portfolio = PortfolioManager(env_config=self.env_config)
+        # Extraire la liste des actifs de la configuration
+        assets = self.env_config.get('assets', ['BTCUSDT', 'ETHUSDT'])
+        self.portfolio = PortfolioManager(env_config=self.env_config, assets=assets)
 
         # Open a position that uses a significant portion of capital
         # Initial capital 1000. Notional value 9000. Margin used = 9000 / 10 = 900
