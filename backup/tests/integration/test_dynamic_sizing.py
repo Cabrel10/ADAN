@@ -41,7 +41,7 @@ class TestDynamicSizingIntegration(unittest.TestCase):
             confidence=0.8,
             stop_loss_pct=2.0
         )
-        
+
         # 50 * 0.015 / (50000 * 0.02) * 0.8 = 0.0006, clamped to min_trade_size (0.001), then clamped by max_position_value (50 * 0.7 = 35), so 35/50000 = 0.0007
         self.assertAlmostEqual(position_size, 0.0007, places=5)
 
@@ -58,7 +58,7 @@ class TestDynamicSizingIntegration(unittest.TestCase):
             confidence=0.8,
             stop_loss_pct=2.0
         )
-        
+
         # 5000 * 0.005 / (50000 * 0.02) * 0.8 = 0.02
         self.assertAlmostEqual(position_size, 0.02, places=5)
 

@@ -37,7 +37,7 @@ observation_validator.ValidationLevel = MockValidationLevel
 
 class TestObservationValidatorSimple(unittest.TestCase):
     """Tests simplifiés pour ObservationValidator."""
-    
+
     def setUp(self):
         """Configuration avant chaque test."""
         self.validator = observation_validator.ObservationValidator()
@@ -54,21 +54,21 @@ class TestObservationValidatorSimple(unittest.TestCase):
         })
         self.validator.save_validation_report = MagicMock()
         self.validator.log_validation_results = MagicMock()
-    
+
     def mock_validate_observation(self, observation, expected_shape=None, **kwargs):
         """Simule la validation d'une observation."""
         if expected_shape and observation.shape != expected_shape:
             return False, [MockValidationResult(
-                is_valid=False, 
+                is_valid=False,
                 message=f"Shape mismatch: expected {expected_shape}, got {observation.shape}",
                 level=MockValidationLevel.ERROR
             )]
         return True, [MockValidationResult(
-            is_valid=True, 
+            is_valid=True,
             message="Validation passed",
             level=MockValidationLevel.INFO
         )]
-    
+
     def mock_validate_batch(self, batch_data):
         """Simule la validation par lots."""
         results = []
@@ -78,14 +78,14 @@ class TestObservationValidatorSimple(unittest.TestCase):
             results.append(res)
             all_valid = all_valid and is_valid
         return all_valid, results
-    
+
     def test_validate_clean_data(self):
         """Test de validation avec des données propres."""
         data = np.random.randn(10, 5)
         is_valid, results = self.validator.validate_observation(data)
         self.assertTrue(is_valid)
         self.assertTrue(all(r.is_valid for r in results))
-    
+
     def test_validate_invalid_shape(self):
         """Test de validation avec une forme invalide."""
         data = np.random.randn(5, 3)  # Mauvaise forme
@@ -93,7 +93,7 @@ class TestObservationValidatorSimple(unittest.TestCase):
             data, expected_shape=(10, 5))
         self.assertFalse(is_valid)
         self.assertIn("Shape mismatch", results[0].message)
-    
+
     def test_batch_validation(self):
         """Test de validation par lots."""
         batch = [
@@ -104,7 +104,7 @@ class TestObservationValidatorSimple(unittest.TestCase):
         all_valid, batch_results = self.validator.validate_batch(batch)
         self.assertTrue(all_valid)
         self.assertEqual(len(batch_results), len(batch))
-    
+
     def test_validation_statistics(self):
         """Test des statistiques de validation."""
         # Simuler des validations
@@ -116,20 +116,20 @@ class TestObservationValidatorSimple(unittest.TestCase):
             'errors_count': 1,
             'critical_count': 0
         }
-        
+
         stats = self.validator.get_validation_summary()
         self.assertEqual(stats['total_validations'], 5)
         self.assertEqual(stats['passed_validations'], 4)
         self.assertEqual(stats['failed_validations'], 1)
-    
+
     def test_validation_report_export(self):
         """Test d'exportation du rapport de validation."""
         data = np.random.randn(10, 5)
         is_valid, results = self.validator.validate_observation(data)
-        
+
         with tempfile.NamedTemporaryFile(suffix='.json', delete=False) as tmp_file:
             report_path = tmp_file.name
-        
+
         try:
             self.validator.save_validation_report(results, report_path)
             self.validator.save_validation_report.assert_called_once()

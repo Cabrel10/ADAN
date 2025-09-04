@@ -41,8 +41,8 @@ class ErrorContext:
 
 class TradingError(Exception):
     """Base exception class for all trading-related errors."""
-    def __init__(self, 
-                 message: str, 
+    def __init__(self,
+                 message: str,
                  severity: ErrorSeverity = ErrorSeverity.ERROR,
                  category: ErrorCategory = ErrorCategory.UNKNOWN,
                  context: Optional[ErrorContext] = None,
@@ -88,14 +88,14 @@ class ErrorHandler:
     """
     A class to handle errors with automatic retry and escalation capabilities.
     """
-    def __init__(self, 
-                 max_retries: int = 3, 
+    def __init__(self,
+                 max_retries: int = 3,
                  initial_delay: float = 1.0,
                  backoff_factor: float = 2.0,
                  logger: Optional[logging.Logger] = None):
         """
         Initialize the error handler.
-        
+
         Args:
             max_retries: Maximum number of retry attempts
             initial_delay: Initial delay between retries in seconds
@@ -107,25 +107,25 @@ class ErrorHandler:
         self.backoff_factor = max(backoff_factor, 1.0)
         self.logger = logger or logging.getLogger(__name__)
 
-    def with_retry(self, 
+    def with_retry(self,
                   func: Callable[..., T],
                   retry_exceptions: tuple[Type[Exception], ...] = (Exception,),
                   context: Optional[ErrorContext] = None) -> Callable[..., T]:
         """
         Decorator to add retry logic to a function.
-        
+
         Args:
             func: The function to wrap
             retry_exceptions: Tuple of exception types to retry on
             context: Optional context information
-            
+
         Returns:
             Wrapped function with retry logic
         """
         def wrapper(*args, **kwargs) -> T:
             last_exception = None
             delay = self.initial_delay
-            
+
             for attempt in range(self.max_retries + 1):
                 try:
                     return func(*args, **kwargs)
@@ -142,15 +142,15 @@ class ErrorHandler:
                     # Don't retry on unexpected exceptions
                     self._log_unexpected_error(e, context)
                     raise self._enhance_exception(e, context) from e
-            
+
             # This should never be reached due to the raise in the except block
             raise RuntimeError("Unexpected error in retry logic")
-        
+
         return wrapper
 
-    def _log_retry_attempt(self, 
-                          exception: Exception, 
-                          attempt: int, 
+    def _log_retry_attempt(self,
+                          exception: Exception,
+                          attempt: int,
                           delay: float,
                           context: Optional[ErrorContext] = None):
         """Log a retry attempt."""
@@ -159,7 +159,7 @@ class ErrorHandler:
             f"Retrying in {delay:.2f}s..."
         )
 
-    def _log_retry_failure(self, 
+    def _log_retry_failure(self,
                           exception: Exception,
                           context: Optional[ErrorContext] = None):
         """Log a retry failure."""
@@ -168,7 +168,7 @@ class ErrorHandler:
             exc_info=True
         )
 
-    def _log_unexpected_error(self, 
+    def _log_unexpected_error(self,
                              exception: Exception,
                              context: Optional[ErrorContext] = None):
         """Log an unexpected error."""
@@ -177,7 +177,7 @@ class ErrorHandler:
             exc_info=True
         )
 
-    def _enhance_exception(self, 
+    def _enhance_exception(self,
                           exception: Exception,
                           context: Optional[ErrorContext] = None) -> Exception:
         """Enhance an exception with additional context."""
@@ -185,7 +185,7 @@ class ErrorHandler:
             if context and not exception.context:
                 exception.context = context
             return exception
-        
+
         # Create a new TradingError with the original as cause
         return TradingError(
             message=str(exception),
@@ -204,7 +204,7 @@ def handle_errors(
 ) -> Callable:
     '''
     Decorator factory for error handling with retry logic.
-    
+
     Example:
         @handle_errors(retry_exceptions=(NetworkError,), max_retries=3)
         def fetch_data():

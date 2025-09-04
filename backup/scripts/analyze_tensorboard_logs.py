@@ -33,14 +33,14 @@ def load_tensorboard_logs(log_dir):
     """Charge les logs TensorBoard depuis le répertoire spécifié."""
     if not log_dir.exists():
         raise FileNotFoundError(f"Répertoire de logs non trouvé : {log_dir}")
-    
+
     # Recherche des fichiers d'événements TensorBoard
     event_files = list(log_dir.glob("**/events.out.tfevents.*"))
     if not event_files:
         raise FileNotFoundError(f"Aucun fichier d'événements TensorBoard trouvé dans {log_dir}")
-    
+
     print(f"Chargement des logs depuis : {event_files[0]}")
-    
+
     # Chargement des données
     ea = event_accumulator.EventAccumulator(
         str(event_files[0]),
@@ -53,7 +53,7 @@ def load_tensorboard_logs(log_dir):
         }
     )
     ea.Reload()
-    
+
     # Extraction des données
     data = {}
     for tag in ea.Tags()['scalars']:
@@ -63,7 +63,7 @@ def load_tensorboard_logs(log_dir):
             'values': [e.value for e in events],
             'wall_times': [e.wall_time for e in events]
         }
-    
+
     return data
 
 def plot_learning_curves(data, output_dir):
@@ -77,36 +77,36 @@ def plot_learning_curves(data, output_dir):
         'train/value_loss': 'Perte de Valeur',
         'train/learning_rate': 'Taux d\'Apprentissage'
     }
-    
+
     for metric_key, title in metrics.items():
         if metric_key not in data:
             print(f"Avertissement : Métrique non trouvée : {metric_key}")
             continue
-            
+
         plt.figure(figsize=(12, 6))
-        
+
         # Tracé de la métrique
-        plt.plot(data[metric_key]['steps'], data[metric_key]['values'], 
+        plt.plot(data[metric_key]['steps'], data[metric_key]['values'],
                 label=title, linewidth=2)
-        
+
         # Configuration du graphique
         plt.title(title)
         plt.xlabel('Étapes d\'Entraînement')
         plt.ylabel('Valeur')
         plt.grid(True, alpha=0.3)
-        
+
         # Ajout d'une ligne de tendance si suffisamment de points
         if len(data[metric_key]['steps']) > 5:
             z = np.polyfit(data[metric_key]['steps'], data[metric_key]['values'], 1)
             p = np.poly1d(z)
-            plt.plot(data[metric_key]['steps'], 
-                    p(data[metric_key]['steps']), 
-                    'r--', 
+            plt.plot(data[metric_key]['steps'],
+                    p(data[metric_key]['steps']),
+                    'r--',
                     label='Tendance')
-        
+
         plt.legend()
         plt.tight_layout()
-        
+
         # Sauvegarde du graphique
         filename = f"learning_{metric_key.replace('/', '_')}.png"
         output_path = output_dir / filename
@@ -119,27 +119,27 @@ def analyze_learning_stability(data, output_dir):
     if 'train/rollout/ep_rew_mean' not in data:
         print("Avertissement : Données de récompense non disponibles pour l'analyse de stabilité")
         return
-    
+
     rewards = data['train/rollout/ep_rew_mean']['values']
     steps = data['train/rollout/ep_rew_mean']['steps']
-    
+
     if len(rewards) < 2:
         print("Pas assez de données pour l'analyse de stabilité")
         return
-    
+
     # Calcul des métriques de stabilité
     mean_reward = np.mean(rewards)
     std_reward = np.std(rewards)
     max_reward = max(rewards)
     min_reward = min(rewards)
-    
+
     # Détection des tendances
     z = np.polyfit(steps, rewards, 1)
     trend_slope = z[0]  # Pente de la droite de tendance
-    
+
     # Calcul du coefficient de variation
     cv = (std_reward / mean_reward) * 100 if mean_reward != 0 else float('inf')
-    
+
     # Création du rapport
     stability_report = {
         'timestamp': datetime.now().isoformat(),
@@ -151,14 +151,14 @@ def analyze_learning_stability(data, output_dir):
         'coefficient_of_variation': float(cv),
         'is_stable': abs(trend_slope) < 0.01 and cv < 30.0  # Critères de stabilité
     }
-    
+
     # Sauvegarde du rapport
     report_path = output_dir / 'stability_report.json'
     with open(report_path, 'w') as f:
         json.dump(stability_report, f, indent=2)
-    
+
     print(f"Rapport de stabilité sauvegardé : {report_path}")
-    
+
     # Affichage des résultats
     print("\n=== Analyse de Stabilité de l'Apprentissage ===")
     print(f"Récompense moyenne: {mean_reward:.2f} ± {std_reward:.2f}")
@@ -172,18 +172,18 @@ def main():
         # Chargement des logs TensorBoard
         print("Chargement des logs TensorBoard...")
         logs_data = load_tensorboard_logs(ONLINE_LOGS_DIR)
-        
+
         # Création des graphiques d'apprentissage
         print("\nGénération des graphiques d'apprentissage...")
         plot_learning_curves(logs_data, TENSORBOARD_DIR)
-        
+
         # Analyse de la stabilité
         print("\nAnalyse de la stabilité de l'apprentissage...")
         analyze_learning_stability(logs_data, TENSORBOARD_DIR)
-        
+
         print("\nAnalyse terminée avec succès!")
         print(f"Résultats sauvegardés dans : {TENSORBOARD_DIR.absolute()}")
-        
+
     except Exception as e:
         print(f"Erreur lors de l'analyse des logs TensorBoard : {str(e)}")
         raise

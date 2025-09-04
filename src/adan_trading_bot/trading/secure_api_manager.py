@@ -132,10 +132,10 @@ class SecureAPIManager:
 
         # Perform security validation at startup
         self._validate_security_at_startup()
-        
+
         # Load credentials from environment variables first
         self._load_credentials_from_env()
-        
+
         logger.info("SecureAPIManager initialized")
 
     def get_exchange_info(self, exchange: ExchangeType, force_refresh: bool = False) -> Optional[Dict[str, Any]]:
@@ -619,15 +619,15 @@ class SecureAPIManager:
     def _validate_security_at_startup(self) -> None:
         """Valide la sécurité au démarrage pour prévenir les clés hardcodées"""
         logger.info("Performing security validation at startup...")
-        
+
         # Liste des fichiers à vérifier pour les clés hardcodées
         suspicious_files = [
             "gemini_api_keys.txt",
-            "api_keys.txt", 
+            "api_keys.txt",
             "keys.txt",
             "secrets.txt"
         ]
-        
+
         # Patterns de clés API communes
         api_key_patterns = [
             r'AIzaSy[A-Za-z0-9_-]{33}',  # Google API keys
@@ -635,9 +635,9 @@ class SecureAPIManager:
             r'[A-Za-z0-9]{64}',          # Generic 64-char keys
             r'[A-Za-z0-9]{32}',          # Generic 32-char keys
         ]
-        
+
         security_violations = []
-        
+
         # Vérifier les fichiers suspects
         for file_name in suspicious_files:
             file_path = Path(file_name)
@@ -651,7 +651,7 @@ class SecureAPIManager:
                             break
                 except Exception as e:
                     logger.warning(f"Could not read {file_name}: {e}")
-        
+
         # Vérifier les variables d'environnement pour des patterns suspects
         for env_var, value in os.environ.items():
             if env_var.upper().endswith(('_KEY', '_SECRET', '_TOKEN')) and value:
@@ -660,18 +660,18 @@ class SecureAPIManager:
                     if re.match(pattern, value):
                         logger.info(f"Found API key in environment variable: {env_var}")
                         break
-        
+
         if security_violations:
             error_msg = "SECURITY VIOLATION: " + "; ".join(security_violations)
             logger.error(error_msg)
             raise SecurityError(error_msg + "\n\nPlease move all API keys to environment variables and remove hardcoded files.")
-        
+
         logger.info("Security validation passed - no hardcoded API keys detected")
 
     def _load_credentials_from_env(self) -> None:
         """Charge les credentials depuis les variables d'environnement (priorité sur les fichiers chiffrés)"""
         logger.info("Loading credentials from environment variables...")
-        
+
         # Mapping des exchanges vers leurs variables d'environnement
         env_mappings = {
             ExchangeType.BINANCE: {
@@ -707,18 +707,18 @@ class SecureAPIManager:
                 'sandbox': 'KRAKEN_SANDBOX'
             }
         }
-        
+
         loaded_count = 0
-        
+
         for exchange, env_vars in env_mappings.items():
             api_key = os.getenv(env_vars['api_key'])
             api_secret = os.getenv(env_vars['api_secret'])
-            
+
             if api_key and api_secret:
                 # Récupérer les paramètres optionnels
                 passphrase = os.getenv(env_vars.get('passphrase'))
                 sandbox = os.getenv(env_vars.get('sandbox', 'true')).lower() in ('true', '1', 'yes')
-                
+
                 # Créer les credentials
                 credentials = APICredentials(
                     exchange=exchange,
@@ -728,14 +728,14 @@ class SecureAPIManager:
                     sandbox=sandbox,
                     name="Environment"
                 )
-                
+
                 # Ajouter aux credentials (sans chiffrement car déjà en env)
                 cred_id = f"{exchange.value}_Environment"
                 self.credentials[cred_id] = credentials
                 loaded_count += 1
-                
+
                 logger.info(f"Loaded credentials for {exchange.value} from environment variables")
-        
+
         if loaded_count > 0:
             logger.info(f"Successfully loaded {loaded_count} credentials from environment variables")
         else:
@@ -747,7 +747,7 @@ class SecureAPIManager:
         env_cred_id = f"{exchange.value}_Environment"
         if env_cred_id in self.credentials:
             return self.credentials[env_cred_id]
-        
+
         # Fallback vers les credentials par défaut
         cred_id = f"{exchange.value}_{name}"
         return self.credentials.get(cred_id)

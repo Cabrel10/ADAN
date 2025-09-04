@@ -22,7 +22,7 @@ ESSENTIAL_PATHS = [
     "scripts/training_dashboard.py",
     "src/adan_trading_bot/",
     "api/",
-    
+
     # Fichiers de configuration
     "requirements.txt",
     "setup.py",
@@ -40,7 +40,7 @@ def is_essential(file_path: Path) -> bool:
     # Convertir en chemin relatif par rapport au projet
     rel_path = file_path.relative_to(PROJECT_ROOT)
     rel_path_str = str(rel_path).replace('\\', '/')
-    
+
     # Vérifier si le fichier ou son dossier parent est dans les chemins essentiels
     for essential in ESSENTIAL_PATHS:
         essential = essential.rstrip('/')
@@ -52,10 +52,10 @@ def move_to_backup(file_path: Path) -> None:
     """Déplace un fichier vers le dossier de sauvegarde."""
     rel_path = file_path.relative_to(PROJECT_ROOT)
     target_path = BACKUP_DIR / rel_path
-    
+
     # Créer les dossiers parents si nécessaire
     target_path.parent.mkdir(parents=True, exist_ok=True)
-    
+
     # Déplacer le fichier
     shutil.move(str(file_path), str(target_path))
     print(f"Déplacé : {rel_path}")
@@ -63,22 +63,22 @@ def move_to_backup(file_path: Path) -> None:
 def clean_project():
     """Nettoie le projet en déplaçant les fichiers non essentiels."""
     create_backup_dir()
-    
+
     # Parcourir tous les fichiers Python
     for root, _, files in os.walk(PROJECT_ROOT):
         root_path = Path(root)
-        
+
         # Ignorer certains dossiers
-        if any(part.startswith(('.', '__pycache__', 'venv', '.venv', 'env', '.env', 'backup')) 
+        if any(part.startswith(('.', '__pycache__', 'venv', '.venv', 'env', '.env', 'backup'))
                for part in root_path.parts):
             continue
-            
+
         for file in files:
             if file.endswith('.py'):
                 file_path = root_path / file
                 if not is_essential(file_path):
                     move_to_backup(file_path)
-    
+
     print("\nNettoyage terminé. Les fichiers non essentiels ont été déplacés vers le dossier 'backup'.")
     print("Les fichiers suivants sont considérés comme essentiels :")
     for path in ESSENTIAL_PATHS:

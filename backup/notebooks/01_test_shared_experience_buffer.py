@@ -145,13 +145,13 @@ def run_benchmark(config):
     num_workers = config['num_workers']
     batch_size = config['batch_size']
     num_batches = config['num_batches']
-    
+
     # Création du buffer
     buffer = SharedExperienceBuffer(buffer_size=buffer_size)
-    
+
     # Création des workers
     workers = []
-    
+
     # Workers d'ajout
     for i in range(num_workers):
         w = multiprocessing.Process(
@@ -159,7 +159,7 @@ def run_benchmark(config):
             args=(buffer, i, num_batches * batch_size // num_workers)
         )
         workers.append(w)
-    
+
     # Workers d'échantillonnage
     for _ in range(num_workers):
         w = multiprocessing.Process(
@@ -167,22 +167,22 @@ def run_benchmark(config):
             args=(buffer, num_batches, batch_size)
         )
         workers.append(w)
-    
+
     # Mesure des performances
     start_time = time.time()
-    
+
     for w in workers:
         w.start()
-    
+
     for w in workers:
         w.join()
-    
+
     total_time = time.time() - start_time
-    
+
     # Calcul des métriques
     total_experiences = num_workers * num_batches * batch_size
     throughput = total_experiences / total_time
-    
+
     return {
         'buffer_size': buffer_size,
         'num_workers': num_workers,
@@ -226,7 +226,7 @@ plt.subplot(1, 2, 1)
 for buffer_size in sorted(df_results['buffer_size'].unique()):
     mask = df_results['buffer_size'] == buffer_size
     plt.plot(
-        df_results[mask]['num_workers'], 
+        df_results[mask]['num_workers'],
         df_results[mask]['throughput_exp_per_sec'],
         'o-',
         label=f'Buffer size: {buffer_size}'
@@ -241,7 +241,7 @@ plt.subplot(1, 2, 2)
 for num_workers in sorted(df_results['num_workers'].unique()):
     mask = df_results['num_workers'] == num_workers
     plt.plot(
-        df_results[mask]['batch_size'], 
+        df_results[mask]['batch_size'],
         df_results[mask]['avg_latency_per_batch'] * 1000,  # en ms
         's-',
         label=f'{num_workers} workers'

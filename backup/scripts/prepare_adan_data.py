@@ -88,13 +88,13 @@ def download_data(pair: str, interval: str) -> pd.DataFrame: # Removed 'period' 
                 'defaultType': 'spot',  # Changed from 'future' to 'spot'
             },
         })
-        
+
         # Load markets to ensure symbols are available
         exchange.load_markets()
 
         # Convert start date to milliseconds timestamp
         since_timestamp = int(START_DATE.timestamp() * 1000)
-        
+
         ohlcv_data = fetch_ohlcv_ccxt(exchange, pair, CCXT_INTERVALS[interval], since_timestamp)
 
         if not ohlcv_data:
@@ -105,10 +105,10 @@ def download_data(pair: str, interval: str) -> pd.DataFrame: # Removed 'period' 
         df['Date'] = pd.to_datetime(df['timestamp'], unit='ms')
         df.set_index('Date', inplace=True)
         df.drop('timestamp', axis=1, inplace=True)
-        
+
         # Rename columns to match yfinance output for compatibility with pandas_ta
         df.rename(columns={'open': 'Open', 'high': 'High', 'low': 'Low', 'close': 'Close', 'volume': 'Volume'}, inplace=True)
-        
+
         if df.empty:
             print(f"DataFrame is empty after processing OHLCV data for {pair} {interval}.")
             return None
@@ -126,10 +126,10 @@ def standardize_column_names(df: pd.DataFrame) -> pd.DataFrame:
     """Standardise les noms de colonnes pour correspondre à la configuration."""
     # Sauvegarder les noms de colonnes originaux
     original_columns = df.columns.tolist()
-    
+
     # Convertir tous les noms de colonnes en majuscules pour la correspondance
     df.columns = [col.upper() for col in df.columns]
-    
+
     # Mappage des noms d'indicateurs vers les noms standardisés
     column_mapping = {
         'MACDH_12_26_9': 'MACD_HIST_12_26_9',
@@ -161,17 +161,17 @@ def standardize_column_names(df: pd.DataFrame) -> pd.DataFrame:
         'STOCH_K_14_3_3': 'STOCHk_14_3_3',
         'STOCH_D_14_3_3': 'STOCHd_14_3_3',
     }
-    
+
     # Appliquer le mapping
     rename_dict = {k: v for k, v in column_mapping.items() if k in df.columns}
     if rename_dict:
         print(f"  Renommage des colonnes: {rename_dict}")
         df = df.rename(columns=rename_dict)
-    
+
     # Afficher les colonnes avant et après le renommage
     print(f"  Colonnes avant standardisation: {original_columns}")
     print(f"  Colonnes après standardisation: {df.columns.tolist()}")
-    
+
     return df
 
 def calculate_indicators(df: pd.DataFrame, interval: str) -> pd.DataFrame:
@@ -182,7 +182,7 @@ def calculate_indicators(df: pd.DataFrame, interval: str) -> pd.DataFrame:
 
     # Standardiser les noms de colonnes d'entrée
     df.columns = [col.upper() for col in df.columns]
-    
+
     # S'assurer que les colonnes nécessaires sont présentes
     required_columns = ['OPEN', 'HIGH', 'LOW', 'CLOSE', 'VOLUME']
     missing_cols = [col for col in required_columns if col not in df.columns]
@@ -195,7 +195,7 @@ def calculate_indicators(df: pd.DataFrame, interval: str) -> pd.DataFrame:
 
     # Copie pour éviter les modifications sur place
     df = df.copy()
-    
+
     # S'assurer que l'index est un DateTimeIndex
     if not isinstance(df.index, pd.DatetimeIndex):
         if 'DATE' in df.columns:
@@ -203,7 +203,7 @@ def calculate_indicators(df: pd.DataFrame, interval: str) -> pd.DataFrame:
             df.set_index('DATE', inplace=True)
         else:
             df.index = pd.to_datetime(df.index)
-    
+
     # Trier par date pour s'assurer de l'ordre chronologique
     df.sort_index(inplace=True)
 
@@ -280,7 +280,7 @@ def calculate_indicators(df: pd.DataFrame, interval: str) -> pd.DataFrame:
         # Renommer la colonne VWAP pour correspondre à la configuration
         if 'VWAP_D' in df.columns:
             df.rename(columns={'VWAP_D': 'VWAP_D'}, inplace=True)
-    
+
     if interval == '4h':
         df.ta.vwap(anchor='W', append=True)  # VWAP hebdomadaire
         # Renommer la colonne VWAP pour correspondre à la configuration
@@ -289,16 +289,16 @@ def calculate_indicators(df: pd.DataFrame, interval: str) -> pd.DataFrame:
 
     # Standardisation des noms de colonnes
     df = standardize_column_names(df)
-    
+
     # Correction des noms de colonnes pour correspondre à la configuration
     df = df.rename(columns={
         'STOCHK_14_3_3': 'STOCHk_14_3_3',
         'STOCHD_14_3_3': 'STOCHd_14_3_3'
     })
-    
+
     # Calcul des indicateurs et remplir les valeurs manquantes
     print(f"  calculate_indicators: DataFrame shape after indicator calculation: {df.shape}")
-    
+
     # Vérifier les valeurs manquantes dans les nouvelles colonnes
     new_columns = [col for col in df.columns if col not in original_columns]
     print(f"  calculate_indicators: NaN count per new indicator column:")
@@ -313,43 +313,43 @@ def calculate_indicators(df: pd.DataFrame, interval: str) -> pd.DataFrame:
     # Remplir les valeurs manquantes
     df.fillna(method='ffill', inplace=True)  # Remplir avec la dernière valeur valide
     df.fillna(0, inplace=True)  # Remplir les valeurs restantes avec 0
-    
+
     total_nans_after = df.isnull().sum().sum()
     print(f"  calculate_indicators: Total NaN count after filling: {total_nans_after}")
-    
+
     # Supprimer les colonnes en double tout en conservant l'ordre
     df = df.loc[:, ~df.columns.duplicated()]
-    
+
     # Sélectionner uniquement les colonnes nécessaires selon la configuration
     # Note: Les noms de colonnes doivent correspondre exactement à la configuration, y compris la casse
     expected_columns = {
-        '5m': ['OPEN', 'HIGH', 'LOW', 'CLOSE', 'VOLUME', 'RSI_14', 'STOCHk_14_3_3', 'STOCHd_14_3_3', 
+        '5m': ['OPEN', 'HIGH', 'LOW', 'CLOSE', 'VOLUME', 'RSI_14', 'STOCHk_14_3_3', 'STOCHd_14_3_3',
                'CCI_20_0.015', 'ROC_9', 'MFI_14', 'EMA_5', 'EMA_20', 'SUPERTREND_14_2.0', 'PSAR_0.02_0.2'],
-        '1h': ['OPEN', 'HIGH', 'LOW', 'CLOSE', 'VOLUME', 'RSI_14', 'MACD_12_26_9', 'MACD_HIST_12_26_9', 
-               'CCI_20_0.015', 'MFI_14', 'EMA_50', 'EMA_100', 'SMA_200', 'ISA_9', 'ISB_26', 
+        '1h': ['OPEN', 'HIGH', 'LOW', 'CLOSE', 'VOLUME', 'RSI_14', 'MACD_12_26_9', 'MACD_HIST_12_26_9',
+               'CCI_20_0.015', 'MFI_14', 'EMA_50', 'EMA_100', 'SMA_200', 'ISA_9', 'ISB_26',
                'ITS_9', 'IKS_26', 'ICS_26', 'PSAR_0.02_0.2'],
-        '4h': ['OPEN', 'HIGH', 'LOW', 'CLOSE', 'VOLUME', 'RSI_14', 'MACD_12_26_9', 'CCI_20_0.015', 
-               'MFI_14', 'EMA_50', 'SMA_200', 'ISA_9', 'ISB_26', 'ITS_9', 'IKS_26', 'ICS_26', 
+        '4h': ['OPEN', 'HIGH', 'LOW', 'CLOSE', 'VOLUME', 'RSI_14', 'MACD_12_26_9', 'CCI_20_0.015',
+               'MFI_14', 'EMA_50', 'SMA_200', 'ISA_9', 'ISB_26', 'ITS_9', 'IKS_26', 'ICS_26',
                'SUPERTREND_14_3.0', 'PSAR_0.02_0.2']
     }
-    
+
     # S'assurer que toutes les colonnes attendues sont présentes
     available_columns = df.columns.tolist()
     missing_columns = [col for col in expected_columns.get(interval, []) if col not in available_columns]
-    
+
     if missing_columns:
         print(f"  Attention: Colonnes manquantes dans les données générées: {missing_columns}")
         # Ajouter des colonnes vides pour les indicateurs manquants
         for col in missing_columns:
             df[col] = 0.0
-    
+
     # Sélectionner uniquement les colonnes attendues
     selected_columns = [col for col in expected_columns.get(interval, []) if col in df.columns]
     df = df[selected_columns]
-    
+
     print(f"  calculate_indicators: Final DataFrame shape: {df.shape}")
     print(f"  calculate_indicators: Final columns: {df.columns.tolist()}")
-    
+
     return df
 
 

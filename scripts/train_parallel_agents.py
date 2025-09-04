@@ -1027,21 +1027,25 @@ def make_env(rank: int, seed: Optional[int] = None, config: Optional[Dict] = Non
     Returns:
         Un environnement Gym valide
     """
+    # Configuration par défaut si config n'est pas fourni
+    if config is None:
+        config = {}
+
     # Configuration du worker si non fournie
     if worker_config is None:
         # Récupérer la liste des actifs depuis la configuration
-        data_config = config.get("data", {})
-        file_structure = data_config.get("file_structure", {})
-        assets = file_structure.get("assets", ["BTCUSDT"])
-        timeframes = file_structure.get("timeframes", ["5m", "1h", "4h"])
-
+        assets = [a.lower() for a in config.get("data", {}).get("assets", ["btcusdt"])]
+        timeframes = [str(tf).lower() for tf in config.get("data", {}).get("timeframes", ["5m", "1h", "4h"])]
+        data_split = config.get("data", {}).get("data_split", "val").lower()
+        
         worker_config = {
             "rank": rank,
-            "num_workers": config.get("num_workers", 1) if config else 1,
+            "num_workers": config.get("num_workers", 1),
             "assets": assets,
             "timeframes": timeframes,
+            "data_split": data_split,
             "data_loader": {
-                "batch_size": config.get("batch_size", 32) if config else 32,
+                "batch_size": config.get("batch_size", 32),
                 "shuffle": True,
                 "num_workers": 0  # Désactiver le multithreading pour éviter les problèmes
             }
@@ -1050,42 +1054,97 @@ def make_env(rank: int, seed: Optional[int] = None, config: Optional[Dict] = Non
     # Extraire les paramètres nécessaires de la configuration
     data_config = config.get("data", {})
     env_config = config.get("environment", {})
-
-    # Récupérer les paramètres requis
-    timeframes = data_config.get("file_structure", {}).get("timeframes", ["5m", "1h", "4h"])
-    window_size = env_config.get("window_size", 100)
-    features_config = env_config.get("features_config", {
-        "5m": ["OPEN", "HIGH", "LOW", "CLOSE", "VOLUME"],
-        "1h": ["OPEN", "HIGH", "LOW", "CLOSE", "VOLUME"],
-        "4h": ["OPEN", "HIGH", "LOW", "CLOSE", "VOLUME"]
-    })
-
-    # Define the base data directory
-    base_data_dir = "data/processed/indicators/val"
+    
+    # Récupérer les paramètres du worker
+    assets = [a.lower() for a in worker_config.get("assets", [])]
+    timeframes = [str(tf).lower() for tf in worker_config.get("timeframes", [])]
+    
+    # Récupérer le data_split de la configuration du worker, avec une valeur par défaut
+    data_split = worker_config.get("data_split", "val").lower()
+    
+    # Dossier de base des données (utiliser data_dirs[data_split] s'il existe, sinon data_dirs.base)
+    data_dirs = config.get("data", {}).get("data_dirs", {})
+    
+    # Utiliser le dossier spécifique au split s'il existe, sinon utiliser le dossier de base
+    if data_split in data_dirs:
+        data_dir = Path(data_dirs[data_split])
+    elif "base" in data_dirs:
+        data_dir = Path(data_dirs["base"]) / data_split
+    else:
+        data_dir = Path("data/processed/indicators") / data_split
+    
+    logger.info(f"Configuration data_dirs: {data_dirs}")
+    logger.info(f"Data split utilisé: {data_split}")
+    logger.info(f"Dossier de données final: {data_dir}")
+    
+    # Vérifier que le répertoire existe
+    if not data_dir.exists():
+        raise FileNotFoundError(f"Le répertoire de données {data_dir} n'existe pas")
+    
+    # Vérifier que le répertoire existe
+    if not data_dir.exists():
+        raise FileNotFoundError(f"Le répertoire de données {data_dir} n'existe pas")
+        
+    logger.info(f"Chargement des données depuis : {data_dir}")
+    logger.info(f"Actifs: {assets}")
+    logger.info(f"Timeframes: {timeframes}")
+    logger.info(f"Split de données: {data_split}")
+    
+    # Dictionnaire pour stocker les données chargées
     data = {}
     data_found = False
-
-    # Load data for each asset and timeframe
-    for asset in worker_config.get("assets", ["BTCUSDT"]):
-        data[asset] = {}
+    
+    # Charger les données pour chaque actif et chaque timeframe
+    for asset in assets:
+        # Nettoyer le nom de l'actif (supprimer / et -) et forcer en minuscules
+        clean_asset = asset.replace("/", "").replace("-", "").lower()
+        data[clean_asset.upper()] = {}
+        asset_data_found = False
+        
         for tf in timeframes:
-            # Construct the path to the data file
-            file_path = os.path.join(base_data_dir, asset, f"{tf}.parquet")
-
-            if os.path.exists(file_path):
-                try:
-                    df = pd.read_parquet(file_path)
-                    data[asset][tf] = df
-                    logger.info(f"Données chargées depuis {file_path}: {len(df)} lignes")
-                    data_found = True
-                except Exception as e:
-                    logger.error(f"Erreur lors du chargement de {file_path}: {str(e)}")
-            else:
+            # Construire le chemin du fichier dans le format: {split}/{asset}/{timeframe}.parquet
+            file_path = data_dir / clean_asset / f"{tf}.parquet"
+            
+            # Vérifier si le fichier existe
+            if not file_path.exists():
                 logger.warning(f"Fichier non trouvé: {file_path}")
+                continue
+                
+            try:
+                # Charger les données Parquet
+                df = pd.read_parquet(file_path)
+                
+                # Vérifier que le DataFrame n'est pas vide
+                if df.empty:
+                    logger.warning(f"Le fichier {file_path} est vide.")
+                    continue
+                
+                # Stocker les données dans la structure attendue
+                data[clean_asset.upper()][tf] = df
+                logger.info(f"Données chargées: {clean_asset.upper()}/{tf} - {len(df)} lignes")
+                data_found = True
+                asset_data_found = True
+                
+            except Exception as e:
+                logger.error(f"Erreur lors du chargement de {file_path}: {str(e)}")
+        
+        if not asset_data_found:
+            logger.warning(f"Aucune donnée valide trouvée pour l'actif {clean_asset.upper()}")
+            del data[clean_asset.upper()]
 
-    if not any(data.values()):
-        raise ValueError("Aucune donnée n'a pu être chargée. Vérifiez les chemins des fichiers de données.")
+    if not data:
+        raise ValueError(
+            "Aucune donnée valide n'a pu être chargée. "
+            f"Vérifiez les chemins dans la configuration et assurez-vous que les fichiers existent dans {base_data_dir}."
+        )
 
+    # Définir la taille de la fenêtre et la configuration des caractéristiques
+    window_size = config.get("environment", {}).get("window_size", 50)
+    features_config = config.get("environment", {}).get("features_config", {})
+    
+    logger.info(f"Taille de la fenêtre: {window_size}")
+    logger.info(f"Configuration des caractéristiques: {features_config}")
+    
     # Créer l'environnement avec les données chargées
     env = MultiAssetChunkedEnv(
         data=data,
@@ -1141,7 +1200,7 @@ def make_env(rank: int, seed: Optional[int] = None, config: Optional[Dict] = Non
     return env
 
 def main(
-    config_path: str = "config/config.yaml",
+    config_path: str = "bot/config/config.yaml",
     timeout: Optional[int] = None,
     checkpoint_dir: str = "checkpoints",
     shared_model_path: Optional[str] = None,
@@ -1795,7 +1854,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--config",
         type=str,
-        default="config/config.yaml",
+        default="bot/config/config.yaml",
         help="Chemin vers le fichier de configuration"
     )
     parser.add_argument(

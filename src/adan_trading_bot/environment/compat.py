@@ -3,7 +3,7 @@ import gym  # noqa: F401
 class SB3GymCompatibilityWrapper(gym.Wrapper):
     """
     Rend un environnement Gym >=0.26 compatible avec SB3.
-    
+
     - reset() retourne obs (et non (obs, info))
     - step() retourne (obs, reward, done, info) en fusionnant
       terminated+truncated si nécessaire

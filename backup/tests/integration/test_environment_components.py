@@ -48,7 +48,7 @@ class TestEnvironmentIntegration(unittest.TestCase):
                 ]
             }
         }
-        
+
         # Créer des données factices pour les tests
         cls.create_test_data()
 
@@ -82,7 +82,7 @@ class TestEnvironmentIntegration(unittest.TestCase):
         self.env = MultiAssetChunkedEnv(self.config, {})
         self.validator = ObservationValidator()
         self.action_translator = ActionTranslator(self.config['environment']['assets'])
-        
+
     def test_environment_initialization(self):
         """Vérifie que l'environnement s'initialise correctement."""
         self.assertIsNotNone(self.env)

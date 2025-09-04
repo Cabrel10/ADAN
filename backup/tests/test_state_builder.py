@@ -28,7 +28,7 @@ class TestStateBuilder(unittest.TestCase):
                 "4h_ICHIMOKU_9_26_52", "4h_SUPERTREND_14_3.0", "4h_PSAR_0.02_0.2"
             ]
         }
-        
+
         # Créer des données de test
         self.test_data = {}
         for timeframe in self.features_config.keys():
@@ -60,7 +60,7 @@ class TestStateBuilder(unittest.TestCase):
                 "PSAR_0.02_0.2": np.random.rand(100) * 100,
                 "ICHIMOKU_9_26_52": np.random.rand(100) * 100
             }
-            
+
             # Ajouter le suffixe timeframe à chaque colonne
             data = pd.DataFrame({
                 f"{timeframe}_{col}": base_columns[col]
@@ -76,7 +76,7 @@ class TestStateBuilder(unittest.TestCase):
         self.assertIsNotNone(state_builder)
         self.assertEqual(len(state_builder.timeframes), 3)
         self.assertEqual(state_builder.base_window_size, 20)
-        
+
         # Test avec configuration personnalisée
         custom_state_builder = StateBuilder(
             features_config=self.features_config,
@@ -86,7 +86,7 @@ class TestStateBuilder(unittest.TestCase):
         self.assertEqual(len(custom_state_builder.timeframes), 3)
         self.assertEqual(custom_state_builder.base_window_size, 3)
         self.assertTrue(custom_state_builder.include_portfolio_state)
-        
+
         # Vérifier les métriques de performance initiales
         metrics = custom_state_builder.get_performance_metrics()
         self.assertEqual(metrics['gc_collections'], 0)
@@ -100,21 +100,21 @@ class TestStateBuilder(unittest.TestCase):
             features_config=self.features_config,
             include_portfolio_state=False
         )
-        
+
         # Vérifier la forme de base
         shape = state_builder.get_observation_shape()
         # get_observation_shape() retourne un tuple (total_flattened_observation_size,)
         self.assertEqual(len(shape), 1)
-        
+
         # Vérifier que la taille totale est cohérente
         expected_size = (
-            len(state_builder.timeframes) * 
-            state_builder.window_size * 
+            len(state_builder.timeframes) *
+            state_builder.window_size *
             state_builder.max_features
         )
         if state_builder.include_portfolio_state:
             expected_size += 17  # Taille de l'état du portefeuille
-            
+
         self.assertEqual(shape[0], expected_size)
 
     def test_build_observation(self):
@@ -124,34 +124,34 @@ class TestStateBuilder(unittest.TestCase):
             window_size=3,
             include_portfolio_state=False
         )
-        
+
         # Initialiser les scalers avec les données
         state_builder.fit_scalers(self.test_data)
-        
+
         # Construire une observation multi-canal à partir des données de test
         observation = state_builder.build_multi_channel_observation(
             current_idx=10,
             data=self.test_data
         )
-        
+
         # Vérifier que l'observation n'est pas vide
         self.assertIsNotNone(observation)
-        
+
         # Vérifier que l'observation a la bonne forme
         # (n_timeframes, window_size, n_features)
         self.assertEqual(len(observation.shape), 3)
         self.assertEqual(observation.shape[0], len(state_builder.timeframes))
         self.assertEqual(observation.shape[1], state_builder.window_size)
-        
+
         # Vérifier que les valeurs ne sont pas NaN
         self.assertFalse(np.isnan(observation).any())
-        
+
         # Vérifier les métriques de performance après la construction de l'observation
         metrics = state_builder.get_performance_metrics()
         self.assertGreaterEqual(metrics['gc_collections'], 0)
         self.assertEqual(metrics['errors_count'], 0)
         self.assertGreaterEqual(metrics['warnings_count'], 0)
-        
+
     def test_build_adaptive_observation_with_portfolio(self):
         """Teste la construction d'une observation adaptative avec état du portefeuille"""
         # Créer un faux gestionnaire de portefeuille avec les attributs nécessaires
@@ -161,7 +161,7 @@ class TestStateBuilder(unittest.TestCase):
                 self.cash = 5000.0
                 self.positions = {'BTC': {'amount': 1.0, 'current_price': 5000.0}}
                 self.current_step = 0
-                
+
             def get_portfolio_state(self):
                 return {
                     'cash': self.cash,
@@ -171,37 +171,37 @@ class TestStateBuilder(unittest.TestCase):
                     'btc_value': (self.positions.get('BTC', {}).get('amount', 0.0) *
                                 self.positions.get('BTC', {}).get('current_price', 0.0))
                 }
-        
+
         # Créer un StateBuilder avec portfolio_state activé
         state_builder = StateBuilder(
             features_config=self.features_config,
             window_size=3,
             include_portfolio_state=True
         )
-        
+
         # Initialiser les scalers avec les données
         state_builder.fit_scalers(self.test_data)
-        
+
         # Créer un faux gestionnaire de portefeuille
         portfolio_manager = MockPortfolioManager()
-        
+
         # Construire une observation adaptative
         observation = state_builder.build_adaptive_observation(
             current_idx=10,
             data=self.test_data,
             portfolio_manager=portfolio_manager
         )
-        
+
         # Vérifier que l'observation n'est pas vide
         self.assertIsNotNone(observation)
-        
+
         # Vérifier que l'observation a la bonne forme
         expected_size = state_builder.total_flattened_observation_size
         self.assertEqual(observation.shape, (expected_size,))
-        
+
         # Vérifier qu'il n'y a pas de valeurs NaN dans l'observation
         self.assertFalse(np.isnan(observation).any())
-        
+
         # Vérifier que l'état du portefeuille a été correctement intégré
         # Les dernières valeurs du vecteur d'observation devraient contenir l'état du portefeuille
         portfolio_state_size = 17  # Taille attendue de l'état du portefeuille

@@ -27,14 +27,14 @@ CONFIG_PATH = Path(__file__).parent.parent / 'config' / 'config.yaml'
 
 class TestIntegration(unittest.TestCase):
     """Integration tests for the ADAN Trading Bot."""
-    
+
     @classmethod
     def setUpClass(cls):
         """Set up test fixtures before all tests."""
         # Load configuration
         with open(CONFIG_PATH, 'r') as f:
             cls.config = yaml.safe_load(f)
-        
+
         # Create sample market data for testing
         cls.sample_data = {
             'BTC/USDT': pd.DataFrame({
@@ -52,14 +52,14 @@ class TestIntegration(unittest.TestCase):
                 'volume': [1000, 1200, 1500, 1300, 1400]
             })
         }
-    
+
     @classmethod
     def setUpClass(cls):
         """Set up test fixtures before all tests."""
         # Load configuration
         with open(CONFIG_PATH, 'r') as f:
             cls.config = yaml.safe_load(f)
-        
+
         # Create sample market data for testing
         cls.sample_data = {
             'BTC/USDT': pd.DataFrame({
@@ -154,7 +154,7 @@ class TestIntegration(unittest.TestCase):
             },
             data_loader_instance=cls.dummy_data_loader
         )
-        
+
         # Initialize required components if not already done by the environment
         if not hasattr(cls.env, 'portfolio') or cls.env.portfolio is None:
             # Create a simple portfolio manager for testing
@@ -164,22 +164,22 @@ class TestIntegration(unittest.TestCase):
                 'positions': {},
                 'equity': 10000.0
             })()
-            
+
         if not hasattr(cls.env, 'order_manager') or cls.env.order_manager is None:
             # Create a simple mock order manager
             cls.env.order_manager = MockOrderManager()
-            
+
         if not hasattr(cls.env, 'safety_manager') or cls.env.safety_manager is None:
             # Create a simple mock for safety manager
             class MockSafetyManager:
                 def __init__(self):
                     self.active_orders = []
-                    
+
                 def check_and_execute_orders(self, prices):
                     return []
-                    
+
             cls.env.safety_manager = MockSafetyManager()
-            
+
         # Ensure required attributes exist
         if not hasattr(cls.env, 'initial_balance'):
             cls.env.initial_balance = 10000.0
@@ -189,19 +189,19 @@ class TestIntegration(unittest.TestCase):
     def setUp(self):
         # Reset the environment for each test method
         self.env.reset()
-        
+
     def test_environment_initialization(self):
         """Test that the environment initializes correctly."""
         self.assertIsNotNone(self.env)
         self.assertEqual(len(self.env.assets), 2)
         self.assertIn('BTC/USDT', self.env.assets)
         self.assertIn('ETH/USDT', self.env.assets)
-    
+
     def test_portfolio_initialization(self):
         """Test that the portfolio manager initializes correctly."""
         portfolio = self.env.portfolio
         self.assertIsNotNone(portfolio)
-        
+
         # Check if portfolio has 'equity' or 'balance' attribute
         if hasattr(portfolio, 'get_balance'):
             balance = portfolio.get_balance()
@@ -210,24 +210,24 @@ class TestIntegration(unittest.TestCase):
         elif hasattr(portfolio, 'equity'):
             self.assertIsInstance(portfolio.equity, (int, float))
             self.assertGreaterEqual(portfolio.equity, 0)
-            
+
         # Check positions - might be empty or contain initial positions
         self.assertIsNotNone(portfolio.positions)
         self.assertIsInstance(len(portfolio.positions), int)
-    
+
     def test_order_execution(self):
         """Test that orders are executed correctly."""
         # Reset environment
         state, _ = self.env.reset()
-        
+
         # Test buying BTC
         action = np.array([1.0, 0.0])  # Full long on BTC, no action on ETH
         next_state, reward, done, _, info = self.env.step(action)
-        
+
         # Check that a position was opened
         positions = self.env.portfolio.positions
         self.assertGreaterEqual(len(positions), 0)  # At least one position
-        
+
         # If we have positions, check their properties
         if positions:
             position = next(iter(positions.values()))
@@ -236,41 +236,41 @@ class TestIntegration(unittest.TestCase):
                 self.assertIn(position.symbol, ['BTC/USDT', 'ETH/USDT'])  # Should be one of our test assets
             elif hasattr(position, 'asset'):
                 self.assertIn(position.asset, ['BTC/USDT', 'ETH/USDT'])  # Should be one of our test assets
-                
+
             # Check if position has 'side' attribute
             if hasattr(position, 'side'):
                 self.assertIn(position.side, ['long', 'buy'])  # Check side is valid
-    
+
     def test_risk_management(self):
         """Test that risk management rules are enforced."""
         # Reset environment
         state, _ = self.env.reset()
-        
+
         # Get current price and calculate position size that would exceed max position size
         current_price = self.sample_data['BTC/USDT']['close'].iloc[0]
         max_position_size = 0.1  # From our test config
         max_allowed = 10000.0 * max_position_size  # Initial balance * max position size
-        
+
         # Try to open a position that's too large
         action = np.array([1.0, 0.0])  # Full long on BTC
         next_state, reward, done, _, info = self.env.step(action)
-        
+
         # Check that the position size is within limits
         positions = self.env.portfolio.positions
         self.assertGreater(len(positions), 0)
-        
+
         # Calculate position value
         position = next(iter(positions.values()))
         position_value = position.size * (position.entry_price or 0)
-        
+
         # Allow 1% tolerance for rounding
         self.assertLessEqual(position_value, max_allowed * 1.01)
-    
+
     def test_portfolio_metrics(self):
         """Test that portfolio metrics are calculated correctly."""
         # Reset environment
         state, _ = self.env.reset()
-        
+
         # Take some actions
         actions = [
             np.array([1.0, 0.0]),  # Long BTC
@@ -279,15 +279,15 @@ class TestIntegration(unittest.TestCase):
             np.array([0.0, -1.0]), # Short ETH
             np.array([0.0, 0.0])   # Hold
         ]
-        
+
         for action in actions:
             state, reward, done, _, info = self.env.step(action)
             if done:
                 break
-        
+
         # Check portfolio metrics
         portfolio = self.env.portfolio
-        
+
         # Check balance/equity
         if hasattr(portfolio, 'get_balance'):
             balance = portfolio.get_balance()
@@ -296,7 +296,7 @@ class TestIntegration(unittest.TestCase):
         elif hasattr(portfolio, 'equity'):
             self.assertGreaterEqual(portfolio.equity, 0)
             self.assertIsInstance(portfolio.equity, (int, float))
-        
+
         # Check profit if available
         if hasattr(portfolio, 'get_profit'):
             profit = portfolio.get_profit()
@@ -306,19 +306,19 @@ class TestIntegration(unittest.TestCase):
         # Skip this test if safety_manager is not properly initialized
         if not hasattr(self.env, 'safety_manager') or not hasattr(self.env.safety_manager, 'active_orders'):
             self.skipTest("Safety manager not properly initialized for testing")
-            
+
         # Reset environment
         state, _ = self.env.reset()
-        
+
         # Open a position
         action = np.array([1.0, 0.0])  # Full long on BTC
         next_state, reward, done, _, info = self.env.step(action)
-        
+
         # Check that safety orders were placed (if supported by the implementation)
         # Just verify that the safety manager exists and has the expected interface
         self.assertTrue(hasattr(self.env, 'safety_manager'))
         self.assertTrue(hasattr(self.env.safety_manager, 'active_orders'))
-        
+
     def tearDown(self):
         """Clean up after each test."""
         if hasattr(self, 'env') and self.env is not None:

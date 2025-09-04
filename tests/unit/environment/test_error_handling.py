@@ -18,7 +18,7 @@ from adan_trading_bot.environment.error_handling import (
 
 class TestErrorEnums(unittest.TestCase):
     """Test cases for error enums."""
-    
+
     def test_error_severity(self):
         """Test ErrorSeverity enum values."""
         self.assertEqual(ErrorSeverity.DEBUG.value, 1)
@@ -26,7 +26,7 @@ class TestErrorEnums(unittest.TestCase):
         self.assertEqual(ErrorSeverity.WARNING.value, 3)
         self.assertEqual(ErrorSeverity.ERROR.value, 4)
         self.assertEqual(ErrorSeverity.CRITICAL.value, 5)
-    
+
     def test_error_category(self):
         """Test ErrorCategory enum values."""
         self.assertEqual(ErrorCategory.CONFIGURATION.value, 1)
@@ -39,7 +39,7 @@ class TestErrorEnums(unittest.TestCase):
 
 class TestErrorContext(unittest.TestCase):
     """Test cases for ErrorContext class."""
-    
+
     def test_error_context_creation(self):
         """Test ErrorContext initialization."""
         metadata = {"key": "value"}
@@ -48,7 +48,7 @@ class TestErrorContext(unittest.TestCase):
             function="test_function",
             metadata=metadata
         )
-        
+
         self.assertEqual(context.module, "test_module")
         self.assertEqual(context.function, "test_function")
         self.assertEqual(context.metadata, metadata)
@@ -56,12 +56,12 @@ class TestErrorContext(unittest.TestCase):
 
 class TestTradingError(unittest.TestCase):
     """Test cases for TradingError and its subclasses."""
-    
+
     def test_trading_error_creation(self):
         """Test TradingError initialization."""
         context = ErrorContext("test_module", "test_function")
         cause = ValueError("Root cause")
-        
+
         error = TradingError(
             message="Test error",
             severity=ErrorSeverity.ERROR,
@@ -69,25 +69,25 @@ class TestTradingError(unittest.TestCase):
             context=context,
             cause=cause
         )
-        
+
         self.assertEqual(str(error), "Test error")
         self.assertEqual(error.severity, ErrorSeverity.ERROR)
         self.assertEqual(error.category, ErrorCategory.CONFIGURATION)
         self.assertEqual(error.context, context)
         self.assertEqual(error.cause, cause)
-    
+
     def test_configuration_error(self):
         """Test ConfigurationError initialization."""
         error = ConfigurationError("Config error")
         self.assertEqual(error.severity, ErrorSeverity.ERROR)
         self.assertEqual(error.category, ErrorCategory.CONFIGURATION)
-    
+
     def test_network_error(self):
         """Test NetworkError initialization."""
         error = NetworkError("Network error")
         self.assertEqual(error.severity, ErrorSeverity.ERROR)
         self.assertEqual(error.category, ErrorCategory.NETWORK)
-    
+
     def test_data_error(self):
         """Test DataError initialization."""
         error = DataError("Data error")
@@ -96,7 +96,7 @@ class TestTradingError(unittest.TestCase):
 
 class TestErrorHandler(unittest.TestCase):
     """Test cases for ErrorHandler class."""
-    
+
     def setUp(self):
         """Set up test fixtures."""
         self.logger = MagicMock()
@@ -106,21 +106,21 @@ class TestErrorHandler(unittest.TestCase):
             backoff_factor=2.0,
             logger=self.logger
         )
-    
+
     def test_successful_execution(self):
         """Test successful execution without retries."""
         @self.handler.with_retry
         def successful_func():
             return "success"
-        
+
         result = successful_func()
         self.assertEqual(result, "success")
         self.logger.warning.assert_not_called()
-    
+
     def test_retry_and_succeed(self):
         """Test retry logic with eventual success."""
         call_count = 0
-        
+
         @self.handler.with_retry(retry_exceptions=(ValueError,))
         def retry_then_succeed():
             nonlocal call_count
@@ -128,30 +128,30 @@ class TestErrorHandler(unittest.TestCase):
             if call_count < 2:
                 raise ValueError("Temporary failure")
             return "success"
-        
+
         result = retry_then_succeed()
         self.assertEqual(result, "success")
         self.assertEqual(call_count, 2)
         self.logger.warning.assert_called_once()
-    
+
     def test_max_retries_exceeded(self):
         """Test behavior when max retries are exceeded."""
         @self.handler.with_retry(retry_exceptions=(ValueError,))
         def always_fail():
             raise ValueError("Permanent failure")
-        
+
         with self.assertRaises(TradingError) as context:
             always_fail()
-        
+
         self.assertIsInstance(context.exception.cause, ValueError)
         self.assertEqual(self.logger.warning.call_count, 2)  # 2 retries
         self.logger.error.assert_called_once()
-    
+
     @patch('time.sleep')
     def test_retry_delays(self, mock_sleep):
         """Test exponential backoff for retry delays."""
         call_count = 0
-        
+
         @self.handler.with_retry(retry_exceptions=(ValueError,))
         def fail_twice():
             nonlocal call_count
@@ -159,9 +159,9 @@ class TestErrorHandler(unittest.TestCase):
             if call_count < 3:
                 raise ValueError(f"Failure {call_count}")
             return "success"
-        
+
         fail_twice()
-        
+
         # Check that sleep was called with the right delays
         expected_sleep_calls = [
             unittest.mock.call(0.1),  # initial_delay
@@ -171,11 +171,11 @@ class TestErrorHandler(unittest.TestCase):
 
 class TestHandleErrorsDecorator(unittest.TestCase):
     """Test cases for the handle_errors decorator."""
-    
+
     def test_handle_errors_decorator(self):
         """Test the handle_errors decorator factory."""
         call_count = 0
-        
+
         @handle_errors(
             retry_exceptions=(ValueError,),
             max_retries=1,
@@ -188,7 +188,7 @@ class TestHandleErrorsDecorator(unittest.TestCase):
             if call_count < 2:
                 raise ValueError("Temporary failure")
             return "success"
-        
+
         result = test_func()
         self.assertEqual(result, "success")
         self.assertEqual(call_count, 2)

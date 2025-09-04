@@ -14,7 +14,7 @@ class TestConfigLoading(unittest.TestCase):
         self.assertIn('dbe', config)
         self.assertIn('workers', config['dbe'])
         self.assertEqual(len(config['dbe']['workers']), 4)
-        
+
         # Vérifier que chaque worker a une configuration complète
         for i in range(1, 5):
             worker_key = f'w{i}'
@@ -26,7 +26,7 @@ class TestConfigLoading(unittest.TestCase):
                 self.assertIn('adaptive', worker_config)
             self.assertIn('indicators', worker_config)
             self.assertIn('filters', worker_config)
-            
+
             # Vérifier la configuration PPO
             self.assertIn('ppo', config)
             self.assertIn('workers', config['ppo'])
@@ -34,7 +34,7 @@ class TestConfigLoading(unittest.TestCase):
             self.assertIn('learning_rate', ppo_config)
             self.assertIn('batch_size', ppo_config)
             self.assertIn('ent_coef', ppo_config)
-            
+
             # Vérifier la configuration trading
             self.assertIn('trading', config)
             self.assertIn('workers', config['trading'])

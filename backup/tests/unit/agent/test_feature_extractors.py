@@ -40,7 +40,7 @@ class TestFeatureExtractors:
 
     def test_cnn_feature_extractor_forward(self, observation_space):
         extractor = CustomCNNFeatureExtractor(observation_space)
-        
+
         # Create dummy observations
         dummy_image_features = th.randn(1, 3, 64, 10)
         dummy_vector_features = th.randn(1, 5)

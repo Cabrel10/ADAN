@@ -241,7 +241,7 @@ class ObservationValidator:
         """Validate observation shape."""
         results = []
 
-        
+
 
         if expected_shape is None:
             results.append(

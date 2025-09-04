@@ -18,7 +18,7 @@ from adan_trading_bot.common.memory_manager import MemoryManager, MemoryPressure
 def test_memory_integration():
     """Test memory management integration."""
     print("🧪 Testing Memory Management Integration...")
-    
+
     config = {
         'medium_threshold': 70.0,
         'high_threshold': 85.0,
@@ -30,20 +30,20 @@ def test_memory_integration():
         'enable_mixed_precision': True,
         'enable_amp': True
     }
-    
+
     try:
         # Initialize memory manager
         memory_manager = MemoryManager(config)
         print("✅ Memory Manager initialized")
-        
+
         # Test basic functionality
         stats = memory_manager.get_memory_stats()
         print(f"  📊 Current memory usage: {stats.memory_percent:.1f}%")
-        
+
         # Test training optimization
         print("\n🚀 Testing training optimization...")
         original_interval = memory_manager.optimize_for_training()
-        
+
         # Simulate some training operations
         with memory_manager.create_mixed_precision_context():
             # Create some tensors
@@ -53,32 +53,32 @@ def test_memory_integration():
                 if torch.cuda.is_available():
                     tensor = tensor.cuda()
                 tensors.append(tensor)
-            
+
             # Simulate computation
             result = sum(t.sum() for t in tensors)
             print(f"  ✅ Training simulation completed: {result}")
-        
+
         # Test memory cleanup
         print("\n🧹 Testing memory cleanup...")
         memory_manager.trigger_garbage_collection(force=True)
-        
+
         # Get final stats
         final_stats = memory_manager.get_memory_stats()
         print(f"  📊 Final memory usage: {final_stats.memory_percent:.1f}%")
-        
+
         # Test memory summary
         summary = memory_manager.get_memory_summary()
         print(f"  📋 Memory summary generated: {len(summary)} sections")
-        
+
         # Restore settings
         memory_manager.restore_monitoring_interval(original_interval)
-        
+
         # Cleanup
         memory_manager.shutdown()
-        
+
         print("✅ Memory management integration test completed successfully!")
         return True
-        
+
     except Exception as e:
         print(f"❌ Integration test failed: {e}")
         import traceback
@@ -89,9 +89,9 @@ def test_memory_integration():
 def main():
     """Run memory integration test."""
     print("🚀 Starting Memory Management Integration Test...\n")
-    
+
     success = test_memory_integration()
-    
+
     if success:
         print("\n🎉 Memory management integration test PASSED!")
         return True

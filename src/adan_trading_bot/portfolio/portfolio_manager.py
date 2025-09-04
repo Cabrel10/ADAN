@@ -8,11 +8,14 @@ capital, positions, and performance metrics.
 """
 
 import logging
+import json
 from datetime import datetime
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import numpy as np
 from ..environment.finance_manager import FinanceManager
+from ..performance.metrics import PerformanceMetrics
 
 
 logger = logging.getLogger(__name__)
@@ -67,7 +70,86 @@ class PortfolioManager:
     for reward shaping and learning purposes.
     """
 
+    def _update_equity(self) -> None:
+        """Met à jour la valeur de l'équité du portefeuille."""
+        # Initialiser current_prices s'il n'existe pas
+        if not hasattr(self, 'current_prices'):
+            self.current_prices = {}
+            
+        # Calculer la valeur des positions ouvertes
+        positions_value = sum(
+            position.size * self.current_prices.get(asset, 0)
+            for asset, position in self.positions.items()
+            if position.is_open
+        )
+        
+        # Mettre à jour l'équité (cash + valeur des positions)
+        self.equity = self.cash + positions_value
+        
+        # Mettre à jour le pic d'équité pour le calcul du drawdown
+        if not hasattr(self, 'peak_equity') or self.equity > self.peak_equity:
+            self.peak_equity = self.equity
+            
+        # Calculer le drawdown courant
+        if hasattr(self, 'peak_equity') and self.peak_equity > 0:
+            self.current_drawdown = (self.peak_equity - self.equity) / self.peak_equity
+        else:
+            self.current_drawdown = 0.0
+
+    def get_equity(self) -> float:
+        """Retourne la valeur actuelle de l'équité du portefeuille."""
+        if not hasattr(self, 'equity'):
+            self._update_equity()
+        return getattr(self, 'equity', 0.0)
+        
+    def get_performance_metrics(self) -> dict:
+        """Retourne les métriques de performance actuelles du portefeuille.
+        
+        Returns:
+            dict: Dictionnaire contenant les métriques de performance
+        """
+        return {
+            'equity': self.get_equity(),
+            'cash': self.cash,
+            'drawdown': self.current_drawdown if hasattr(self, 'current_drawdown') else 0.0,
+            'peak_equity': getattr(self, 'peak_equity', self.initial_capital),
+            'win_rate': getattr(self, 'win_rate', 0.0),
+            'sharpe_ratio': getattr(self, 'sharpe_ratio', 0.0),
+            'sortino_ratio': getattr(self, 'sortino_ratio', 0.0),
+            'profit_factor': getattr(self, 'profit_factor', 0.0),
+            'total_trades': getattr(self, 'total_trades', 0),
+            'winning_trades': getattr(self, 'winning_trades', 0),
+            'losing_trades': getattr(self, 'losing_trades', 0),
+            'max_drawdown': getattr(self, 'max_drawdown', 0.0),
+            'risk_free_rate': getattr(self, 'risk_free_rate', 0.0),
+            'volatility': getattr(self, 'volatility', 0.0),
+            'cagr': getattr(self, 'cagr', 0.0)
+        }
+        
+    def get_balance(self) -> float:
+        """Retourne le solde disponible (cash) du portefeuille."""
+        return getattr(self, 'cash', 0.0)
+        
+    def get_total_value(self) -> float:
+        """
+        Retourne la valeur totale du portefeuille (cash + valeur des positions ouvertes).
+        
+        Returns:
+            float: Valeur totale du portefeuille dans la devise de base
+        """
+        # Mise à jour de l'équité pour s'assurer d'avoir les dernières valeurs
+        self._update_equity()
+        
+        # Retourner l'équité qui est déjà la somme du cash et de la valeur des positions
+        return self.equity
+
     def __init__(self, env_config: Dict[str, Any], assets: Optional[List[str]] = None) -> None:
+        # Devise de base du portefeuille
+        self.currency = env_config.get('default_currency', 'USDT')
+        
+        # Dictionnaire des prix courants pour chaque actif
+        self.current_prices = {}
+        
         """
         Initialize the PortfolioManager with environment configuration and assets.
 
@@ -95,6 +177,15 @@ class PortfolioManager:
             fee_pct=fee_pct,
             min_order_usdt=min_order_usdt,
         )
+        
+        # Initialize performance metrics tracking
+        self.metrics = PerformanceMetrics(
+            metrics_dir=str(Path(self.config.get('paths', {}).get('metrics_dir', 'logs/metrics')))
+        )
+        
+        # Logging configuration
+        self.log_interval = self.config.get('logging', {}).get('metrics_interval', 100)
+        self.step_count = 0
 
         # Initialize configuration sections
         portfolio_config = self.config.get("portfolio", {})
@@ -401,6 +492,7 @@ class PortfolioManager:
         account_risk_multiplier: float = 1.0,
         expected_return_pct: float = 0.0,  # Rendement attendu en pourcentage
         min_profit_margin: float = 1.5,    # Marge de profit minimale (1.5x la commission)
+        aggressivity: float = 0.5,         # Coefficient d'agressivité (0-1)
     ) -> float:
         """
         Calcule la taille de position en fonction du risque, du stop loss et des limites de position.
@@ -426,11 +518,18 @@ class PortfolioManager:
         try:
             # Récupérer le palier actif
             tier = self.get_active_tier()
+            
+            # 1. Vérifier le capital minimum (11 USDT)
+            min_trade_value = 11.0  # Minimum de 11 USDT par trade
+            if self.portfolio_value < min_trade_value:
+                logger.info("[POSITION SIZE] Capital insuffisant (%.2f < %.2f USDT)", 
+                          self.portfolio_value, min_trade_value)
+                return 0.0
 
-            # Compter les positions ouvertes
+            # 2. Compter les positions ouvertes
             current_open = sum(1 for pos in self.positions.values() if pos.is_open)
 
-            # Vérifier la limite de positions simultanées
+            # 3. Vérifier la limite de positions simultanées
             if current_open >= tier.get('max_concurrent_positions', 1):
                 logger.info(
                     "[POSITION SIZE] Limite de positions atteinte (%d/%d)",
@@ -438,12 +537,51 @@ class PortfolioManager:
                 )
                 return 0.0
 
-            # Calculer la taille basée sur le risque
-            risk_amount = self.portfolio_value * (tier["risk_per_trade_pct"] / 100.0)
-            risk_amount *= account_risk_multiplier
-            risk_based_size = risk_amount / (price * stop_loss_pct)
-
-            # Calculer la taille maximale autorisée par le palier
+            # 4. Calculer la fourchette de position en fonction du palier
+            min_position_pct = tier.get('position_size_range', [0.01, 0.1])[0]  # Par défaut 1-10%
+            max_position_pct = tier.get('position_size_range', [0.01, 0.1])[1]
+            
+            # 5. Calculer la taille de position en fonction de l'agressivité
+            position_pct = min_position_pct + (max_position_pct - min_position_pct) * aggressivity
+            
+            # 6. Calculer la taille de position en USDT
+            position_size_usdt = self.portfolio_value * position_pct
+            
+            # 7. Vérifier le minimum de 11 USDT
+            position_size_usdt = max(position_size_usdt, min_trade_value)
+            
+            # 8. Calculer la taille en unités
+            position_size = position_size_usdt / price
+            
+            # 9. Calculer la perte potentielle avec le stop-loss
+            potential_loss = position_size_usdt * stop_loss_pct
+            
+            # 10. Calculer la perte maximale autorisée (4% du capital)
+            max_allowed_loss = self.portfolio_value * 0.04
+            
+            # 11. Ajuster le stop-loss si nécessaire pour respecter la contrainte de 4%
+            if potential_loss > max_allowed_loss:
+                adjusted_sl_pct = (max_allowed_loss / position_size_usdt) * 0.9  # Marge de sécurité de 10%
+                logger.info(
+                    "[POSITION SIZE] Ajustement du stop-loss de %.2f%% à %.2f%% pour respecter la contrainte de drawdown",
+                    stop_loss_pct * 100, adjusted_sl_pct * 100
+                )
+                stop_loss_pct = adjusted_sl_pct
+                
+                # Recalculer la taille basée sur le nouveau stop-loss
+                risk_amount = self.portfolio_value * (tier["risk_per_trade_pct"] / 100.0)
+                risk_amount *= account_risk_multiplier
+                risk_based_size = risk_amount / (price * stop_loss_pct)
+                
+                # Prendre le minimum entre la taille calculée et la taille basée sur le risque
+                position_size = min(position_size, risk_based_size)
+            else:
+                risk_amount = self.portfolio_value * (tier["risk_per_trade_pct"] / 100.0)
+                risk_amount *= account_risk_multiplier
+                risk_based_size = risk_amount / (price * stop_loss_pct)
+                position_size = min(position_size, risk_based_size)
+            
+            # 12. Calculer la taille maximale autorisée par le palier
             max_position_value = self.portfolio_value * (tier["max_position_size_pct"] / 100.0)
             max_position_size = max_position_value / price
 
@@ -691,10 +829,10 @@ class PortfolioManager:
     def _enter_surveillance_mode(self, current_step: int) -> None:
         """
         Active le mode surveillance avec suivi amélioré et initialisation des compteurs.
-        
+
         Le mode surveillance permet au bot de tenter de se rétablir après une baisse
         significative de la valeur du portefeuille en dessous du seuil critique.
-        
+
         Pendant ce mode :
         - Le bot a 2 chunks complets pour tenter de se rétablir
         - Un soft reset est effectué à chaque chunk
@@ -709,7 +847,7 @@ class PortfolioManager:
                 self._surveillance_entry_count = 0
             if not hasattr(self, '_critical_chunk_count'):
                 self._critical_chunk_count = 0
-            
+
             # Activer le mode surveillance
             self._surveillance_mode = True
             self._surveillance_start_step = current_step
@@ -718,7 +856,7 @@ class PortfolioManager:
             self._critical_chunk_count += 1
             self._surveillance_entry_count += 1
             self.surveillance_chunk_start_balance = self.get_portfolio_value()
-            
+
             # Initialiser le suivi de la valeur maximale pendant la surveillance
             self._surveillance_max_value = self.surveillance_chunk_start_balance
             self._surveillance_min_value = self.surveillance_chunk_start_balance
@@ -730,7 +868,7 @@ class PortfolioManager:
                 self._critical_chunk_count,
                 self._surveillance_entry_count
             )
-            
+
             # Enregistrer l'état initial pour le débogage
             logger.debug(
                 "[SURVEILLANCE] Initial state - Step: %d, Max: $%.2f, Min: $%.2f, Current: $%.2f",
@@ -743,7 +881,7 @@ class PortfolioManager:
     def _check_surveillance_status(self, current_step: int) -> bool:
         """
         Vérifie l'état de surveillance et met à jour les compteurs.
-        
+
         Cette méthode est appelée à chaque étape pour :
         1. Mettre à jour les statistiques de surveillance (valeur max/min)
         2. Détecter si on doit entrer ou sortir du mode surveillance
@@ -765,7 +903,7 @@ class PortfolioManager:
                 self._surveillance_max_value = max(self._surveillance_max_value, current_value)
             if hasattr(self, '_surveillance_min_value'):
                 self._surveillance_min_value = min(self._surveillance_min_value, current_value)
-            
+
             # Journalisation périodique pour le débogage
             if current_step % 100 == 0:  # Toutes les 100 étapes
                 logger.debug(
@@ -947,7 +1085,7 @@ class PortfolioManager:
     def _exit_surveillance_mode(self, recovered: bool = True) -> None:
         """
         Désactive le mode surveillance et met à jour les compteurs.
-        
+
         Cette méthode est appelée dans deux cas :
         1. Récupération réussie (recovered=True) : Le portefeuille est remonté au-dessus du seuil critique
         2. Échec de la récupération (recovered=False) : Le portefeuille n'a pas récupéré après 2 chunks
@@ -963,11 +1101,11 @@ class PortfolioManager:
             self._surveillance_success_count = 0
         if not hasattr(self, '_surveillance_failure_count'):
             self._surveillance_failure_count = 0
-            
+
         current_value = self.get_portfolio_value()
         start_balance = getattr(self, 'surveillance_chunk_start_balance', current_value)
         chunks_survived = getattr(self, '_survived_chunks', 0)
-        
+
         # Mettre à jour les statistiques de surveillance
         if hasattr(self, '_surveillance_max_value'):
             max_value = self._surveillance_max_value
@@ -994,7 +1132,7 @@ class PortfolioManager:
                 "Max: $%.2f, Min: $%.2f, Drawdown: %.2f%%",
                 current_value, start_balance, max_value, min_value, drawdown
             )
-            
+
             # En cas d'échec, forcer la fermeture de toutes les positions
             for asset in list(self.positions.keys()):
                 if self.positions[asset].is_open:
@@ -1006,7 +1144,7 @@ class PortfolioManager:
         self._surveillance_start_step = None
         self._survived_chunks = 0
         self.surveillance_chunk_start_balance = 0.0
-        
+
         # Nettoyer les attributs de suivi
         if hasattr(self, '_surveillance_max_value'):
             del self._surveillance_max_value
@@ -1016,34 +1154,34 @@ class PortfolioManager:
     def _soft_reset_epoch_state(self) -> None:
         """
         Réinitialise l'état pour un nouvel 'epoch' sans toucher au capital.
-        
+
         Cette méthode est appelée pour effectuer une réinitialisation partielle de l'état
         du portefeuille à la fin d'un chunk, sans réinitialiser complètement le capital.
-        
+
         En mode surveillance, elle incrémente également le compteur de chunks survécus.
         """
         # Sauvegarder le capital actuel
         current_capital = self.get_portfolio_value()
-        
+
         # Mettre à jour les statistiques de surveillance si nécessaire
         if self._surveillance_mode:
             # S'assurer que l'attribut existe
             if not hasattr(self, '_survived_chunks'):
                 self._survived_chunks = 0
-                
+
             # Incrémenter le compteur de chunks
             self._survived_chunks += 1
-            
+
             # Journaliser l'état actuel
             start_balance = getattr(self, 'surveillance_chunk_start_balance', current_capital)
             max_value = getattr(self, '_surveillance_max_value', current_capital)
             min_value = getattr(self, '_surveillance_min_value', current_capital)
-            
+
             logger.info(
                 "[SURVEILLANCE] Chunk %d/2 completed - Value: $%.2f (Start: $%.2f, Max: $%.2f, Min: $%.2f)",
                 self._survived_chunks, current_capital, start_balance, max_value, min_value
             )
-            
+
             # Réinitialiser le suivi des valeurs min/max pour le prochain chunk
             if hasattr(self, '_surveillance_max_value'):
                 self._surveillance_max_value = current_capital
@@ -1068,7 +1206,7 @@ class PortfolioManager:
         self.portfolio_value = current_capital
         self.current_equity = current_capital
         self.peak_equity = current_capital
-        
+
         # Réinitialiser le suivi des performances du chunk
         self.chunk_start_balance = current_capital
 
@@ -1082,34 +1220,39 @@ class PortfolioManager:
            - If survived 2+ chunks and value > threshold: Exit surveillance with soft reset
            - Else: Soft reset and stay in surveillance mode
         3. If value <= threshold: Enter surveillance mode and soft reset
-        4. If value > threshold: Soft reset
+        4. If value > threshold: Soft reset (preserve current capital)
+           
+        Returns:
+            bool: True if a full reset was performed, False otherwise (soft reset)
         """
         import inspect
 
         # Get configuration sections
         portfolio_config = self.config.get("portfolio", {})
         environment_config = self.config.get("environment", {})
-        
+
         # Get current portfolio value
         current_value = self.get_portfolio_value()
-        
+
         # Get min_capital_before_reset from config if not provided
         if min_capital_before_reset is None:
             min_capital_before_reset = environment_config.get("min_capital_before_reset", 11.0)
-        
+
         # Log the current state for debugging
+        caller_frame = inspect.currentframe().f_back
+        caller_info = f"{caller_frame.f_code.co_name}:{caller_frame.f_lineno}" if caller_frame else "unknown"
+        
         logger.debug(
             "[RESET] Current value: $%.2f, New epoch: %s, Force: %s, Min capital: $%.2f, "
-            "Surveillance: %s, Survived chunks: %d",
+            "Surveillance: %s, Survived chunks: %d, Caller: %s",
             current_value, new_epoch, force, min_capital_before_reset,
-            self._surveillance_mode, getattr(self, '_survived_chunks', 0)
+            getattr(self, '_surveillance_mode', False), 
+            getattr(self, '_survived_chunks', 0),
+            caller_info
         )
 
-        # Close all open positions before reset
-        for asset in list(self.positions.keys()):
-            if self.positions[asset].is_open:
-                logger.debug("Closing position for %s before reset", asset)
-                self.close_position(asset, self.positions[asset].entry_price)
+        # Close all open positions before any reset
+        self._close_all_positions()
 
         # Rule 1: Forced reset (new episode or force=True)
         if force or new_epoch:
@@ -1119,21 +1262,35 @@ class PortfolioManager:
                 reset_reason, current_value, min_capital_before_reset
             )
             # Exit surveillance mode if active
-            if self._surveillance_mode:
+            if getattr(self, '_surveillance_mode', False):
                 self._exit_surveillance_mode(recovered=False)
             return self._perform_full_reset(portfolio_config, environment_config)
+
+        # Get surveillance mode status safely with default
+        surveillance_mode = getattr(self, '_surveillance_mode', False)
         
         # Rule 2: Handle surveillance mode
-        if self._surveillance_mode:
+        if surveillance_mode:
+            # Increment survived chunks counter if not just entered
+            if hasattr(self, '_surveillance_chunk_count'):
+                self._surveillance_chunk_count += 1
+            else:
+                self._surveillance_chunk_count = 1
+                
             logger.warning(
                 "[SURVEILLANCE] Portfolio value: $%.2f, Chunks survived: %d/2, Start balance: $%.2f",
-                current_value, self._survived_chunks, getattr(self, 'surveillance_chunk_start_balance', 0.0)
+                current_value, 
+                self._surveillance_chunk_count,
+                getattr(self, 'surveillance_chunk_start_balance', current_value)
             )
-            
+
             # If we've survived enough chunks and are above threshold, exit surveillance
-            if self._survived_chunks >= 2:
+            if self._surveillance_chunk_count >= 2:
                 if current_value > min_capital_before_reset:
-                    logger.info("[SURVEILLANCE] Exiting surveillance mode - Recovery successful")
+                    logger.info(
+                        "[SURVEILLANCE] Successfully recovered to $%.2f > $%.2f - Exiting surveillance mode",
+                        current_value, min_capital_before_reset
+                    )
                     self._exit_surveillance_mode(recovered=True)
                     # Perform soft reset with current capital
                     self._perform_soft_reset(current_value)
@@ -1150,24 +1307,41 @@ class PortfolioManager:
                 # Stay in surveillance mode with soft reset
                 self._soft_reset_epoch_state()
                 return False
-        
+
         # Rule 3: If value drops below threshold, enter surveillance mode
         if current_value <= min_capital_before_reset:
             logger.warning(
                 "[SURVEILLANCE] Portfolio value $%.2f <= $%.2f - Entering surveillance mode",
                 current_value, min_capital_before_reset
             )
-            self._enter_surveillance_mode(self.current_step)
+            self._enter_surveillance_mode()
             self._soft_reset_epoch_state()
             return False
-        
-        # Rule 4: Normal operation - soft reset
+
+        # Rule 4: Normal operation - soft reset (preserve current capital)
         logger.info(
-            "[SOFT RESET] Portfolio value $%.2f > $%.2f - Soft reset",
+            "[SOFT RESET] Portfolio value $%.2f > $%.2f - Preserving capital and resetting state",
             current_value, min_capital_before_reset
         )
         self._perform_soft_reset(current_value)
         return False
+
+    def _close_all_positions(self) -> None:
+        """Ferme toutes les positions ouvertes aux prix du marché actuels."""
+        if not hasattr(self, 'positions') or not self.positions:
+            return
+            
+        # Pour chaque actif avec une position ouverte, on la ferme
+        for asset in list(self.positions.keys()):
+            position = self.positions[asset]
+            if position.is_open:
+                try:
+                    # On utilise le prix du marché actuel ou le prix d'entrée si indisponible
+                    current_price = getattr(position, 'current_price', position.entry_price)
+                    self.close_position(asset, current_price)
+                    logger.debug("Position fermée pour %s à $%.8f", asset, current_price)
+                except Exception as e:
+                    logger.error("Erreur lors de la fermeture de la position pour %s: %s", asset, str(e))
 
     def _perform_full_reset(self, portfolio_config: dict, environment_config: dict) -> bool:
         """
@@ -1223,15 +1397,32 @@ class PortfolioManager:
         Args:
             current_value: Valeur actuelle du portefeuille
         """
-        # Sauvegarder le capital actuel
-        self.cash = current_value
+        logger.debug(
+            "[SOFT RESET] Performing soft reset with preserved capital: $%.2f", 
+            current_value
+        )
+        
+        # Close any remaining positions (should be none at this point)
+        self._close_all_positions()
+        
+        # Reset metrics but keep current capital
+        self.trade_history = []
+        self.peak_equity = current_value
+        self.current_equity = current_value
         self.portfolio_value = current_value
         self.total_capital = current_value
-        self.current_equity = current_value
-        self.peak_equity = max(self.peak_equity, current_value)
-
-        # Réinitialiser les métriques sans toucher au capital
-        self._reset_metrics()
+        self.cash = current_value  # Reset cash to current value (no positions open after reset)
+        
+        # Re-initialize positions
+        self.positions = {asset: Position() for asset in getattr(self, 'assets', [])}
+        
+        # Reset any per-epoch state
+        self._soft_reset_epoch_state()
+        
+        logger.debug(
+            "[SOFT RESET] Completed. New balance: $%.2f, Cash: $%.2f",
+            self.portfolio_value, self.cash
+        )
 
         # Mettre à jour l'historique des trades
         self.trade_history.append(current_value)
@@ -1877,7 +2068,7 @@ class PortfolioManager:
 
             # Journalisation détaillée
             logger.info(
-                "[POSITION OUVERTE] %s - Taille: %.8f @ %.8f | Valeur: %.2f | SL: %.8f | TP: %.8f | Commission: %.2f",
+                "[POSITION OUVERTE] %s - Taille: %.8f @ %.8f | Valeur: %.2f | SL: %.8f | TP: %.8f | Commission: %.2f | Capital: %.2f %s",
                 asset.upper(),
                 size,
                 price,
@@ -1885,7 +2076,24 @@ class PortfolioManager:
                 trade_info["stop_loss"] if trade_info["stop_loss"] else 0.0,
                 trade_info["take_profit"] if trade_info["take_profit"] else 0.0,
                 commission,
+                self.get_equity(),
+                self.currency
             )
+            
+            # Mise à jour des métriques de performance
+            self.metrics.update_trade({
+                'action': 'open',
+                'asset': asset,
+                'price': price,
+                'size': size,
+                'value': notional_value,
+                'commission': commission,
+                'equity': self.get_equity(),
+                'balance': self.get_balance(),
+                'leverage': self.leverage if self.futures_enabled else 1.0,
+                'stop_loss': trade_info["stop_loss"],
+                'take_profit': trade_info["take_profit"]
+            })
 
             # Journalisation des soldes
             logger.debug(
@@ -2019,14 +2227,34 @@ class PortfolioManager:
 
             # Journalisation de la fermeture
             logger.info(
-                "[POSITION FERMÉE] %s - Taille: %.8f | Entrée: %.8f | Sortie: %.8f | PnL: %+.2f (%.2f%%)",
+                "[POSITION FERMÉE] %s - Taille: %.8f | Entrée: %.8f | Sortie: %.8f | PnL: %+.2f (%.2f%%) | Capital: %.2f %s | Équité: %.2f %s",
                 asset.upper(),
                 position_size,
                 entry_price,
                 price,
                 net_pnl,
                 pnl_pct,
+                self.get_balance(),
+                self.currency,
+                self.get_equity(),
+                self.currency
             )
+            
+            # Mise à jour des métriques de performance
+            self.metrics.update_trade({
+                'action': 'close',
+                'asset': asset,
+                'entry_price': entry_price,
+                'exit_price': price,
+                'size': position_size,
+                'pnl': net_pnl,
+                'pnl_pct': pnl_pct,
+                'commission': commission,
+                'equity': self.get_equity(),
+                'balance': self.get_balance(),
+                'leverage': self.leverage if self.futures_enabled else 1.0,
+                'duration': (datetime.now() - datetime.fromisoformat(trade_info['timestamp'])).total_seconds()
+            })
 
             # Journalisation des soldes après fermeture
             logger.debug(
@@ -2058,44 +2286,78 @@ class PortfolioManager:
         Met à jour les métriques du portefeuille de manière robuste.
 
         Cette méthode calcule et met à jour les métriques de performance clés
-        comme le drawdown et le ratio de Sharpe, avec une gestion robuste des erreurs
-        et une stabilité numérique améliorée.
+        comme le drawdown, le ratio de Sharpe, Sortino, etc., avec une gestion 
+        robuste des erreurs et une stabilité numérique améliorée.
 
         La méthode est conçue pour être tolérante aux erreurs et ne jamais lever d'exception.
         """
-        # Valeurs par défaut sécurisées
-        self.drawdown = 0.0
-        self.sharpe_ratio = 0.0
-
         try:
+            # Mise à jour des métriques de base
+            self._update_equity()
+            
             # Vérification de l'historique
             if not hasattr(self, 'trade_history') or not self.trade_history:
-                logger.debug("Aucun historique de trades disponible pour le calcul des métriques")
+                logger.debug("[METRICS] Aucun historique de trades disponible pour le calcul des métriques")
+                # Mise à jour périodique même sans trade récent
+                self.metrics.log_periodic_update()
                 return
 
             # Conversion en tableau numpy avec gestion des erreurs
             try:
                 history_array = np.asarray(self.trade_history, dtype=np.float64)
                 if history_array.size == 0:
+                    self.metrics.log_periodic_update()
                     return
             except (TypeError, ValueError) as e:
-                logger.error("Erreur lors de la conversion de l'historique: %s", str(e))
+                logger.error("[METRICS] Erreur lors de la conversion de l'historique: %s", str(e))
+                self.metrics.log_periodic_update()
                 return
 
-            # 1. Calcul du drawdown
+            # Mise à jour des métriques de base
             self._update_drawdown_metrics(history_array)
-
-            # 2. Calcul des métriques de rendement et risque
             self._update_return_metrics(history_array)
+            
+            # Mise à jour des métriques avancées via PerformanceMetrics
+            try:
+                # Récupérer les métriques actuelles
+                metrics = self.metrics.get_metrics_summary()
+                
+                # Mettre à jour les attributs du portefeuille
+                self.sharpe_ratio = metrics.get('sharpe_ratio', 0.0)
+                self.sortino_ratio = metrics.get('sortino_ratio', 0.0)
+                self.profit_factor = metrics.get('profit_factor', 0.0)
+                self.calmar_ratio = metrics.get('calmar_ratio', 0.0)
+                self.max_drawdown = metrics.get('max_drawdown', 0.0)
+                self.win_rate = metrics.get('win_rate', 0.0)
+                
+                # Log périodique des métriques (toutes les 100 étapes par défaut)
+                if hasattr(self, 'step_count') and self.step_count % getattr(self, 'log_interval', 100) == 0:
+                    self.metrics.log_periodic_update()
+                    
+            except Exception as e:
+                logger.error("[METRICS] Erreur lors de la mise à jour des métriques avancées: %s", str(e))
+                # En cas d'erreur, on continue avec les valeurs par défaut
+                self.sharpe_ratio = 0.0
+                self.sortino_ratio = 0.0
+                self.profit_factor = 0.0
+                self.calmar_ratio = 0.0
+                self.max_drawdown = 0.0
+                self.win_rate = 0.0
 
         except Exception as e:
             logger.error(
-                "Erreur critique dans update_metrics: %s",
+                "[METRICS] Erreur critique dans update_metrics: %s",
                 str(e),
                 exc_info=True
             )
             # En cas d'erreur, on conserve les valeurs par défaut
             self.drawdown = 0.0
+            self.sharpe_ratio = 0.0
+            self.sortino_ratio = 0.0
+            self.profit_factor = 0.0
+            self.calmar_ratio = 0.0
+            self.max_drawdown = 0.0
+            self.win_rate = 0.0
             self.sharpe_ratio = 0.0
 
     def _update_drawdown_metrics(self, history_array: np.ndarray) -> None:

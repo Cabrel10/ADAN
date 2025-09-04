@@ -59,7 +59,7 @@ class TestSharedExperienceBuffer(unittest.TestCase):
                 worker_config = self.full_config['workers'].get(worker_id)
                 if not worker_config:
                     self.fail(f"Worker {worker_id} configuration not found.")
-                
+
                 # Assurez-vous que la configuration du worker est un dictionnaire Python standard
                 # et non un OmegaConf DictConfig pour la sérialisation entre processus
                 worker_config_dict = ConfigLoader.to_python_dict(worker_config)

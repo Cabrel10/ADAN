@@ -22,21 +22,78 @@ from ..common.replay_logger import ReplayLogger
 
 logger = get_logger(__name__)
 
+# Fichier de log pour le suivi des décisions du DBE
 DBE_LOG_FILE = os.getenv("DBE_LOG_FILE", "dbe_replay.jsonl")
 
 class NpEncoder(json.JSONEncoder):
     def default(self, obj):
-        if isinstance(obj, np.integer):
+        if isinstance(obj, (np.int_, np.intc, np.intp, np.int8,
+                         np.int16, np.int32, np.int64, np.uint8,
+                         np.uint16, np.uint32, np.uint64)):
             return int(obj)
-        if isinstance(obj, np.floating):
+        elif isinstance(obj, (np.float_, np.float16, np.float32, np.float64)):
             return float(obj)
-        if isinstance(obj, np.ndarray):
+        elif isinstance(obj, (np.ndarray,)):
             return obj.tolist()
         return super().default(obj)
 
+
+class DBELogger(logging.Logger):
+    """Logger personnalisé pour le Dynamic Behavior Engine."""
+
+    def log_decision(self, step_index, modulation_dict, context_metrics,
+                    performance_metrics, additional_info):
+        """
+        Enregistre une décision du DBE.
+
+        Args:
+            step_index: Numéro d'étape
+            modulation_dict: Dictionnaire des paramètres de modulation
+            context_metrics: Métriques de contexte (régime de marché, etc.)
+            performance_metrics: Métriques de performance
+            additional_info: Informations supplémentaires
+        """
+        log_entry = {
+            'timestamp': datetime.utcnow().isoformat(),
+            'step': step_index,
+            'modulation': modulation_dict,
+            'context': context_metrics,
+            'performance': performance_metrics,
+            'additional_info': additional_info
+        }
+
+        # Enregistrer dans un fichier JSONL
+        log_dir = Path('logs/dbe_decisions')
+        log_dir.mkdir(parents=True, exist_ok=True)
+        log_file = log_dir / 'dbe_decisions.jsonl'
+
+        try:
+            with open(log_file, 'a') as f:
+                f.write(json.dumps(log_entry, cls=NpEncoder) + '\n')
+        except Exception as e:
+            self.error(f"Erreur lors de l'écriture du log de décision: {e}")
+
+
+# Configurer le logger personnalisé
+logging.setLoggerClass(DBELogger)
+
 @dataclass
 class DBESnapshot:
-    """Snapshot de l'état du DBE à un instant T."""
+    """
+    Snapshot de l'état du Dynamic Behavior Engine (DBE) à un instant T.
+
+    Attributes:
+        timestamp: Horodatage du snapshot
+        step: Numéro d'étape actuel
+        market_regime: Régime de marché détecté (ex: 'BULL', 'BEAR', 'NEUTRAL')
+        risk_level: Niveau de risque actuel (0.0 à 2.0)
+        sl_pct: Pourcentage de stop-loss (0.0 à 1.0)
+        tp_pct: Pourcentage de take-profit (0.0 à 1.0)
+        position_size_pct: Taille de position en pourcentage du capital (0.0 à 1.0)
+        reward_boost: Facteur d'amplification des récompenses
+        penalty_inaction: Pénalité pour inaction
+        metrics: Dictionnaire de métriques supplémentaires
+    """
     timestamp: datetime = field(default_factory=datetime.utcnow)
     step: int = 0
     market_regime: str = "NEUTRAL"
@@ -49,29 +106,100 @@ class DBESnapshot:
     metrics: Dict[str, Any] = field(default_factory=dict)
 
 DEFAULT_CONFIG = {
+    # Détection des régimes de marché
+    'market_regime_detection': {
+        'adx_threshold': 25,
+        'rsi_overbought': 70,
+        'rsi_oversold': 30,
+        'atr_multiplier': 1.8,
+        'ema_fast': 20,
+        'ema_slow': 50,
+        'regime_confidence_threshold': 0.7
+    },
+
+    # Paramètres par régime de marché
+    'regime_parameters': {
+        'bull': {
+            'sl_multiplier': 1.1,
+            'tp_multiplier': 1.3,
+            'position_size_multiplier': 0.8
+        },
+        'bear': {
+            'sl_multiplier': 0.7,
+            'tp_multiplier': 0.9,
+            'position_size_multiplier': 0.6
+        },
+        'volatile': {
+            'sl_multiplier': 0.6,
+            'tp_multiplier': 0.7,
+            'position_size_multiplier': 0.5
+        },
+        'sideways': {
+            'sl_multiplier': 0.9,
+            'tp_multiplier': 1.1,
+            'position_size_multiplier': 0.7
+        }
+    },
+
+    # Gestion des risques
+    'risk_management': {
+        'min_trade_value': 11.0,  # Minimum de 11 USDT par trade
+        'max_drawdown_pct': 4.0,  # Drawdown maximum absolu de 4%
+        'max_leverage': 1.0
+    },
+
+    # Gestion de la volatilité
+    'volatility_management': {
+        'lookback': 21,  # Période de lookback en jours
+        'min_volatility': 0.01,  # Volatilité minimale
+        'max_volatility': 0.20  # Volatilité maximale
+    },
+
+    # Paramètres de risque de base
     'risk_parameters': {
+        'min_risk_level': 0.3,
+        'max_risk_level': 2.0,
+        'risk_increment': 0.1,
+        'risk_decrement': 0.05,
+        'max_drawdown': 0.1,
+        'max_position_size': 0.5,
+        'initial_sl_pct': 0.02,
+        'initial_tp_pct': 0.04,
+        'initial_position_size': 0.1,
+        'initial_risk': 0.5,
         'base_sl_pct': 0.02,
         'base_tp_pct': 0.04,
         'max_sl_pct': 0.10,
         'min_sl_pct': 0.005,
-        'drawdown_risk_multiplier': 2.0,
-        'volatility_impact': 1.5,
+        'daily_loss_limit': 0.05,  # 5% de perte journalière max
+        'weekly_loss_limit': 0.15  # 15% de perte hebdomadaire max
     },
-    'position_sizing': {
-        'base_position_size': 0.1,
-        'max_position_size': 0.3,
-        'min_position_size': 0.01,
+
+    # Paramètres de lissage
+    'smoothing': {
+        'initial_factor': 0.1,
+        'min_factor': 0.01,
+        'max_factor': 0.5,
+        'adaptation_rate': 0.01
     },
-    'modes': {
-        'volatile': {'sl_multiplier': 1.3, 'tp_multiplier': 0.8, 'position_size_multiplier': 0.7},
-        'sideways': {'sl_multiplier': 0.8, 'tp_multiplier': 0.8, 'position_size_multiplier': 0.9},
-        'bull': {'sl_multiplier': 0.9, 'tp_multiplier': 1.2, 'position_size_multiplier': 1.1},
-        'bear': {'sl_multiplier': 1.1, 'tp_multiplier': 0.9, 'position_size_multiplier': 0.8},
+
+    # Paramètres de performance
+    'performance': {
+        'lookback_window': 100,
+        'min_trades_for_metrics': 10,
+        'risk_free_rate': 0.0,
+        'annualization_factor': 252
     },
+
+    # Paramètres d'apprentissage
     'learning': {
         'learning_rate_range': [1e-5, 1e-3],
         'ent_coef_range': [0.001, 0.1],
-        'gamma_range': [0.9, 0.999]
+        'gamma_range': [0.9, 0.999],
+        'batch_size': 64,
+        'n_steps': 2048,
+        'n_epochs': 10,
+        'clip_range': 0.2
     }
 }
 
@@ -81,6 +209,9 @@ class DynamicBehaviorEngine:
     en fonction des conditions de marché, de la performance du portefeuille
     et de l'état interne de l'agent.
     """
+
+    # Constante pour le montant minimum d'un trade (en USDT)
+    MIN_TRADE = 11.0
 
     def __init__(self, config: Optional[Dict[str, Any]] = None,
                  finance_manager: Optional[Any] = None):
@@ -92,24 +223,262 @@ class DynamicBehaviorEngine:
             finance_manager: Instance de FinanceManager (optionnel)
         """
         # Fusion de la configuration par défaut avec celle fournie
-        # Start with the default configuration
-        self.config = DEFAULT_CONFIG.copy()
+        self.config = self._merge_configs(DEFAULT_CONFIG, config or {})
 
-        # Load external config from dbe_config.yaml if it exists
+        # Référence au gestionnaire de portefeuille
+        self.finance_manager = finance_manager
+
+        # État actuel du marché
+        self.current_regime = 'neutral'
+        self.regime_confidence = 0.0
+        self.last_regime_change = datetime.utcnow()
+
+        # Métriques de performance
+        self.portfolio_value_history = []
+        self.daily_returns = []
+        self.max_drawdown = 0.0
+        self.current_drawdown = 0.0
+
+        # Initialisation des paramètres de trading
+        self.current_sl_multiplier = 1.0
+        self.current_tp_multiplier = 1.0
+        self.current_position_size_multiplier = 1.0
+        self.max_position_size = self.config['position_sizing']['max_position_size']
+
+        # Paramètres de lissage
+        self.smoothing_factor = self.config.get('smoothing', {}).get('initial_factor', 0.1)
+        self.smoothed_params = {
+            'sl_pct': self.config['position_sizing'].get('initial_sl_pct', 0.02),
+            'tp_pct': self.config['position_sizing'].get('initial_tp_pct', 0.04),
+            'position_size': self.config['position_sizing'].get('initial_position_size', 0.1),
+            'risk_level': 1.0
+        }
+
+        # Initialisation du logger personnalisé
+        self.logger = logging.getLogger(f"dbe.{self.__class__.__name__}")
+
+        # S'assurer que le logger est bien de type DBELogger
+        if not isinstance(self.logger, DBELogger):
+            self.logger.__class__ = DBELogger
+
+        # Initialisation des historiques
+        self.decision_history = []  # Historique des décisions prises
+        self.trade_history = []     # Historique des trades
+
+        # Initialisation des états des workers
+        self.worker_states = {}
+
+        # Initialisation de l'état
+        self.state = {
+            'current_step': 0,
+            'last_trade_step': 0,
+            'consecutive_losses': 0,
+            'consecutive_wins': 0,
+            'last_win': False,
+            'last_reward': 0.0,
+            'drawdown': 0.0,
+            'current_risk_level': 1.0,  # Niveau de risque initial (1.0 = neutre)
+            'max_drawdown': 0.0,
+            'sharpe_ratio': 0.0,
+            'sortino_ratio': 0.0,
+            'volatility': 0.0,
+            'win_rate': 0.0,
+            'profit_factor': 0.0,
+            'recovery_factor': 0.0,
+            'expectancy': 0.0,
+            'avg_trade': 0.0,
+            'avg_win': 0.0,
+            'avg_loss': 0.0,
+            'max_win': 0.0,
+            'max_loss': 0.0,
+            'total_trades': 0,
+            'winning_trades': 0,
+            'losing_trades': 0,
+            'equity_curve': [],
+            'returns': [],
+            'drawdowns': [],
+            'position_duration': 0,  # Durée de la position actuelle en pas de temps
+            'market_conditions': {},
+            'performance_metrics': {  # Ajout des métriques de performance initiales
+                'sharpe_ratio': 0.0,
+                'sortino_ratio': 0.0,
+                'win_rate': 0.0,
+                'profit_factor': 0.0,
+                'max_drawdown': 0.0,
+                'volatility': 0.0,
+                'avg_trade': 0.0,
+                'expectancy': 0.0
+            }
+        }
+
+        # Chargement de la configuration externe si elle existe
         dbe_config_path = Path(__file__).parent.parent.parent.parent / 'config' / 'dbe_config.yaml'
         if dbe_config_path.exists():
             with open(dbe_config_path, 'r') as f:
-                dbe_config = yaml.safe_load(f)
+                dbe_config = yaml.safe_load(f) or {}
                 if dbe_config:
-                    # Deep merge the loaded config into our existing config
-                    def deep_update(d, u):
-                        for k, v in u.items():
-                            if isinstance(v, dict):
-                                d[k] = deep_update(d.get(k, {}), v)
-                            else:
-                                d[k] = v
-                        return d
-                    deep_update(self.config, dbe_config)
+                    self.config = self._merge_configs(self.config, dbe_config)
+
+    def _merge_configs(self, base: Dict[str, Any], update: Dict[str, Any]) -> Dict[str, Any]:
+        """Fusionne récursivement deux dictionnaires de configuration."""
+        result = base.copy()
+        for key, value in update.items():
+            if key in result and isinstance(result[key], dict) and isinstance(value, dict):
+                result[key] = self._merge_configs(result[key], value)
+            else:
+                result[key] = value
+        return result
+
+    def detect_market_regime(self, market_data: Dict[str, Any]) -> Tuple[str, float]:
+        """Détecte le régime de marché actuel."""
+        adx = market_data.get('adx', 0)
+        rsi = market_data.get('rsi', 50)
+        ema_fast = market_data.get('ema_fast', 0)
+        ema_slow = market_data.get('ema_slow', 0)
+
+        if adx > self.config['market_regime_detection']['adx_threshold']:
+            if ema_fast > ema_slow:
+                return 'bull', 0.7 + (0.3 * (adx / 100))
+            else:
+                return 'bear', 0.7 + (0.3 * (adx / 100))
+        else:
+            if rsi > 70 or rsi < 30:
+                return 'volatile', 0.8
+            return 'sideways', 0.9
+
+    def _get_capital_tier(self, portfolio_value: float) -> Optional[Dict[str, Any]]:
+        """Determines the capital tier based on the portfolio value."""
+        capital_tiers = self.config.get('capital_tiers')
+        if not capital_tiers or not isinstance(capital_tiers, list):
+            logger.warning("Configuration 'capital_tiers' manquante ou invalide.")
+            return None
+        for tier in capital_tiers:
+            min_capital = tier.get('min_capital', 0)
+            max_capital = tier.get('max_capital')
+            if max_capital is None: # For the highest tier, max_capital can be null
+                max_capital = float('inf')
+            
+            if min_capital <= portfolio_value < max_capital:
+                logger.debug(f"Capital {portfolio_value:.2f} USDT correspond au palier: {tier.get('name')}")
+                return tier
+        logger.warning(f"Aucun palier de capital trouvé pour un portefeuille de {portfolio_value:.2f} USDT.")
+        return None
+
+    def update_risk_parameters(self, market_data: Dict[str, Any], portfolio_value: float) -> Dict[str, float]:
+        """
+        Met à jour les paramètres de risque en fonction du régime de marché détecté
+        et des conditions actuelles du marché, en utilisant la logique des paliers de capital.
+        """
+        try:
+            # --- Nouvelle logique de Paliers de Capital ---
+            tier = self._get_capital_tier(portfolio_value)
+            
+            # Détection du régime de marché
+            new_regime, confidence = self.detect_market_regime(market_data)
+            if (confidence > self.config.get('market_regime_detection', {}).get('regime_confidence_threshold', 0.7) and
+                new_regime != self.current_regime):
+                self.current_regime = new_regime
+                logger.info(f"Changement de régime détecté: {new_regime.upper()} (Confiance: {confidence*100:.1f}%)")
+
+            regime_params = self.config.get('regime_parameters', {}).get(self.current_regime, {})
+            risk_params = self.config.get('risk_parameters', {})
+            
+            # --- Calcul de la taille de position basé sur les paliers ---
+            position_size_pct = risk_params.get('initial_position_size', 0.1) # Default
+
+            if tier:
+                exposure_range = tier.get('exposure_range', [1, 10])
+                min_exposure_pct = exposure_range[0] / 100.0
+                max_exposure_pct = exposure_range[1] / 100.0
+                
+                risk_level = self.state.get('current_risk_level', 1.0)
+                # Normaliser le niveau de risque (0.3-2.0) en un facteur (0-1)
+                normalized_risk = (risk_level - 0.3) / (2.0 - 0.3)
+                
+                # Calculer la taille de position en %% en utilisant l'intervalle du palier
+                position_size_pct = min_exposure_pct + (max_exposure_pct - min_exposure_pct) * normalized_risk
+                
+                # Appliquer la contrainte max du palier
+                max_tier_size_pct = tier.get('max_position_size_pct', 90) / 100.0
+                position_size_pct = min(position_size_pct, max_tier_size_pct)
+
+                # Vérifier la valeur minimale du trade
+                min_trade_value = self.config.get('risk_management', {}).get('min_trade_value', 11.0)
+                if portfolio_value > 0 and (position_size_pct * portfolio_value) < min_trade_value:
+                    # Si la taille calculée est inférieure au minimum, on prend le minimum,
+                    # mais seulement si cela ne dépasse pas la taille max du palier.
+                    if (min_trade_value / portfolio_value) <= max_tier_size_pct:
+                        position_size_pct = min_trade_value / portfolio_value
+                    else:
+                        # Conflit de configuration, on plafonne à la taille max
+                        position_size_pct = max_tier_size_pct
+                        logger.warning(f"Conflit de configuration pour le palier {tier.get('name')}: min_trade_value "
+                                     f"({min_trade_value} USDT) est supérieur à max_position_size_pct "
+                                     f"({max_tier_size_pct*100}%%). Plafonnement à la taille maximale.")
+            else:
+                # Fallback à l'ancienne logique si aucun palier n'est trouvé
+                position_size_multiplier = regime_params.get('position_size_multiplier', 1.0)
+                risk_level = self.state.get('current_risk_level', 1.0)
+                position_size_pct = np.clip(
+                    risk_params.get('initial_position_size', 0.1) * position_size_multiplier * risk_level,
+                    risk_params.get('min_position_size', 0.01),
+                    risk_params.get('max_position_size', 0.5)
+                )
+
+            # --- Calcul du SL/TP (logique existante) ---
+            close_price = market_data.get('close', 1.0)
+            atr = market_data.get('atr', 0.0)
+            volatility = atr / close_price if close_price > 0 else 0.0
+            vol_management = self.config.get('volatility_management', {})
+            min_vol = vol_management.get('min_volatility', 0.01)
+            max_vol = vol_management.get('max_volatility', 0.20)
+            vol_adjustment = np.clip((volatility - min_vol) / (max_vol - min_vol + 1e-6) * 1.5 + 0.5, 0.5, 2.0)
+            
+            base_sl_pct = risk_params.get('base_sl_pct', 0.02)
+            sl_multiplier = regime_params.get('sl_multiplier', 1.0)
+            min_sl_pct = risk_params.get('min_sl_pct', 0.005)
+            max_sl_pct = risk_params.get('max_sl_pct', 0.10)
+            stop_loss_pct = np.clip(base_sl_pct * sl_multiplier * vol_adjustment, min_sl_pct, max_sl_pct)
+
+            base_tp_pct = risk_params.get('base_tp_pct', 0.04)
+            tp_multiplier = regime_params.get('tp_multiplier', 1.0)
+            take_profit_pct = base_tp_pct * tp_multiplier
+
+            return {
+                'stop_loss_pct': stop_loss_pct,
+                'take_profit_pct': take_profit_pct,
+                'position_size_pct': position_size_pct,
+                'regime': self.current_regime,
+                'regime_confidence': confidence,
+                'volatility': volatility,
+                'vol_adjustment': vol_adjustment,
+                'risk_level': self.state.get('current_risk_level', 1.0)
+            }
+
+        except Exception as e:
+            logger.error(f"Erreur lors de la mise à jour des paramètres de risque: {e}", exc_info=True)
+            # Retour de valeurs par défaut en cas d'erreur
+            return {
+                'stop_loss_pct': 0.02,
+                'take_profit_pct': 0.04,
+                'position_size_pct': 0.1,
+                'regime': self.current_regime,
+                'regime_confidence': 0.0,
+                'volatility': 0.0,
+                'vol_adjustment': 1.0,
+                'risk_level': 1.0,
+            }
+
+    def deep_update(self, d, u):
+        for k, v in u.items():
+            if isinstance(v, dict):
+                d[k] = self.deep_update(d.get(k, {}), v)
+            else:
+                d[k] = v
+        return d
+
+    def update(self, dbe_config):
+        self.deep_update(self.config, dbe_config)
 
         # Merge the provided config argument, which takes the highest precedence
         if config:
@@ -128,7 +497,7 @@ class DynamicBehaviorEngine:
             'last_trade_pnl': 0.0,
             'consecutive_losses': 0,
             'position_duration': 0,
-            'current_risk_level': 1.0,
+            'current_risk_level': 1.0,  # Niveau de risque initial (1.0 = neutre)
             'max_risk_level': 2.0,
             'min_risk_level': 0.5,
             'last_modulation': {},
@@ -167,10 +536,6 @@ class DynamicBehaviorEngine:
         self.state_save_path = config.get('state_persistence', {}).get('save_path', 'logs/dbe/state') if config else 'logs/dbe/state'
         self.state_save_interval = config.get('state_persistence', {}).get('save_interval', 100) if config else 100
 
-        # Créer le répertoire de sauvegarde si nécessaire
-        if self.state_persistence_enabled:
-            Path(self.state_save_path).mkdir(parents=True, exist_ok=True)
-
         logger.info("🚀 Dynamic Behavior Engine initialisé (version avancée)")
         logger.info(f"Configuration: {json.dumps(self._serialize_config(), indent=2)}")
         logger.info(f"Persistance d'état: {'Activée' if self.state_persistence_enabled else 'Désactivée'}")
@@ -197,46 +562,46 @@ class DynamicBehaviorEngine:
             # Mise à jour des métriques de base
             self.state['current_step'] += 1
             self.state['volatility'] = live_metrics.get('volatility', 0.0)
-            
+
             # Détection du régime de marché avec les paramètres individuels pour le cache
             rsi = live_metrics.get('rsi')
             adx = live_metrics.get('adx')
             ema_ratio = live_metrics.get('ema_ratio')
             atr = live_metrics.get('atr', 0.0)
             atr_pct = live_metrics.get('atr_pct')
-            
+
             self.state['market_regime'] = self._detect_market_regime(
                 rsi=rsi, adx=adx, ema_ratio=ema_ratio, atr=atr, atr_pct=atr_pct
             )
-            
+
             # Mise à jour des métriques de performance si le gestionnaire financier est disponible
             if self.finance_manager:
                 portfolio_metrics = self.finance_manager.get_performance_metrics()
                 self.state['winrate'] = portfolio_metrics.get('win_rate', 0.0)
                 self.state['drawdown'] = portfolio_metrics.get('max_drawdown', 0.0) * 100  # En pourcentage
-                
+
                 # Mise à jour de l'historique des trades
                 if 'recent_trades' in portfolio_metrics:
                     self.trade_history.extend(portfolio_metrics['recent_trades'])
-                    
+
                     # Mise à jour des pertes consécutives
                     recent_trades = portfolio_metrics['recent_trades']
                     if recent_trades and not recent_trades[-1].get('is_win', False):
                         self.state['consecutive_losses'] += 1
                     else:
                         self.state['consecutive_losses'] = 0
-                        
+
             # Ajustement du niveau de risque en fonction des performances
             self._adjust_risk_level()
-            
+
             # Adaptation du facteur de lissage
             self._adapt_smoothing_factor()
-            
+
             # Journalisation de l'état actuel
             logger.debug(f"État DBE mis à jour - Régime: {self.state['market_regime']}, "
                        f"Risque: {self.state['current_risk_level']:.2f}, "
                        f"Winrate: {self.state['winrate']*100:.1f}%")
-                       
+
         except Exception as e:
             logger.error(f"Erreur lors de la mise à jour de l'état du DBE: {e}", exc_info=True)
             raise
@@ -504,9 +869,9 @@ class DynamicBehaviorEngine:
             context_metrics={
                 'market_regime': snapshot.market_regime,
                 'risk_level': snapshot.risk_level,
-                'drawdown': self.state['drawdown'],
-                'winrate': self.state['winrate'],
-                'volatility': self.state['volatility']
+                'drawdown': self.state.get('drawdown', 0.0),
+                'winrate': self.state.get('winrate', 0.0),
+                'volatility': self.state.get('volatility', 0.0)
             },
             performance_metrics=snapshot.metrics,
             additional_info={
@@ -528,14 +893,14 @@ class DynamicBehaviorEngine:
     def _detect_market_regime(self, rsi: float, adx: float, ema_ratio: float, atr: float, atr_pct: float) -> str:
         """
         Détecte le régime de marché actuel à partir des indicateurs techniques.
-        
+
         Args:
             rsi: Indice de force relative (0-100)
             adx: Average Directional Index (0-100)
             ema_ratio: Ratio EMA rapide / lente
             atr: Average True Range
             atr_pct: ATR en pourcentage du prix
-            
+
         Returns:
             Chaîne identifiant le régime de marché
         """
@@ -564,37 +929,88 @@ class DynamicBehaviorEngine:
             return 'UNKNOWN'
 
     def _adjust_risk_level(self) -> None:
-        """Ajuste le niveau de risque en fonction des performances récentes."""
+        """
+        Ajuste dynamiquement le niveau de risque en fonction des performances récentes
+        et des conditions de marché.
+        """
         try:
-            # Facteurs d'ajustement
-            winrate_factor = self.state['winrate'] / 0.6  # Normalisé par rapport à un winrate cible de 60%
-            drawdown_factor = 1.0 - (self.state['drawdown'] / 100.0)  # Réduction du risque avec le drawdown
-            loss_streak_factor = 1.0 / (1.0 + self.state['consecutive_losses'] * 0.2)  # Réduction après des pertes consécutives
+            # Récupération des paramètres de risque depuis la configuration
+            risk_params = self.config.get('risk_parameters', {})
+            min_risk = risk_params.get('min_risk_level', 0.3)
+            max_risk = risk_params.get('max_risk_level', 2.0)
+
+            # Initialisation de l'état si nécessaire
+            self.state.setdefault('current_risk_level', risk_params.get('initial_risk', 0.5))
+            self.state.setdefault('win_rate', 0.0)
+            self.state.setdefault('drawdown', 0.0)
+            self.state.setdefault('consecutive_losses', 0)
+            self.state.setdefault('sharpe_ratio', 0.0)
+            self.state.setdefault('sortino_ratio', 0.0)
+            self.state.setdefault('volatility', 0.0)
+
+            # Récupération des métriques de performance
+            portfolio_metrics = self.finance_manager.get_performance_metrics() if self.finance_manager else {}
+            win_rate = portfolio_metrics.get('win_rate', self.state['win_rate'])
+            drawdown = portfolio_metrics.get('drawdown', self.state['drawdown'])
+
+            # Facteurs d'ajustement du risque
+            # 1. Facteur basé sur le taux de réussite (win rate)
+            target_win_rate = 0.6  # Cible de 60% de trades gagnants
+            win_rate_factor = (win_rate / target_win_rate) ** 2  # Carré pour un effet non linéaire
+
+            # 2. Facteur basé sur le drawdown
+            max_allowed_drawdown = risk_params.get('max_drawdown', 0.1)  # 10% par défaut
+            drawdown_factor = 1.0 - min(drawdown / (max_allowed_drawdown * 2), 0.5)  # Réduction jusqu'à 50%
+
+            # 3. Facteur basé sur le ratio de Sharpe
+            sharpe_ratio = portfolio_metrics.get('sharpe_ratio', 0.0)
+            sharpe_factor = 1.0 + (sharpe_ratio / 2.0)  # Augmente le risque avec un meilleur Sharpe
+
+            # 4. Facteur basé sur la volatilité
+            vol_management = self.config.get('volatility_management', {})
+            min_vol = vol_management.get('min_volatility', 0.01)
+            max_vol = vol_management.get('max_volatility', 0.20)
+            current_vol = portfolio_metrics.get('volatility', min_vol)
+            vol_factor = 1.0 - ((current_vol - min_vol) / (max_vol - min_vol + 1e-6)) * 0.5  # Réduction jusqu'à 50%
+
+            # 5. Facteur basé sur les pertes consécutives
+            loss_streak_factor = 1.0 / (1.0 + self.state.get('consecutive_losses', 0) * 0.2)
 
             # Calcul du nouveau niveau de risque
-            new_risk = self.state['current_risk_level'] * winrate_factor * drawdown_factor * loss_streak_factor
+            base_risk = self.state['current_risk_level']
+            new_risk = base_risk * win_rate_factor * drawdown_factor * sharpe_factor * vol_factor * loss_streak_factor
 
             # Lissage pour éviter les changements trop brutaux
-            alpha = 0.2  # Facteur de lissage
-            smoothed_risk = (1 - alpha) * self.state['current_risk_level'] + alpha * new_risk
+            smoothing = self.config.get('smoothing', {})
+            alpha = smoothing.get('adaptation_rate', 0.1)  # Vitesse d'adaptation
+            smoothed_risk = (1.0 - alpha) * base_risk + alpha * new_risk
 
             # Application des limites
-            self.state['current_risk_level'] = np.clip(
-                smoothed_risk,
-                self.state['min_risk_level'],
-                self.state['max_risk_level']
-            )
+            self.state['current_risk_level'] = np.clip(smoothed_risk, min_risk, max_risk)
 
-            logger.debug(
-                f"Ajustement du risque - Niveau: {self.state['current_risk_level']:.2f} | "
-                f"Winrate: {self.state['winrate']*100:.1f}% | "
-                f"Drawdown: {self.state['drawdown']:.2f}% | "
-                f"Pertes consécutives: {self.state['consecutive_losses']}"
-            )
+            # Mise à jour des métriques dans l'état
+            self.state.update({
+                'win_rate': win_rate,
+                'drawdown': drawdown,
+                'sharpe_ratio': sharpe_ratio,
+                'volatility': current_vol
+            })
+
+            # Journalisation détaillée
+            if logger.isEnabledFor(logging.DEBUG):
+                logger.debug(
+                    f"Ajustement du risque - Niveau: {self.state['current_risk_level']:.2f} | "
+                    f"Win Rate: {win_rate*100:.1f}% | "
+                    f"Drawdown: {drawdown*100:.1f}% | "
+                    f"Sharpe: {sharpe_ratio:.2f} | "
+                    f"Volatilité: {current_vol*100:.1f}% | "
+                    f"Pertes consécutives: {self.state.get('consecutive_losses', 0)}"
+                )
 
         except Exception as e:
             logger.error(f"Erreur lors de l'ajustement du niveau de risque: {e}")
-            # En cas d'erreur, on reste sur le niveau de risque actuel
+            logger.exception("Détails de l'erreur:")
+            # En cas d'erreur, on conserve le niveau de risque actuel
 
     def get_performance_metrics(self) -> Dict[str, Any]:
         """
@@ -665,11 +1081,11 @@ class DynamicBehaviorEngine:
     @lru_cache(maxsize=128)
     def _calculate_sharpe_ratio(self, returns_tuple: Tuple[float, ...], risk_free_rate: float = 0.0) -> float:
         """Calcule le ratio de Sharpe annualisé avec mise en cache des résultats.
-        
+
         Args:
             returns_tuple: Tuple des rendements (doit être hashable pour le cache)
             risk_free_rate: Taux sans risque annuel (par défaut: 0.0)
-            
+
         Returns:
             Ratio de Sharpe annualisé
         """
@@ -679,22 +1095,22 @@ class DynamicBehaviorEngine:
         returns = np.array(returns_tuple)
         excess_returns = returns - risk_free_rate / 252  # Taux sans risque journalier
         std_dev = np.std(excess_returns)
-        
+
         # Éviter la division par zéro
         if std_dev < 1e-9:
             return 0.0
-            
+
         sharpe = np.mean(excess_returns) / std_dev * np.sqrt(252)
         return float(sharpe)
 
     @lru_cache(maxsize=128)
     def _calculate_sortino_ratio(self, returns_tuple: Tuple[float, ...], risk_free_rate: float = 0.0) -> float:
         """Calcule le ratio de Sortino annualisé avec mise en cache des résultats.
-        
+
         Args:
             returns_tuple: Tuple des rendements (doit être hashable pour le cache)
             risk_free_rate: Taux sans risque annuel (par défaut: 0.0)
-            
+
         Returns:
             Ratio de Sortino annualisé
         """
@@ -709,11 +1125,11 @@ class DynamicBehaviorEngine:
             return float('inf') if np.mean(excess_returns) > 0 else 0.0
 
         downside_std = np.std(downside_returns)
-        
+
         # Éviter la division par zéro
         if downside_std < 1e-9:
             return 0.0
-            
+
         sortino = np.mean(excess_returns) / downside_std * np.sqrt(252)
         return float(sortino)
 
@@ -966,8 +1382,225 @@ class DynamicBehaviorEngine:
         self.smoothing_factor = np.clip(new_smoothing_factor, min_smoothing, max_smoothing)
         logger.debug(f"Smoothing factor adapted to: {self.smoothing_factor:.3f} (Winrate: {current_winrate:.2f}, Drawdown: {current_drawdown:.2f})")
 
-    def __str__(self) -> str:
-        """Représentation textuelle de l'état du DBE."""
+    def calculate_trade_parameters(
+        self,
+        capital: float,
+        worker_pref_pct: float,
+        tier_config: Optional[Dict[str, Any]] = None,
+        current_price: Optional[float] = None,
+        asset_volatility: Optional[float] = None,
+    ) -> Dict[str, float]:
+        """
+        Calcule les paramètres de trade en fonction du capital, des préférences du worker
+        et de la configuration du palier.
+        """
+        logger.debug(f"[DBE_CALC] Entrée: capital={capital:.2f}, worker_pref={worker_pref_pct:.2f}, tier_config?={tier_config is not None}, price={current_price}, vol={asset_volatility}")
+        try:
+            if not tier_config or not isinstance(tier_config, dict):
+                logger.warning("[DBE_CALC] Échec: tier_config est manquant ou n'est pas un dictionnaire.")
+                return {'feasible': False, 'reason': 'Configuration de palier manquante ou invalide'}
+
+            logger.debug(f"[DBE_CALC] tier_config reçu: {tier_config}")
+
+            risk_params = self.compute_dynamic_modulation()
+            aggressivity = risk_params.get('aggressivity', 0.5)
+            logger.debug(f"[DBE_CALC] Agressivité calculée: {aggressivity:.2f}")
+
+            exposure_range = tier_config.get('exposure_range')
+            if not exposure_range or not isinstance(exposure_range, list) or len(exposure_range) != 2:
+                logger.warning(f"[DBE_CALC] Échec: 'exposure_range' invalide ou manquant dans le palier {tier_config.get('name')}. Reçu: {exposure_range}")
+                return {'feasible': False, 'reason': f"exposure_range invalide pour le palier {tier_config.get('name')}"}
+            
+            logger.debug(f"[DBE_CALC] Palier '{tier_config.get('name')}': exposure_range={exposure_range}")
+
+            min_position_pct = exposure_range[0] / 100.0
+            max_position_pct = exposure_range[1] / 100.0
+            logger.debug(f"[DBE_CALC] Intervalle d'exposition: min={min_position_pct:.2%}, max={max_position_pct:.2%}")
+
+            position_pct = min_position_pct + (max_position_pct - min_position_pct) * aggressivity
+            logger.debug(f"[DBE_CALC] Taille de position (basée sur l'agressivité): {position_pct:.2%}")
+
+            max_position = tier_config.get('max_position_size_pct', 0.5) / 100.0
+            position_pct = min(max_position, position_pct)
+            logger.debug(f"[DBE_CALC] Taille de position (après contrainte max du palier de {max_position:.2%}): {position_pct:.2%}")
+
+            position_size_usdt = capital * position_pct
+            logger.debug(f"[DBE_CALC] Taille de position (en USDT): {position_size_usdt:.2f}")
+
+            min_trade_value = tier_config.get('min_trade_value', 11.0)
+            if position_size_usdt < min_trade_value:
+                logger.warning(f"[DBE_CALC] Taille calculée ({position_size_usdt:.2f} USDT) < min_trade_value ({min_trade_value} USDT). Ajustement.")
+                if capital < min_trade_value:
+                    logger.warning(f"[DBE_CALC] Échec: Capital ({capital:.2f} USDT) insuffisant pour le trade minimum de {min_trade_value} USDT.")
+                    return {'feasible': False, 'reason': f'Capital insuffisant (min {min_trade_value} USDT requis)'}
+                position_pct = min_trade_value / capital
+                position_size_usdt = min_trade_value
+                logger.debug(f"[DBE_CALC] Taille de position ajustée au minimum: {position_pct:.2%} ({position_size_usdt:.2f} USDT)")
+
+            sl_pct = risk_params.get('sl_pct', 0.02)
+            tp_pct = risk_params.get('tp_pct', sl_pct * 2)
+            
+            logger.info(
+                f"🔧 Paramètres de trade - Agressivité: {aggressivity:.2f} | Taille: {position_pct:.1%} ({position_size_usdt:.2f} USDT) | SL: {sl_pct:.2%} | TP: {tp_pct:.2%}"
+            )
+
+            return {
+                'feasible': True,
+                'position_size_pct': position_pct,
+                'position_size_usdt': position_size_usdt,
+                'sl_pct': sl_pct,
+                'tp_pct': tp_pct,
+                'aggressivity': aggressivity,
+                'risk_level': risk_params.get('risk_level', 1.0),
+                'capital': capital,
+                'tier': tier_config.get('name', 'unknown'),
+                'regime': risk_params.get('regime', 'neutral'),
+                'volatility': risk_params.get('volatility', 0.0),
+                'risk_per_trade_pct': tier_config.get('risk_per_trade_pct', 0.01)
+            }
+
+        except Exception as e:
+            logger.error(f"Erreur dans calculate_trade_parameters: {e}", exc_info=True)
+            return {'feasible': False, 'reason': f'Erreur de calcul: {str(e)}'}
+
+    def check_reset_conditions(self, worker_id: str) -> Tuple[bool, str]:
+        """
+        Vérifie les conditions de full reset pour un worker.
+
+        Args:
+            worker_id: Identifiant du worker
+
+        Returns:
+            Tuple[bool, str]: (True si reset nécessaire, raison du reset)
+        """
+        # Initialiser l'état du worker s'il n'existe pas
+        if worker_id not in self.worker_states:
+            self.worker_states[worker_id] = {
+                'initial_capital': self.finance_manager.get_balance(worker_id) if self.finance_manager else 0.0,
+                'cumulative_loss': 0.0,
+                'last_trade_ts': None,
+                'consecutive_losses': 0,
+                'trade_history': []
+            }
+
+        state = self.worker_states[worker_id]
+
+        # 1) Capital total < MIN_TRADE
+        if state['initial_capital'] < self.MIN_TRADE:
+            return True, f"capital_below_min_trade ({state['initial_capital']:.2f} < {self.MIN_TRADE})"
+
+        # 2) Position invendable + solde insuffisant
+        any_untradable = any(p.get('value', 0) < self.MIN_TRADE for p in state['trade_history'])
+        if any_untradable and state['initial_capital'] < self.MIN_TRADE:
+            return True, f"untradable_position_and_low_cash (pos<{self.MIN_TRADE} and cash<{self.MIN_TRADE})"
+
+        # 3) Cumulative loss >= palier max_drawdown
+        if hasattr(self, 'determine_tier'):
+            tier = self.determine_tier(state['initial_capital'])
+            if tier and 'max_drawdown' in tier and state['cumulative_loss'] >= tier['max_drawdown']:
+                return True, f"max_drawdown_reached (loss: {state['cumulative_loss']:.2f} >= {tier['max_drawdown']})"
+
+        # 4) Vérifier d'autres conditions de reset si nécessaire
+        # ...
+
+        # Aucune condition de reset détectée
+        return False, ""
+
+    def perform_full_reset(self, worker_id: str, restore_capital: float = None) -> None:
+        """
+        Effectue un reset complet du worker.
+
+        Args:
+            worker_id: Identifiant du worker
+            restore_capital: Montant de capital à restaurer (optionnel)
+        """
+        if worker_id not in self.worker_states:
+            self.worker_states[worker_id] = {}
+
+        state = self.worker_states[worker_id]
+
+        # 1) Fermer les positions ouvertes
+        if self.finance_manager:
+            try:
+                positions = self.finance_manager.get_open_positions(worker_id)
+                for pos in positions:
+                    try:
+                        self.finance_manager.force_close_position(
+                            worker_id,
+                            pos.get('symbol', ''),
+                            pos.get('qty', 0)
+                        )
+                    except Exception as e:
+                        self.logger.warning(
+                            f"Échec de la fermeture forcée pour {worker_id} {pos.get('symbol', '')}: {str(e)}"
+                        )
+            except Exception as e:
+                self.logger.error(f"Erreur lors de la récupération des positions: {str(e)}")
+
+        # 2) Définir le nouveau capital
+        if restore_capital is None:
+            # Utiliser la valeur par défaut de la configuration ou 20.0 USDT
+            restore_capital = self.config.get('default_reset_capital', 20.0)
+            if isinstance(restore_capital, dict):
+                restore_capital = restore_capital.get(worker_id, 20.0)
+
+        if self.finance_manager:
+            self.finance_manager.set_balance(worker_id, restore_capital)
+
+        # 3) Réinitialiser l'état du worker
+        state.update({
+            'initial_capital': restore_capital,
+            'cumulative_loss': 0.0,
+            'last_trade_ts': None,
+            'consecutive_losses': 0,
+            'trade_history': []
+        })
+
+        self.logger.info(f"[RESET] Worker {worker_id} réinitialisé -> capital défini à {restore_capital:.2f} USDT")
+
+    def reset_flow(self, worker_id: str) -> bool:
+        """
+        Vérifie les conditions de reset et effectue un reset si nécessaire.
+
+        Args:
+            worker_id: Identifiant du worker
+
+        Returns:
+            bool: True si un reset a été effectué, False sinon
+        """
+        should_reset, reason = self.check_reset_conditions(worker_id)
+        if should_reset:
+            self.logger.warning(f"[RESET] Condition de reset détectée pour {worker_id}: {reason}")
+            self.perform_full_reset(worker_id)
+            return True
+        return False
+
+    def on_trade_closed(self, trade_result: Dict[str, Any]) -> None:
+        """
+        Met à jour l'état après la fermeture d'un trade.
+
+        Args:
+            trade_result: Résultat du trade fermé
+        """
+        worker_id = trade_result.get('worker_id')
+        if not worker_id or worker_id not in self.worker_states:
+            return
+
+        state = self.worker_states[worker_id]
+
+        # Mettre à jour l'historique des trades
+        state['last_trade_ts'] = datetime.utcnow()
+        state['trade_history'].append(trade_result)
+
+        # Mettre à jour les pertes cumulées
+        if 'pnl' in trade_result and trade_result['pnl'] < 0:
+            state['cumulative_loss'] += abs(trade_result['pnl'])
+            state['consecutive_losses'] += 1
+        else:
+            state['consecutive_losses'] = 0
+
+    def __del__(self):
+        """Nettoyage à la destruction de l'instance."""
         status = self.get_status()
         return (
             f"DBE Status (Step: {status['step']})\n"
@@ -1020,60 +1653,160 @@ class DynamicBehaviorEngine:
             self.dbe_log_file.close()
 
     def _compute_risk_parameters(self, state: Dict[str, Any], mod: Dict[str, Any]) -> None:
-        """Calcule les paramètres de risque dynamiques (SL/TP)."""
-        # Valeurs de base de la configuration
-        risk_cfg = self.config.get('risk', {})
-        base_sl = risk_cfg.get('base_sl_pct', 0.02)
-        base_tp = risk_cfg.get('base_tp_pct', 0.04)
+        """
+        Calcule les paramètres de risque dynamiques (SL/TP).
 
-        # Ajustement basé sur le drawdown
-        drawdown_factor = state['drawdown'] * risk_cfg.get('drawdown_sl_factor', 0.5)
+        Args:
+            state: Dictionnaire contenant l'état actuel
+            mod: Dictionnaire à mettre à jour avec les nouveaux paramètres de risque
+        """
+        try:
+            if state is None or mod is None:
+                logger.warning("State ou mod est None dans _compute_risk_parameters")
+                return
 
-        # Ajustement basé sur la volatilité
-        vol_factor = state['volatility'] * risk_cfg.get('volatility_sl_factor', 0.1)
+            # Récupération des configurations
+            risk_cfg = self.config.get('risk_parameters', {})
+            regime_params = self.config.get('regime_parameters', {}).get(self.current_regime, {})
 
-        # Ajustement basé sur le winrate
-        winrate_factor = (0.5 - state['winrate']) * risk_cfg.get('winrate_tp_factor', 0.05)
+            # Paramètres de base
+            base_sl = float(risk_cfg.get('base_sl_pct', 0.02))
+            base_tp = float(risk_cfg.get('base_tp_pct', 0.04))
 
-        # Calcul des nouvelles valeurs brutes
-        new_sl = max(
-            risk_cfg.get('min_sl_pct', 0.01),
-            min(
-                risk_cfg.get('max_sl_pct', 0.1),
-                base_sl + drawdown_factor + vol_factor
+            # Initialisation des valeurs d'état avec des valeurs par défaut si manquantes
+            current_drawdown = float(state.get('drawdown', 0.0))
+            volatility = float(state.get('volatility', 0.0))
+            win_rate = float(state.get('win_rate', 0.5))  # 50% par défaut
+            sharpe_ratio = float(state.get('sharpe_ratio', 0.0))
+            current_step = int(state.get('current_step', 0))
+
+            # Récupération des multiplicateurs spécifiques au régime
+            sl_multiplier = float(regime_params.get('sl_multiplier', 1.0))
+            tp_multiplier = float(regime_params.get('tp_multiplier', 1.0))
+
+            # 1. Ajustement basé sur le drawdown
+            max_drawdown = float(risk_cfg.get('max_drawdown', 0.1))  # 10% par défaut
+            drawdown_factor = 1.0 - min(current_drawdown / (max_drawdown * 2), 0.5)  # Réduction jusqu'à 50%
+
+            # 2. Ajustement basé sur la volatilité
+            vol_management = self.config.get('volatility_management', {})
+            min_vol = float(vol_management.get('min_volatility', 0.01))
+            max_vol = float(vol_management.get('max_volatility', 0.20))
+            vol_factor = 1.0 - ((volatility - min_vol) / (max_vol - min_vol + 1e-6)) * 0.5  # Réduction jusqu'à 50%
+
+            # 3. Ajustement basé sur le win rate
+            target_win_rate = 0.6  # Cible de 60% de trades gagnants
+            win_rate_factor = (win_rate / target_win_rate) ** 2  # Effet non linéaire
+
+            # 4. Ajustement basé sur le ratio de Sharpe
+            sharpe_factor = 1.0 + (max(0, sharpe_ratio) / 2.0)  # Améliore le risque avec un meilleur Sharpe
+
+            # Calcul des nouveaux paramètres avec contraintes
+            min_sl = float(risk_cfg.get('min_sl_pct', 0.005))  # 0.5% minimum
+            max_sl = float(risk_cfg.get('max_sl_pct', 0.10))    # 10% maximum
+            min_tp = float(risk_cfg.get('min_tp_pct', 0.01))    # 1% minimum
+            max_tp = float(risk_cfg.get('max_tp_pct', 0.20))    # 20% maximum
+
+            # Calcul des nouvelles valeurs
+            new_sl = base_sl * sl_multiplier * drawdown_factor * vol_factor
+            new_tp = base_tp * tp_multiplier * win_rate_factor * sharpe_factor
+
+            # Application des limites
+            new_sl = max(min_sl, min(max_sl, new_sl))
+            new_tp = max(min_tp, min(max_tp, new_tp))
+
+            # Vérification de l'initialisation de smoothed_params
+            if not hasattr(self, 'smoothed_params'):
+                self.smoothed_params = {
+                    'sl_pct': base_sl,
+                    'tp_pct': base_tp,
+                    'position_size': 0.1,
+                    'risk_level': 1.0
+                }
+
+            # Application du lissage exponentiel
+            smoothing = self.config.get('smoothing', {}).get('adaptation_rate', 0.1)
+
+            # Mise à jour des paramètres lissés
+            for param, new_val in [('sl_pct', new_sl), ('tp_pct', new_tp)]:
+                if param in self.smoothed_params:
+                    self.smoothed_params[param] = (
+                        (1.0 - smoothing) * self.smoothed_params[param] +
+                        smoothing * new_val
+                    )
+                else:
+                    self.smoothed_params[param] = new_val
+
+            # Calcul du coefficient d'agressivité (0-1) basé sur plusieurs facteurs
+            # 1. Facteur de confiance (winrate récent)
+            winrate_factor = min(1.0, max(0.0, (win_rate - 0.4) / 0.6))  # 0% à 100% pour winrate de 0.4 à 1.0
+
+            # 2. Facteur de drawdown (pénalise les périodes de pertes)
+            drawdown_factor = max(0.0, 1.0 - (current_drawdown / 0.1))  # 100% à 0% pour drawdown de 0% à 10%
+
+            # 3. Facteur de volatilité (pénalise la volatilité élevée)
+            volatility_factor = 1.0 - min(1.0, volatility * 5)  # 100% à 0% pour volatilité de 0% à 20%
+
+            # 4. Facteur de régime de marché
+            regime_factors = {
+                'bull': 1.0,
+                'bear': 0.3,
+                'volatile': 0.5,
+                'sideways': 0.7,
+                'neutral': 0.8
+            }
+            regime_factor = regime_factors.get(self.current_regime.lower(), 0.5)
+
+            # Calcul final du coefficient d'agressivité (0-1)
+            aggressivity = (winrate_factor * 0.4 +
+                          drawdown_factor * 0.3 +
+                          volatility_factor * 0.2 +
+                          regime_factor * 0.1)
+
+            # Lissage du coefficient d'agressivité
+            if 'aggressivity' not in self.smoothed_params:
+                self.smoothed_params['aggressivity'] = 0.5  # Valeur par défaut
+
+            smoothing = self.config.get('smoothing', {}).get('adaptation_rate', 0.1)
+            self.smoothed_params['aggressivity'] = (
+                (1.0 - smoothing) * self.smoothed_params['aggressivity'] +
+                smoothing * aggressivity
             )
-        )
 
-        new_tp = max(
-            risk_cfg.get('min_tp_pct', 0.01),
-            min(
-                risk_cfg.get('max_tp_pct', 0.2),
-                base_tp + winrate_factor - (vol_factor * 0.5)  # TP moins sensible à la volatilité
-            )
-        )
+            # Mise à jour du dictionnaire de sortie avec les valeurs lissées
+            mod.update({
+                'sl_pct': self.smoothed_params.get('sl_pct', base_sl),
+                'tp_pct': self.smoothed_params.get('tp_pct', base_tp),
+                'risk_level': self.state.get('current_risk_level', 1.0),
+                'regime': self.current_regime,
+                'volatility': volatility,
+                'aggressivity': self.smoothed_params['aggressivity']
+            })
 
-        # Application du lissage exponentiel
-        self.smoothed_params['sl_pct'] = (
-            self.smoothing_factor * self.smoothed_params['sl_pct'] +
-            (1 - self.smoothing_factor) * new_sl
-        )
+            # Journalisation des changements importants (tous les 50 pas)
+            if current_step > 0 and current_step % 50 == 0:
+                logger.info(
+                    f"🔧 Paramètres de risque - "
+                    f"Régime: {self.current_regime.upper()} | "
+                    f"Drawdown: {current_drawdown:.2%} | "
+                    f"Volatilité: {volatility:.2%} | "
+                    f"Win Rate: {win_rate:.1%} | "
+                    f"Sharpe: {sharpe_ratio:.2f}\n"
+                    f"SL: {new_sl:.2%} (lissé: {mod['sl_pct']:.2%}) | "
+                    f"TP: {new_tp:.2%} (lissé: {mod['tp_pct']:.2%}) | "
+                    f"Niveau de risque: {mod['risk_level']:.2f}"
+                )
 
-        self.smoothed_params['tp_pct'] = (
-            self.smoothing_factor * self.smoothed_params['tp_pct'] +
-            (1 - self.smoothing_factor) * new_tp
-        )
-
-        # Assignation des valeurs lissées
-        mod['sl_pct'] = self.smoothed_params['sl_pct']
-        mod['tp_pct'] = self.smoothed_params['tp_pct']
-
-        # Journalisation des changements importants
-        if state['current_step'] % 100 == 0:
-            logger.info(
-                f"🔧 Paramètres de risque - "
-                f"Nouveau SL: {new_sl:.2%} (lissé: {mod['sl_pct']:.2%}), "
-                f"Nouveau TP: {new_tp:.2%} (lissé: {mod['tp_pct']:.2%})"
-            )
+        except Exception as e:
+            logger.error(f"Erreur dans _compute_risk_parameters: {str(e)}", exc_info=True)
+            # En cas d'erreur, on utilise les valeurs par défaut
+            mod.update({
+                'sl_pct': risk_cfg.get('base_sl_pct', 0.02),
+                'tp_pct': risk_cfg.get('base_tp_pct', 0.04),
+                'risk_level': 1.0,
+                'regime': self.current_regime,
+                'volatility': 0.0
+            })
 
     def _compute_reward_modulation(self, mod: Dict[str, Any]) -> None:
         """Calcule la modulation des récompenses."""

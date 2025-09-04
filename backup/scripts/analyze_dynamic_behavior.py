@@ -95,11 +95,11 @@ class DBEAnalyzer:
         recs = []
         if metrics['sl_pct_mean'].pct_change().fillna(0).mean() < 0.05:
             recs.append("La sensibilité du SL au drawdown est faible. Envisagez d'augmenter `drawdown_sl_factor`.")
-        
+
         defensive_at_low_drawdown = metrics[metrics['drawdown'].apply(lambda x: x.left < 2)]
         if not defensive_at_low_drawdown.empty and (defensive_at_low_drawdown['defensive_mode_pct'] > 10).any():
             recs.append("Le mode DEFENSIVE se déclenche pour un drawdown faible (<2%). Envisagez d'ajuster `min_drawdown_threshold`.")
-        
+
         if not recs:
             recs.append("Le comportement face au drawdown semble nominal.")
         return recs
@@ -115,7 +115,7 @@ class DBEAnalyzer:
             results['boost_frequency_pct'] = boost_freq
             if boost_freq < 10:
                 recs.append(f"Le `reward_boost` est rare ({boost_freq:.1f}%). Vérifiez `winrate_threshold`.")
-        
+
         if 'penalty_inaction' in df.columns:
             penalty_freq = (df['penalty_inaction'] < 0).mean() * 100
             results['penalty_frequency_pct'] = penalty_freq
@@ -154,7 +154,7 @@ def main():
         # Assumes the script is run from the ADAN project root
         analyzer = DBEAnalyzer(logs_dir="logs/dbe")
         analyzer.generate_report()
-        
+
         print("\n✅ Rapport généré : 'reports/dbe_analysis_report.json'")
         print("   Graphique sauvegardé : 'reports/figures/dbe_drawdown_analysis.png'")
 

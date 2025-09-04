@@ -21,7 +21,7 @@ logger = logging.getLogger(__name__)
 def _force_canonical_output(market_arr, portfolio_arr, expected_market_shape=None,
                           expected_port_shape=None):
     """Convertit les tableaux d'entrée en un format canonique.
-    
+
     Args:
         market_arr: Données de marché à convertir (peut être un tableau numpy,
                    un tenseur PyTorch, un DataFrame pandas, etc.)
@@ -30,7 +30,7 @@ def _force_canonical_output(market_arr, portfolio_arr, expected_market_shape=Non
                              (par défaut: None)
         expected_port_shape: Forme attendue pour les données de portefeuille
                            (par défaut: None)
-        
+
     Returns:
         Tuple de (market_np, portfolio_np) où les deux sont des tableaux numpy
         du bon format
@@ -64,7 +64,7 @@ def _force_canonical_output(market_arr, portfolio_arr, expected_market_shape=Non
             m = np.zeros(expected_market_shape, dtype=np.float32)
         else:
             m = np.zeros((1, 1, 1), dtype=np.float32)
-            
+
     # Conversion du type et ajustement des dimensions
     m = m.astype(np.float32, copy=False)
     if expected_market_shape is not None:
@@ -84,7 +84,7 @@ def _force_canonical_output(market_arr, portfolio_arr, expected_market_shape=Non
             p = np.zeros(expected_port_shape, dtype=np.float32)
         else:
             p = np.zeros((1,), dtype=np.float32)
-            
+
     p = p.astype(np.float32, copy=False)
     # Aplatir ou redimensionner le portefeuille à la forme attendue
     p = p.reshape(-1)
@@ -93,7 +93,7 @@ def _force_canonical_output(market_arr, portfolio_arr, expected_market_shape=Non
         outp = np.zeros(desired, dtype=np.float32)
         outp[:min(desired, p.shape[0])] = p[:min(desired, p.shape[0])]
         p = outp.reshape(expected_port_shape)
-        
+
     return m, p
 
 
@@ -1721,7 +1721,7 @@ class StateBuilder:
     def align_timeframe_dims(self, obs_by_tf: Optional[Dict[str, np.ndarray]]) -> np.ndarray:
         """
         Ensure all timeframe observations have the same number of features by padding or truncating.
-        
+
         This method handles:
         - Missing or invalid inputs
         - Variable feature dimensions across timeframes
@@ -1739,15 +1739,15 @@ class StateBuilder:
         """
         # Track if we're in a fallback scenario
         fallback_used = False
-        
+
         # Default empty return value with correct dimensions
         empty_return = np.zeros((0, self.window_size, 0), dtype=np.float32)
-        
+
         # Handle None or empty input
         if not obs_by_tf or not isinstance(obs_by_tf, dict):
             logger.warning("No valid timeframe observations provided or input is not a dictionary")
             return empty_return
-            
+
         # Log input statistics
         logger.debug(f"Processing {len(obs_by_tf)} timeframe observations")
         for tf, arr in obs_by_tf.items():
@@ -1755,7 +1755,7 @@ class StateBuilder:
                 logger.debug(f"  {tf}: shape={arr.shape}, dtype={getattr(arr, 'dtype', 'unknown')}, "
                            f"min={np.min(arr) if arr.size > 0 else 'N/A'}, "
                            f"max={np.max(arr) if arr.size > 0 else 'N/A'}")
-        
+
         # Filter out None or invalid arrays, convert to consistent format
         valid_obs = {}
         for tf, arr in obs_by_tf.items():
@@ -1766,7 +1766,7 @@ class StateBuilder:
             else:
                 # Ensure we have a copy to avoid modifying the input
                 valid_obs[tf] = np.asarray(arr, dtype=np.float32).copy()
-                
+
                 # Check for NaN or Inf values
                 if np.any(~np.isfinite(valid_obs[tf])):
                     logger.warning(f"Non-finite values found in {tf} observations - replacing with zeros")
@@ -1776,7 +1776,7 @@ class StateBuilder:
         if not valid_obs:
             logger.warning("No valid observations after filtering")
             return empty_return
-            
+
         # Ensure all arrays are 2D (window_size, n_features)
         for tf in list(valid_obs.keys()):
             arr = valid_obs[tf]
@@ -1787,7 +1787,7 @@ class StateBuilder:
                 elif arr.ndim > 2:
                     logger.warning(f"Flattening {tf} observation from {arr.ndim}D to 2D")
                     valid_obs[tf] = arr.reshape(arr.shape[0], -1)
-                
+
                 # Ensure the window size matches
                 if valid_obs[tf].shape[0] != self.window_size:
                     logger.warning(f"Window size mismatch for {tf}: expected {self.window_size}, "
@@ -1799,7 +1799,7 @@ class StateBuilder:
                         pad = ((self.window_size - valid_obs[tf].shape[0], 0), (0, 0))
                         valid_obs[tf] = np.pad(valid_obs[tf], pad, 'constant', constant_values=0.0)
                     fallback_used = True
-                    
+
             except Exception as e:
                 logger.error(f"Error processing {tf} array: {str(e)}")
                 valid_obs[tf] = np.zeros((self.window_size, 1), dtype=np.float32)
@@ -1811,7 +1811,7 @@ class StateBuilder:
             if max_f == 0:
                 logger.warning("No features found in any timeframe")
                 return empty_return
-                
+
             logger.debug(f"Maximum features across timeframes: {max_f}")
             aligned = []
             timeframes_processed = []
@@ -1821,7 +1821,7 @@ class StateBuilder:
                 try:
                     arr = valid_obs[tf]
                     f = arr.shape[1]
-                    
+
                     if f < max_f:
                         # Pad with zeros on the feature dimension
                         pad = ((0, 0), (0, max_f - f))
@@ -1837,9 +1837,9 @@ class StateBuilder:
                     else:
                         # Exact match, ensure correct type
                         aligned.append(arr.astype(np.float32, copy=False))
-                        
+
                     timeframes_processed.append(tf)
-                    
+
                 except Exception as e:
                     logger.error(f"Error processing {tf}: {str(e)}", exc_info=True)
                     # Fallback to zeros with correct dimensions
@@ -1851,20 +1851,20 @@ class StateBuilder:
             if not aligned:
                 logger.warning("No valid observations after alignment")
                 return empty_return
-                
+
             # Stack all timeframes along the first dimension
             result = np.stack(aligned, axis=0)
-            
+
             # Final validation of the output shape
             if result.shape[0] != len(valid_obs) or result.shape[1] != self.window_size:
                 logger.error(f"Unexpected output shape: {result.shape}, expected ({len(valid_obs)}, {self.window_size}, {max_f})")
                 return empty_return
-                
+
             if fallback_used:
                 logger.warning(f"Fallback used during alignment. Timeframes processed: {', '.join(timeframes_processed)}")
             else:
                 logger.debug(f"Successfully aligned {len(timeframes_processed)} timeframes to shape {result.shape}")
-                
+
             return result
 
         except Exception as e:
@@ -1916,9 +1916,9 @@ class StateBuilder:
             type(result["observation"]), result["observation"].shape, result["observation"].dtype, result["portfolio_state"].shape
         )
         return result
-    
 
-    
+
+
     def _process_timeframe_data(
         self,
         tf: str,
@@ -2037,14 +2037,14 @@ class StateBuilder:
                 if tf_result is not None:  # Explicit None check instead of truthy check
                     tf_key, obs = tf_result
                     observations[tf_key] = obs
-            
+
             aligned_obs = self.align_timeframe_dims(observations)
-            
+
             # Ensure aligned_obs is valid
             if aligned_obs is None or not isinstance(aligned_obs, np.ndarray):
                 logger.warning("Invalid aligned_obs, using zero array")
                 aligned_obs = np.zeros(self.observation_shape, dtype=np.float32)
-            
+
             # Create default portfolio state with explicit check
             portfolio_state = np.zeros(17, dtype=np.float32)
             if not isinstance(portfolio_state, np.ndarray):

@@ -9,6 +9,7 @@ import gc
 import os
 import logging
 import traceback
+import hashlib
 import numpy as np
 import pandas as pd
 from typing import Dict, List, Tuple, Any, Optional, Union
@@ -20,12 +21,12 @@ logger = logging.getLogger(__name__)
 
 
 def _force_canonical_output(market_arr, portfolio_arr, expected_market_shape=None,
-                          expected_port_shape=None):
+                         expected_port_shape=None):
     """Convertit les tableaux d'entrée en un format canonique.
 
     Args:
         market_arr: Données de marché à convertir (peut être un tableau numpy,
-                   un tenseur PyTorch, un DataFrame pandas, etc.)
+            un tenseur PyTorch, un DataFrame pandas, etc.)
         portfolio_arr: Données de portefeuille à convertir
         expected_market_shape: Forme attendue pour les données de marché
                              (par défaut: None)
@@ -99,8 +100,7 @@ def _force_canonical_output(market_arr, portfolio_arr, expected_market_shape=Non
 
 
 class TimeframeConfig:
-    """
-    Configuration class for timeframe-specific settings.
+    """Configuration class for timeframe-specific settings.
 
     This class encapsulates the configuration for a specific timeframe,
     including its features and any other relevant settings.
@@ -113,8 +113,7 @@ class TimeframeConfig:
         window_size: int = 100,
         normalize: bool = True,
     ):
-        """
-        Initialize timeframe configuration.
+        """Initialize timeframe configuration.
 
         Args:
             timeframe: The timeframe identifier (e.g., '5m', '1h')
@@ -123,8 +122,14 @@ class TimeframeConfig:
             normalize: Whether to normalize the data
         """
         self.timeframe = timeframe
-        self.features = features if (features is not None and len(features) > 0) else []
-        self.window_size = window_size if window_size is not None else 100
+        self.features = (
+            features if (features is not None and len(features) > 0) 
+            else []
+        )
+        self.window_size = (
+            window_size if window_size is not None 
+            else 100
+        )
         self.normalize = normalize
 
     def to_dict(self) -> Dict[str, Any]:
@@ -158,29 +163,31 @@ class StateBuilder:
     def __init__(
         self,
         features_config: Dict[str, List[str]] = None,
-        window_size: int = 100,  # Correspond exactement à la configuration dans config.yaml
+        window_size: int = 100,  # Correspond à la configuration dans config.yaml
         include_portfolio_state: bool = True,
         normalize: bool = True,
         scaler_path: Optional[str] = None,
         adaptive_window: bool = True,
-        min_window_size: int = 50,  # 50% de la taille de fenêtre par défaut (100 -> 50)
-        max_window_size: int = 150,  # 150% de la taille de fenêtre par défaut (100 -> 150)
-        memory_config: Optional[Dict[str, Any]] = None,  # Configuration de mémoire
+        min_window_size: int = 50,  # 50% de window_size par défaut
+        max_window_size: int = 150,  # 150% de window_size par défaut
+        memory_config: Optional[Dict[str, Any]] = None,
         target_observation_size: Optional[int] = None,
     ):
-        """
-        Initialize the StateBuilder according to design specifications.
+        """Initialize the StateBuilder according to design specifications.
 
         Args:
             features_config: Dictionary mapping timeframes to their feature lists
             window_size: Base number of time steps to include in each observation
-            include_portfolio_state: Whether to include portfolio state in observations
+            include_portfolio_state: Whether to include portfolio state in 
+                observations
             normalize: Whether to normalize the data
             scaler_path: Path to save/load the scaler
-            adaptive_window: Whether to use adaptive window sizing based on volatility
+            adaptive_window: Whether to use adaptive window sizing based on 
+                volatility
             min_window_size: Minimum window size for adaptive mode
             max_window_size: Maximum window size for adaptive mode
             memory_config: Configuration for memory optimizations
+            target_observation_size: Target size for the observation space
         """
         # Configuration initiale
         # Utiliser la configuration exacte de config.yaml
@@ -193,15 +200,15 @@ class StateBuilder:
                     "CLOSE",
                     "VOLUME",
                     "RSI_14",
-                    "STOCH_14_3",
-                    "CCI_20_0.015",
-                    "ROC_9",
-                    "MFI_14",
+                    "STOCHk_14_3_3",
+                    "STOCHd_14_3_3",
+                    "MACD_HIST",
+                    "ATR_14",
                     "EMA_5",
-                    "EMA_20",
-                    "SUPERTREND_14_2.0",
-                    "PSAR_0.02_0.2",
-                    "ATR_14"
+                    "EMA_12",
+                    "BB_UPPER",
+                    "BB_MIDDLE",
+                    "BB_LOWER"
                 ],
                 "1h": [
                     "OPEN",
@@ -210,15 +217,15 @@ class StateBuilder:
                     "CLOSE",
                     "VOLUME",
                     "RSI_14",
-                    "MACD_12_26_9",
-                    "MACD_HIST_12_26_9",
-                    "CCI_20_0.015",
-                    "MFI_14",
-                    "EMA_50",
-                    "EMA_100",
-                    "SMA_200",
-                    "ICHIMOKU_9_26_52",
-                    "PSAR_0.02_0.2",
+                    "STOCHk_14_3_3",
+                    "STOCHd_14_3_3",
+                    "MACD_HIST",
+                    "ADX_14",
+                    "BB_UPPER",
+                    "BB_MIDDLE",
+                    "BB_LOWER",
+                    "EMA_26",
+                    "EMA_50"
                 ],
                 "4h": [
                     "OPEN",
@@ -227,15 +234,16 @@ class StateBuilder:
                     "CLOSE",
                     "VOLUME",
                     "RSI_14",
-                    "MACD_12_26_9",
-                    "CCI_20_0.015",
-                    "MFI_14",
+                    "MACD_HIST",
+                    "ADX_14",
+                    "ATR_14",
+                    "OBV",
                     "EMA_50",
+                    "EMA_200",
                     "SMA_200",
-                    "ICHIMOKU_9_26_52",
-                    "SUPERTREND_14_3.0",
-                    "PSAR_0.02_0.2",
-                ],
+                    "STOCHk_14_3_3",
+                    "STOCHd_14_3_3"
+                ]
             }
         self.features_config = features_config
         # Ne garder que les timeframes qui ont des features définies
@@ -256,74 +264,35 @@ class StateBuilder:
         # Définition des fonctionnalités disponibles par timeframe
         # Basé sur les logs, nous avons les indicateurs suivants disponibles :
         # - Données OHLCV de base : OPEN, HIGH, LOW, CLOSE, VOLUME
-        # - Indicateurs de momentum disponibles : RSI_14, CCI_20_0.015, MFI_14, ROC_9
-        # - Moyennes mobiles disponibles : EMA_5, EMA_20
+        # - Indicateurs de momentum disponibles : RSI_14, STOCHk_14_3_3, STOCHd_14_3_3, MACD_HIST
+        # - Moyennes mobiles disponibles : EMA_5, EMA_12, EMA_26, EMA_50, EMA_200, SMA_200
         # - Indicateurs de tendance disponibles : SUPERTREND_14_2.0, PSAR_0.02_0.2
 
-        # Configuration spécifique par timeframe basée sur les données disponibles
-        # Définition des indicateurs composites qui génèrent plusieurs colonnes
+        # Configuration des indicateurs composites qui génèrent plusieurs colonnes
+        # Cette configuration est utilisée pour la transformation des données
         self.composite_indicators = {
-            'STOCH_14_3_3': ['STOCHK_14_3_3', 'STOCHD_14_3_3'],  # STOCH génère %K et %D (les noms réels dans les données)
-            'MACD_12_26_9': ['MACD_12_26_9', 'MACD_SIGNAL_12_26_9', 'MACD_HIST_12_26_9'],
-            'ICHIMOKU_9_26_52': ['TENKAN_9', 'KIJUN_26', 'SENKOU_A', 'SENKOU_B', 'CHIKOU_26']
-        }
-
-        # Liste des indicateurs de base (non composites)
-        self.base_indicators = [
-            'RSI_14', 'CCI_20_0.015', 'MFI_14', 'ROC_9',
-            'EMA_5', 'EMA_20', 'EMA_50', 'EMA_100', 'SMA_200',
-            'SUPERTREND_14_2.0', 'PSAR_0.02_0.2', 'ATR_14',
-            'STOCHK_14_3_3', 'STOCHD_14_3_3'  # Ajout des composants STOCH directs
-        ]
-
-        # Configuration des features attendues par timeframe
-        # Note: Le timestamp est géré séparément et n'est pas inclus dans les features
-        self.expected_features = {
-            '5m': [
-                # Données OHLCV de base (5) - Le timestamp est géré séparément
-                'OPEN', 'HIGH', 'LOW', 'CLOSE', 'VOLUME',
-                # Indicateurs de momentum (6)
-                'RSI_14', 'STOCHK_14_3_3', 'STOCHD_14_3_3', 'CCI_20_0.015', 'ROC_9', 'MFI_14',
-                # Moyennes mobiles (2)
-                'EMA_5', 'EMA_20',
-                # Indicateurs de tendance (2)
-                'SUPERTREND_14_2.0', 'PSAR_0.02_0.2'
-                # Total: 15 features (sans le timestamp)
+            # STOCH génère %K et %D (les noms réels dans les données)
+            'STOCH_14_3_3': ['STOCHk_14_3_3', 'STOCHd_14_3_3'],
+            'MACD_12_26_9': [
+                'MACD_12_26_9', 
+                'MACD_SIGNAL_12_26_9', 
+                'MACD_HIST_12_26_9'
             ],
-            '1h': [
-                # Données OHLCV de base (5) - Le timestamp est géré séparément
-                'OPEN', 'HIGH', 'LOW', 'CLOSE', 'VOLUME',
-                # Indicateurs de momentum (3)
-                'RSI_14', 'CCI_20_0.015', 'MFI_14',
-                # Moyennes mobiles (3)
-                'EMA_50', 'EMA_100', 'SMA_200',
-                # Placeholders (4) - Pour atteindre 15 features
-                'PADDING_1', 'PADDING_2', 'PADDING_3', 'PADDING_4'
-            ],
-            '4h': [
-                # Données OHLCV de base (5) - Le timestamp est géré séparément
-                'OPEN', 'HIGH', 'LOW', 'CLOSE', 'VOLUME',
-                # Indicateurs de momentum (3)
-                'RSI_14', 'CCI_20_0.015', 'MFI_14',
-                # Moyennes mobiles (2)
-                'EMA_50', 'SMA_200',
-                # Placeholders (5) - Pour atteindre 15 features
-                'PADDING_1', 'PADDING_2', 'PADDING_3', 'PADDING_4', 'PADDING_5'
+            'ICHIMOKU_9_26_52': [
+                'TENKAN_9', 
+                'KIJUN_26', 
+                'SENKOU_A', 
+                'SENKOU_B', 
+                'CHIKOU_26'
             ]
         }
 
-        # S'assurer que chaque timeframe a exactement 15 caractéristiques
+        # Utilisation directe de la configuration fournie
+        self.expected_features = self.features_config
+        
+        # Journalisation des fonctionnalités configurées
         for tf in self.expected_features:
-            features = self.expected_features[tf]
-            if len(features) != 15:
-                logger.warning(f"Le timeframe {tf} a {len(features)} fonctionnalités au lieu de 15. Ajustement en cours...")
-                # Si trop de fonctionnalités, on garde les 15 premières
-                if len(features) > 15:
-                    self.expected_features[tf] = features[:15]
-                # Si pas assez, on complète avec des placeholders
-                else:
-                    padding = [f'PADDING_{i}' for i in range(15 - len(features))]
-                    self.expected_features[tf].extend(padding)
+            logger.info(f"Configuration des fonctionnalités pour {tf}: {self.expected_features[tf]}")
 
         # Vérifier la cohérence entre la configuration et les fonctionnalités attendues
         for tf in self.timeframes:
@@ -332,12 +301,18 @@ class StateBuilder:
                 actual = set(self.features_config[tf])
                 if expected != actual:
                     logger.warning(
-                        f"Configuration des fonctionnalités incohérente pour {tf}. "
-                        f"Attendu: {expected}, Reçu: {actual}"
+                        f"Configuration des fonctionnalités incohérente pour {tf}."
+                        f" Attendu: {len(expected)} features, Reçu: {len(actual)}"
                     )
+                    if logger.isEnabledFor(logging.DEBUG):
+                        logger.debug(f"Détails - Manquants: {expected - actual}, "
+                                   f"Supplémentaires: {actual - expected}")
                     # Mettre à jour la configuration avec les fonctionnalités attendues
                     self.features_config[tf] = self.expected_features[tf]
-                    logger.info(f"Configuration des fonctionnalités mise à jour pour {tf}")
+                    logger.info(
+                        f"Configuration des fonctionnalités mise à jour pour {tf} "
+                        f"avec {len(self.features_config[tf])} features"
+                    )
 
         self.nb_features_per_tf = {
             tf: len(features)
@@ -345,21 +320,33 @@ class StateBuilder:
             if tf in self.timeframes
         }
 
-        # Configuration de mémoire
-        self.memory_config = memory_config or {
+        # Configuration de la gestion de la mémoire
+        default_memory_config = {
+            # Nettoyage agressif des données intermédiaires
             "aggressive_cleanup": True,
+            # Forcer le garbage collection à intervalles réguliers
             "force_gc": True,
+            # Activer la surveillance de la mémoire
             "memory_monitoring": True,
+            # Seuil d'avertissement mémoire en Mo
             "memory_warning_threshold_mb": 5600,
+            # Seuil critique de mémoire en Mo
             "memory_critical_threshold_mb": 6300,
+            # Désactiver la mise en cache pour économiser de la mémoire
             "disable_caching": True,
         }
+        # Fusionner avec la configuration personnalisée si fournie
+        self.memory_config = {**default_memory_config, **(memory_config or {})}
 
-        # Métriques de performance
+        # Initialisation des métriques de performance
         self.performance_metrics = {
+            # Nombre de collections de garbage collection effectuées
             "gc_collections": 0,
+            # Pic d'utilisation mémoire en Mo
             "memory_peak_mb": 0,
+            # Nombre total d'erreurs rencontrées
             "errors_count": 0,
+            # Nombre total d'avertissements
             "warnings_count": 0,
         }
 
@@ -1179,24 +1166,161 @@ class StateBuilder:
                 start_idx = max(0, current_idx - 50)  # Fenêtre de 50 périodes
                 window = df.iloc[start_idx : current_idx + 1]
 
-                # Récupération des prix
-                close_col = "close" if "close" in window.columns else f"{tf}_close"
-                if close_col not in window.columns:
+                # Fonction utilitaire pour trouver une colonne avec gestion de la casse
+                def find_column(possible_names, default=None):
+                    for name in possible_names:
+                        # Essayer le nom exact d'abord
+                        if name in window.columns:
+                            return name
+                        # Puis essayer en majuscules
+                        if name.upper() in window.columns:
+                            return name.upper()
+                        # Puis essayer en minuscules
+                        if name.lower() in window.columns:
+                            return name.lower()
+                        # Puis essayer avec le préfixe du timeframe
+                        tf_prefixed = f"{tf}_{name}"
+                        if tf_prefixed in window.columns:
+                            return tf_prefixed
+                        # Essayer avec le préfixe du timeframe en majuscules
+                        if tf_prefixed.upper() in window.columns:
+                            return tf_prefixed.upper()
+                    return default
+                
+                # Recherche des colonnes nécessaires
+                close_col = find_column(["close", "CLOSE", "price", "PRICE"], None)
+                high_col = find_column(["high", "HIGH"], close_col)
+                low_col = find_column(["low", "LOW"], close_col)
+                
+                # Vérification des colonnes requises
+                if close_col is None:
+                    logger.warning(f"Aucune colonne de prix de clôture trouvée pour {tf}. Colonnes disponibles: {list(window.columns)}")
+                    logger.warning(f"Types des colonnes: {[type(c) for c in window.columns]}")
+                    logger.warning(f"Colonnes en minuscules: {[c.lower() for c in window.columns]}")
+                    continue
+                    
+                # Vérification des autres colonnes
+                missing_columns = []
+                if high_col is None:
+                    missing_columns.append("high")
+                if low_col is None:
+                    missing_columns.append("low")
+                    
+                if missing_columns:
+                    logger.warning(f"Colonnes manquantes pour {tf}: {', '.join(missing_columns)}. Utilisation des valeurs de clôture comme substitut.")
+                    if high_col is None:
+                        high_col = close_col
+                    if low_col is None:
+                        low_col = close_col
+                
+                # Vérification finale des colonnes
+                try:
+                    logger.debug(f"=== DÉBUT VÉRIFICATION COLONNES POUR {tf} ===")
+                    logger.debug(f"Colonnes disponibles: {list(window.columns)}")
+                    logger.debug(f"Types des colonnes: {[type(c) for c in window.columns]}")
+                    logger.debug(f"Valeurs de close_col: '{close_col}', type: {type(close_col)}")
+                    logger.debug(f"Valeurs de high_col: '{high_col}', type: {type(high_col)}")
+                    logger.debug(f"Valeurs de low_col: '{low_col}', type: {type(low_col)}")
+                    
+                    # Vérification des colonnes dans le DataFrame
+                    logger.debug(f"close_col in columns: {close_col in window.columns}")
+                    logger.debug(f"high_col in columns: {high_col in window.columns}")
+                    logger.debug(f"low_col in columns: {low_col in window.columns}")
+                    
+                    # Vérification des valeurs
+                    close_val = window[close_col].iloc[-1] if not window[close_col].empty else None
+                    high_val = window[high_col].iloc[-1] if not window[high_col].empty else None
+                    low_val = window[low_col].iloc[-1] if not window[low_col].empty else None
+                    
+                    logger.debug(f"Colonnes sélectionnées pour {tf} - Close: '{close_col}', High: '{high_col}', Low: '{low_col}'")
+                    logger.debug(f"Valeurs de test - Close: {close_val}, High: {high_val}, Low: {low_val}")
+                    logger.debug(f"Types des données - Close: {type(close_val)}, High: {type(high_val)}, Low: {type(low_val)}")
+                    logger.debug(f"=== FIN VÉRIFICATION COLONNES POUR {tf} ===")
+                    
+                except Exception as e:
+                    logger.error(f"Erreur lors de l'accès aux colonnes: {str(e)}")
+                    logger.error(f"Colonnes disponibles: {list(window.columns)}")
+                    logger.error(f"Types des colonnes: {[type(c) for c in window.columns]}")
+                    raise
+                
+                try:
+                    # Vérification supplémentaire de la colonne close_col
+                    if close_col not in window.columns:
+                        logger.error(f"ERREUR CRITIQUE: La colonne '{close_col}' n'existe pas dans le DataFrame. Colonnes disponibles: {list(window.columns)}")
+                        logger.error(f"Types des colonnes: {[type(c) for c in window.columns]}")
+                        continue
+                        
+                    prices = window[close_col]
+                    if len(prices) < 20:  # Minimum 20 périodes
+                        logger.warning(f"Pas assez de données pour {tf}: {len(prices)} périodes (minimum 20 requises)")
+                        continue
+                        
+                    logger.debug(f"Données de prix pour {tf} - Taille: {len(prices)}, Valeurs: {prices.tolist()[-5:]}")
+                    
+                except Exception as e:
+                    logger.error(f"Erreur lors de l'accès à la colonne {close_col}: {str(e)}")
+                    logger.error(f"Colonnes disponibles: {list(window.columns)}")
+                    logger.error(f"Type de window: {type(window)}")
+                    logger.error(f"Type de close_col: {type(close_col)}")
                     continue
 
-                prices = window[close_col]
-                if len(prices) < 20:  # Minimum 20 périodes
+                try:
+                    logger.debug(f"=== DÉBUT CALCUL VOLATILITÉ POUR {tf} ===")
+                    
+                    # Vérification des données d'entrée
+                    logger.debug(f"Type de window: {type(window)}")
+                    logger.debug(f"Colonnes dans window: {window.columns.tolist()}")
+                    logger.debug(f"high_col: '{high_col}', type: {type(high_col)}")
+                    logger.debug(f"low_col: '{low_col}', type: {type(low_col)}")
+                    logger.debug(f"prices type: {type(prices)}")
+                    logger.debug(f"prices sample: {prices.head(3).tolist()}")
+                    
+                    # Calcul de la volatilité (ATR sur 14 périodes)
+                    high = window[high_col]
+                    low = window[low_col]
+                    
+                    logger.debug(f"high sample: {high.head(3).tolist()}")
+                    logger.debug(f"low sample: {low.head(3).tolist()}")
+                    
+                    # True Range = max(high-low, |high - close_prev|, |low - close_prev|)
+                    tr1 = high - low
+                    logger.debug(f"tr1 sample: {tr1.head(3).tolist()}")
+                    
+                    prices_shifted = prices.shift(1)
+                    logger.debug(f"prices_shifted sample: {prices_shifted.head(3).tolist()}")
+                    
+                    tr2 = (high - prices_shifted).abs()
+                    logger.debug(f"tr2 sample: {tr2.head(3).tolist()}")
+                    
+                    tr3 = (low - prices_shifted).abs()
+                    logger.debug(f"tr3 sample: {tr3.head(3).tolist()}")
+                    
+                    true_range_df = pd.DataFrame({'tr1': tr1, 'tr2': tr2, 'tr3': tr3})
+                    logger.debug(f"true_range_df head:\n{true_range_df.head()}")
+                    
+                    true_range = true_range_df.max(axis=1)
+                    logger.debug(f"true_range sample: {true_range.head(3).tolist()}")
+                    
+                    # ATR = Moyenne mobile du True Range
+                    atr_series = true_range.rolling(window=14, min_periods=1).mean()
+                    logger.debug(f"atr_series sample: {atr_series.head(3).tolist()}")
+                    
+                    atr = atr_series.iloc[-1] if not atr_series.empty else 0
+                    logger.debug(f"ATR: {atr}")
+                    
+                    # Normalisation par le prix moyen
+                    prices_mean = prices.mean()
+                    logger.debug(f"prices_mean: {prices_mean}")
+                    
+                    atr_normalized = atr / prices_mean if prices_mean != 0 else 0
+                    logger.debug(f"ATR normalisé: {atr_normalized}")
+                    
+                    volatility_scores.append(atr_normalized)
+                    logger.debug(f"=== FIN CALCUL VOLATILITÉ POUR {tf} ===")
+                    
+                except Exception as e:
+                    logger.warning(f"Erreur lors du calcul de la volatilité pour {tf}: {str(e)}")
                     continue
-
-                # Calcul de la volatilité (ATR sur 14 périodes)
-                high = window.get("high", prices)
-                low = window.get("low", prices)
-                tr = np.maximum(
-                    high - low,
-                    np.maximum(abs(high - prices.shift(1)), abs(low - prices.shift(1))),
-                )
-                atr = tr.rolling(window=14).mean().iloc[-1] / prices.mean()
-                volatility_scores.append(atr)
 
                 # Calcul de la force de tendance (ADX)
                 if "ADX_14" in window.columns:
@@ -2436,13 +2560,7 @@ class StateBuilder:
 
         logger.info(f"Caractéristiques attendues pour {tf} ({len(expected_features)}): {expected_features}")
 
-        # S'assurer qu'on a exactement 15 caractéristiques
-        if len(expected_features) != 15:
-            logger.warning(f"Le nombre de caractéristiques n'est pas 15 mais {len(expected_features)}. Ajustement en cours...")
-            expected_features = expected_features[:15]  # Tronquer si nécessaire
-            if len(expected_features) < 15:
-                # Ajouter des placeholders si nécessaire
-                expected_features.extend([f'PADDING_{i}' for i in range(15 - len(expected_features))])
+        
 
         def create_default_observation():
             """Crée une observation par défaut avec la forme attendue."""
@@ -2540,18 +2658,7 @@ class StateBuilder:
                 logger.info("Nombre de colonnes dans le DataFrame traité: %d", len(processed_data.columns))
                 logger.info("Colonnes actuelles: %s", processed_data.columns.tolist())
 
-                if len(processed_data.columns) != 15:
-                    logger.error("Le nombre de colonnes (%d) ne correspond pas aux 15 attendues. Ajustement en cours...",
-                                len(processed_data.columns))
-                    # Garder uniquement les 15 premières colonnes
-                    if len(processed_data.columns) > 15:
-                        processed_data = processed_data.iloc[:, :15]
-                        logger.warning("Troncature à 15 colonnes")
-                    # Ou ajouter des colonnes manquantes
-                    else:
-                        for i in range(len(processed_data.columns), 15):
-                            processed_data[f'PADDING_{i}'] = 0.0
-                            logger.warning("Ajout de la colonne PADDING_%d", i)
+                
 
                 # 6. S'assurer que nous avons suffisamment de données
                 if len(processed_data) < self.window_size:
@@ -2572,7 +2679,7 @@ class StateBuilder:
                 result = window_data.values.astype(np.float32)
 
                 # 8. Validation finale de la forme du résultat
-                expected_shape = (self.window_size, 15)  # Taille fixe attendue
+                expected_shape = (self.window_size, len(expected_features))
                 if result.shape != expected_shape:
                     logger.warning("Forme inattendue pour %s: %s. Redimensionnement à %s.",
                                  tf, result.shape, expected_shape)
@@ -2701,21 +2808,7 @@ class StateBuilder:
                 logger.warning("État du portefeuille invalide, utilisation d'un tableau de zéros")
                 portfolio_state = np.zeros(17, dtype=np.float32)
 
-            # Forcer la forme exacte de l'observation (3, 20, 15)
-            if aligned_obs.shape != (3, 20, 15):
-                logger.warning(
-                    "Forme d'observation inattendue: %s. Forçage à (3, 20, 15).",
-                    aligned_obs.shape
-                )
-                # Créer un nouveau tableau avec la forme exacte
-                new_obs = np.zeros((3, 20, 15), dtype=np.float32)
-                # Copier les données existantes
-                min_timeframes = min(aligned_obs.shape[0], 3)
-                min_steps = min(aligned_obs.shape[1], 20)
-                min_features = min(aligned_obs.shape[2], 15)
-                new_obs[:min_timeframes, :min_steps, :min_features] = \
-                    aligned_obs[:min_timeframes, :min_steps, :min_features]
-                aligned_obs = new_obs
+            
 
             # Créer l'observation finale avec vérification de type
             final_observation = {

@@ -88,20 +88,20 @@ class TestSecureAPIManager(unittest.TestCase):
         os.environ['BINANCE_API_KEY'] = 'env_test_key'
         os.environ['BINANCE_API_SECRET'] = 'env_test_secret'
         os.environ['BINANCE_SANDBOX'] = 'true'
-        
+
         try:
             # Create new manager to trigger environment loading
             manager = SecureAPIManager()
-            
+
             # Get credentials - should return environment ones
             credentials = manager.get_credentials(ExchangeType.BINANCE)
-            
+
             self.assertIsNotNone(credentials)
             self.assertEqual(credentials.name, "Environment")
             self.assertEqual(credentials.api_key, 'env_test_key')
             self.assertEqual(credentials.api_secret, 'env_test_secret')
             self.assertTrue(credentials.sandbox)
-            
+
         finally:
             # Clean up environment variables
             for key in ['BINANCE_API_KEY', 'BINANCE_API_SECRET', 'BINANCE_SANDBOX']:
@@ -113,12 +113,12 @@ class TestSecureAPIManager(unittest.TestCase):
         os.environ['BINANCE_API_KEY'] = 'env_priority_key'
         os.environ['BINANCE_API_SECRET'] = 'env_priority_secret'
         os.environ['BINANCE_SANDBOX'] = 'false'
-        
+
         try:
             # Create manager with environment variables
             manager = SecureAPIManager()
             manager.set_master_password("test_password")
-            
+
             # Add encrypted credentials with different values
             encrypted_creds = APICredentials(
                 exchange=ExchangeType.BINANCE,
@@ -128,15 +128,15 @@ class TestSecureAPIManager(unittest.TestCase):
                 name='Default'
             )
             manager.add_credentials(encrypted_creds)
-            
+
             # Get credentials - should return environment ones
             credentials = manager.get_credentials(ExchangeType.BINANCE)
-            
+
             self.assertIsNotNone(credentials)
             self.assertEqual(credentials.api_key, 'env_priority_key')
             self.assertEqual(credentials.name, "Environment")
             self.assertFalse(credentials.sandbox)  # From environment
-            
+
         finally:
             # Clean up
             for key in ['BINANCE_API_KEY', 'BINANCE_API_SECRET', 'BINANCE_SANDBOX']:
@@ -149,16 +149,16 @@ class TestSecureAPIManager(unittest.TestCase):
             f.write("AIzaSyC-PnZoTqGlr_VvCc9XHs7h5oXMdKKds0I\n")
             f.write("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\n")
             temp_file = f.name
-        
+
         try:
             # Rename to a suspicious filename
             suspicious_file = Path("gemini_api_keys.txt")
             Path(temp_file).rename(suspicious_file)
-            
+
             # Should raise SecurityError
             with self.assertRaises(SecurityError):
                 SecureAPIManager()
-                
+
         finally:
             # Clean up
             if suspicious_file.exists():
@@ -168,12 +168,12 @@ class TestSecureAPIManager(unittest.TestCase):
         """Test creation of environment setup guide"""
         with tempfile.TemporaryDirectory() as temp_dir:
             guide_path = Path(temp_dir) / "test_env_guide.md"
-            
+
             manager = SecureAPIManager()
             manager.create_env_setup_guide(str(guide_path))
-            
+
             self.assertTrue(guide_path.exists())
-            
+
             content = guide_path.read_text()
             self.assertIn("Environment Variables Setup Guide", content)
             self.assertIn("BINANCE_API_KEY", content)

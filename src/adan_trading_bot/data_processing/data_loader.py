@@ -153,79 +153,88 @@ class ChunkedDataLoader:
     def _get_data_path(self, asset: str, timeframe: str) -> Path:
         """
         Construit le chemin vers le fichier de données pour un actif et un timeframe donnés.
-
-        Cherche dans l'emplacement :
-        {base_dir}/{data_split}/{asset}/{timeframe}.parquet
-
+        
+        La structure attendue est : {split}/{asset}/{timeframe}.parquet
+        Par exemple: data/processed/indicators/val/btcusdt/5m.parquet
+        
         Args:
-            asset: Symbole de l'actif (ex: 'BTC')
-            timeframe: Période de temps (ex: '5m', '1h' ou '5m_1h' pour une combinaison)
-
+            asset: Symbole de l'actif (ex: 'BTCUSDT')
+            timeframe: Période de temps (ex: '5m', '1h')
+            
         Returns:
             Chemin vers le fichier de données
-
+            
         Raises:
             FileNotFoundError: Si le fichier n'est pas trouvé
+            KeyError: Si la configuration est manquante
         """
-        # Mapping for asset names to file system names (e.g., BTC -> BTCUSDT)
-        asset_mapping = {
-            "BTC": "BTCUSDT",
-            "ETH": "ETHUSDT",
-            "SOL": "SOLUSDT",
-            "XRP": "XRPUSDT",
-            "ADA": "ADAUSDT",
-            # Ajout des timeframes comme actifs si nécessaire
-            "5m": "BTCUSDT",
-            "1h": "BTCUSDT",
-            "4h": "BTCUSDT"
-        }
-        
-        # Utiliser le nom d'actif mappé pour la construction du chemin
-        file_system_asset = asset_mapping.get(asset, asset)
-        
-        # Obtenir le répertoire de base des indicateurs
-        indicators_dir = Path(self.config["paths"]["indicators_data_dir"]).expanduser().resolve()
-        
-        # Si le timeframe contient un underscore, c'est une combinaison
-        # On prend le premier timeframe de la combinaison
-        base_timeframe = timeframe.split('_')[0] if '_' in timeframe else timeframe
-        
-        # Construire le chemin complet du fichier
-        file_path = indicators_dir / self.data_split / file_system_asset / f"{base_timeframe}.parquet"
-        
-        # Vérifier si le fichier existe
-        if not file_path.exists():
-            # Essayer un autre format de chemin si le premier échoue
-            file_path = indicators_dir / self.data_split / f"{file_system_asset}_{base_timeframe}.parquet"
+        try:
+            # Récupérer le répertoire de base des données
+            base_dir = Path(self.config['paths']['processed_data_dir'])
             
-            if not file_path.exists():
-                # Vérifier si le répertoire parent existe
-                parent_dir = file_path.parent
-                if not parent_dir.exists():
-                    raise FileNotFoundError(
-                        f"Le répertoire n'existe pas: {parent_dir}\n"
-                        f"Vérifiez que le chemin de base est correct: {indicators_dir}"
-                    )
-                raise FileNotFoundError(
-                    f"Le fichier n'existe pas: {file_path}\n"
-                    f"Vérifiez que le fichier existe et que les permissions sont correctes."
-                )
-                    
-            # Vérifier s'il y a des fichiers dans le répertoire
-            if parent_dir.exists() and any(parent_dir.iterdir()):
-                available_files = [f.name for f in parent_dir.glob('*') if f.is_file()]
-                raise FileNotFoundError(
-                    f"Fichier {base_timeframe}.parquet introuvable dans {parent_dir}\n"
-                    f"Fichiers disponibles: {', '.join(available_files) if available_files else 'Aucun fichier trouvé'}"
-                )
+            # Utiliser directement le répertoire du split spécifié dans data_dirs
+            data_dirs = self.config.get('data', {}).get('data_dirs', {})
+            
+            # Déterminer le répertoire de données en fonction du split
+            if self.data_split in data_dirs:
+                data_dir = Path(data_dirs[self.data_split])
+            elif 'base' in data_dirs:
+                data_dir = Path(data_dirs['base']) / self.data_split
             else:
-                raise FileNotFoundError(
-                    f"Aucun fichier trouvé dans le répertoire: {parent_dir}\n"
-                    f"Vérifiez que les données ont été correctement générées."
-                )
-        
-        logger.debug(f"Fichier trouvé: {file_path}")
-        return file_path
+                data_dir = base_dir / 'indicators' / self.data_split
+            
+            logger.debug(f"Recherche des données dans: {data_dir}")
+            
+            # Nettoyer le nom de l'actif (supprimer / et -) et forcer en minuscules
+            clean_asset = asset.replace("/", "").replace("-", "").lower()
+            
+            # Extraire le timeframe de base (sans les combinaisons)
+            base_timeframe = timeframe.split('_')[0] if '_' in timeframe else timeframe
+            base_timeframe = base_timeframe.lower()  # Forcer en minuscules
+            
+            # Liste des variantes de casse à essayer pour l'actif
+            asset_variants = [
+                clean_asset.lower(),  # Tout en minuscules (ex: btcusdt) - structure actuelle
+                clean_asset.upper(),  # Tout en majuscules (ex: BTCUSDT)
+                clean_asset           # Cas d'origine
+            ]
+            
+            # Liste des variantes de casse à essayer pour le timeframe
+            timeframe_variants = [
+                base_timeframe.lower(),  # minuscules (ex: 5m)
+                base_timeframe.upper(),  # majuscules (ex: 5M)
+                base_timeframe           # cas d'origine
+            ]
+            
+            # Essayer chaque combinaison de variantes
+            for asset_variant in asset_variants:
+                for tf_variant in timeframe_variants:
+                    file_path = data_dir / asset_variant / f"{tf_variant}.parquet"
+                    if file_path.exists():
+                        logger.debug(f"Fichier trouvé: {file_path}")
+                        return file_path
+            
+            # Si on arrive ici, aucun fichier n'a été trouvé
+            error_msg = (
+                f"Fichier de données introuvable pour {asset}/{timeframe}.\n"
+                f"Dossier de recherche: {data_dir}\n"
+                f"Actifs testés: {', '.join(asset_variants)}\n"
+                f"Timeframes testés: {', '.join(timeframe_variants)}\n"
+                f"Vérifiez que le fichier existe et que les permissions sont correctes.\n"
+                f"Structure attendue: {{split}}/{{asset}}/{{timeframe}}.parquet"
+            )
+            raise FileNotFoundError(error_msg)
+            
+        except KeyError as e:
+            logger.error(f"Configuration des chemins manquante ou incorrecte: {str(e)}")
+            raise
+            logger.error(f"Erreur: {str(e)}")
+            if 'paths' in self.config:
+                logger.error(f"Chemins disponibles: {list(self.config['paths'].keys())}")
+            raise KeyError(
+                f"Erreur de configuration des chemins: {str(e)}\n"
+                f"Vérifiez que la configuration contient les chemins nécessaires."
+            )
 
     def _load_asset_timeframe(self, asset: str, timeframe: str) -> pd.DataFrame:
         """
@@ -252,14 +261,26 @@ class ChunkedDataLoader:
             if df.empty:
                 raise ValueError(f"Le fichier {file_path} est vide.")
 
-            # Vérifie les colonnes requises
-            required_columns = {'OPEN', 'HIGH', 'LOW', 'CLOSE', 'VOLUME'}
-            missing_columns = required_columns - set(df.columns)
+            # Vérifie les colonnes requises (en tenant compte de la casse)
+            required_columns = {'Open', 'High', 'Low', 'Close', 'Volume'}
+            available_columns = set(df.columns.str.upper())
+            missing_columns = {col for col in required_columns if col.upper() not in available_columns}
 
             if missing_columns:
                 raise ValueError(
-                    f"Colonnes manquantes dans {file_path}: {missing_columns}"
+                    f"Colonnes manquantes dans {file_path}: {missing_columns}\n"
+                    f"Colonnes disponibles: {sorted(df.columns)}"
                 )
+                
+            # Renommer les colonnes pour s'assurer qu'elles sont en majuscules
+            column_mapping = {
+                'Open': 'OPEN',
+                'High': 'HIGH',
+                'Low': 'LOW',
+                'Close': 'CLOSE',
+                'Volume': 'VOLUME'
+            }
+            df = df.rename(columns=column_mapping)
 
             logger.debug(f"Données chargées pour {asset} {timeframe}: {len(df)} lignes")
             return df
@@ -285,7 +306,7 @@ class ChunkedDataLoader:
             Exception: Si le chargement échoue après plusieurs tentatives
         """
         last_error = None
-        
+
         for attempt in range(max_retries):
             try:
                 logger.debug(f"Tentative {attempt + 1}/{max_retries} pour {asset} {tf}")
@@ -301,7 +322,7 @@ class ChunkedDataLoader:
                     f"Nouvelle tentative dans {wait_time}s..."
                 )
                 time.sleep(wait_time)
-        
+
         # Si on arrive ici, toutes les tentatives ont échoué
         error_msg = f"Impossible de charger {asset} {tf} après {max_retries} tentatives: {str(last_error)}"
         logger.error(error_msg)
@@ -370,11 +391,11 @@ class ChunkedDataLoader:
                 )
                 for asset, tf, err in failed_loads:
                     error_msg += f"- {asset} {tf}: {err}\n"
-                
+
                 # Si tous les chargements ont échoué, on lève une exception
                 if len(failed_loads) == total_tasks:
                     raise RuntimeError(f"Tous les chargements ont échoué:\n{error_msg}")
-                
+
                 # Sinon, on log l'erreur mais on continue
                 logger.error(error_msg)
 
@@ -383,14 +404,14 @@ class ChunkedDataLoader:
                 if asset not in data or not data[asset]:
                     logger.error(f"Aucune donnée chargée pour l'actif {asset}")
                     continue
-                    
+
                 for tf in self.timeframes:
                     if tf not in data[asset]:
                         logger.warning(f"Données manquantes pour {asset} {tf}")
 
             duration = time.time() - start_time
             logger.info(f"Chargement du chunk {chunk_idx} terminé en {duration:.2f} secondes")
-            
+
             return data
 
         except Exception as e:

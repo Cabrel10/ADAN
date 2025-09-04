@@ -28,24 +28,24 @@ CONFIG_PATH = Path(__file__).parent.parent.parent / 'config' / 'environment_conf
 
 class TestPerformance(unittest.TestCase):
     """Performance tests for the ADAN Trading Bot."""
-    
+
     @classmethod
     def setUpClass(cls):
         """Set up test fixtures before all tests."""
         # Load configuration
         with open(CONFIG_PATH, 'r') as f:
             cls.config = yaml.safe_load(f)
-        
+
         # Create a larger sample market data for testing performance
         num_data_points = 1000 # Increased data points for longer runs
         dates = pd.date_range(start='2023-01-01', periods=num_data_points, freq='H')
-        
+
         # Generate more realistic-looking price data
         np.random.seed(42) # for reproducibility
-        
+
         btc_prices = 50000 + np.cumsum(np.random.randn(num_data_points) * 50)
         eth_prices = 3000 + np.cumsum(np.random.randn(num_data_points) * 10)
-        
+
         cls.sample_data = {
             'BTC/USDT': pd.DataFrame({
                 'open': btc_prices,
@@ -62,7 +62,7 @@ class TestPerformance(unittest.TestCase):
                 'volume': 1000 + np.random.rand(num_data_points) * 200
             }, index=dates)
         }
-        
+
         # Ensure close prices are within high/low range
         for asset_data in cls.sample_data.values():
             asset_data['close'] = np.clip(asset_data['close'], asset_data['low'], asset_data['high'])
@@ -73,17 +73,17 @@ class TestPerformance(unittest.TestCase):
         # Load configuration
         with open(CONFIG_PATH, 'r') as f:
             cls.config = yaml.safe_load(f)
-        
+
         # Create a larger sample market data for testing performance
         num_data_points = 1000 # Increased data points for longer runs
         dates = pd.date_range(start='2023-01-01', periods=num_data_points, freq='H')
-        
+
         # Generate more realistic-looking price data
         np.random.seed(42) # for reproducibility
-        
+
         btc_prices = 50000 + np.cumsum(np.random.randn(num_data_points) * 50)
         eth_prices = 3000 + np.cumsum(np.random.randn(num_data_points) * 10)
-        
+
         cls.sample_data = {
             'BTC/USDT': pd.DataFrame({
                 'open': btc_prices,
@@ -100,7 +100,7 @@ class TestPerformance(unittest.TestCase):
                 'volume': 1000 + np.random.rand(num_data_points) * 200
             }, index=dates)
         }
-        
+
         # Ensure close prices are within high/low range
         for asset_data in cls.sample_data.values():
             asset_data['close'] = np.clip(asset_data['close'], asset_data['low'], asset_data['high'])
@@ -118,7 +118,7 @@ class TestPerformance(unittest.TestCase):
                 if chunk_id == 0:
                     return {asset: {'1m': df} for asset, df in self.sample_data.items()} # Wrap in timeframe dict
                 return None
-            
+
             def __len__(self):
                 return 1 # Only one chunk for this dummy loader
 
@@ -136,17 +136,17 @@ class TestPerformance(unittest.TestCase):
     def setUp(self):
         # Reset the environment for each test method
         self.env.reset()
-    
+
     def test_long_run_performance(self):
         """Test the bot's performance over a long simulation run."""
         print("\n--- Running Long Run Performance Test ---")
-        
+
         state, info = self.env.reset()
         done = False
         total_steps = 0
-        
+
         start_time = time.time()
-        
+
         while not done and total_steps < len(self.sample_data['BTC/USDT']) - 1: # Run through most of the data
             # Simple action: alternate between buying BTC and ETH, then holding
             if total_steps % 3 == 0:
@@ -155,19 +155,19 @@ class TestPerformance(unittest.TestCase):
                 action = np.array([0.0, 1.0]) # Buy ETH
             else:
                 action = np.array([0.0, 0.0]) # Hold
-            
+
             next_state, reward, done, _, info = self.env.step(action)
             state = next_state
             total_steps += 1
-            
+
             if total_steps % 100 == 0:
                 print(f"Step {total_steps}: Portfolio Value = {self.env.portfolio_manager.portfolio_value:.2f}")
-        
+
         end_time = time.time()
         duration = end_time - start_time
-        
+
         final_metrics = self.env.portfolio_manager.get_metrics()
-        
+
         print(f"--- Long Run Performance Test Results ---")
         print(f"Total Steps: {total_steps}")
         print(f"Duration: {duration:.2f} seconds")
@@ -176,42 +176,42 @@ class TestPerformance(unittest.TestCase):
         print(f"Total PnL (%): {final_metrics['total_pnl_pct']:.2f}%")
         print(f"Max Drawdown: {final_metrics['drawdown']:.2f}")
         print(f"Sharpe Ratio: {final_metrics['sharpe_ratio']:.2f}")
-        
+
         # Assertions for performance criteria
         self.assertGreater(final_metrics['total_capital'], self.env.portfolio_manager.initial_capital * 0.9) # Should not lose too much
         self.assertGreater(total_steps / duration, 10) # Should process at least 10 steps per second
-        
+
     def test_speed_and_efficiency(self):
         """Test the speed and efficiency of the environment's step function."""
         print("\n--- Running Speed and Efficiency Test ---")
-        
+
         state, info = self.env.reset()
         num_steps_to_test = 500
-        
+
         step_times = []
-        
+
         for i in range(num_steps_to_test):
             action = np.array([0.0, 0.0]) # Hold action for simplicity
-            
+
             start_step_time = time.time()
             next_state, reward, done, _, info = self.env.step(action)
             end_step_time = time.time()
-            
+
             step_times.append(end_step_time - start_step_time)
             state = next_state
-            
+
             if done:
                 break
-        
+
         avg_step_time = np.mean(step_times)
         total_duration = np.sum(step_times)
-        
+
         print(f"--- Speed and Efficiency Test Results ---")
         print(f"Total Steps Tested: {len(step_times)}")
         print(f"Total Duration: {total_duration:.4f} seconds")
         print(f"Average Step Time: {avg_step_time:.6f} seconds")
         print(f"Steps per second: {1 / avg_step_time:.2f}")
-        
+
         # Assertions for speed criteria
         self.assertLess(avg_step_time, 0.1) # Each step should take less than 0.1 seconds
         self.assertGreater(1 / avg_step_time, 10) # Should process at least 10 steps per second

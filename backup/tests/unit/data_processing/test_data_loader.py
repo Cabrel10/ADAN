@@ -25,7 +25,7 @@ class TestComprehensiveDataLoader(unittest.TestCase):
             for tf in cls.timeframes:
                 tf_dir = cls.test_dir / tf
                 tf_dir.mkdir(parents=True, exist_ok=True)
-                
+
                 num_rows = 20 # Enough rows for multiple chunks
                 data = {
                     'timestamp': pd.to_datetime(pd.date_range(start='2023-01-01', periods=num_rows, freq=tf)),
@@ -90,7 +90,7 @@ class TestComprehensiveDataLoader(unittest.TestCase):
 
     def test_get_next_chunk(self):
         self.data_loader.load_asset_paths()
-        
+
         # Test first chunk of first asset
         chunk = self.data_loader.get_next_chunk()
         self.assertIsNotNone(chunk)
@@ -101,11 +101,11 @@ class TestComprehensiveDataLoader(unittest.TestCase):
         # Consume all chunks for the first asset
         total_rows_first_asset = self.data_loader.asset_total_rows[self.assets[0]]
         num_chunks_first_asset = (total_rows_first_asset + self.chunk_size - 1) // self.chunk_size
-        
+
         for _ in range(num_chunks_first_asset - 1):
             chunk = self.data_loader.get_next_chunk()
             self.assertIsNotNone(chunk)
-        
+
         # Next chunk should be for the second asset
         chunk = self.data_loader.get_next_chunk()
         self.assertIsNotNone(chunk)
@@ -113,7 +113,7 @@ class TestComprehensiveDataLoader(unittest.TestCase):
 
     def test_get_next_observation(self):
         self.data_loader.load_asset_paths()
-        
+
         # Get observations until end of data
         obs_count = 0
         while True:
@@ -125,7 +125,7 @@ class TestComprehensiveDataLoader(unittest.TestCase):
             # Check that observation contains features from all timeframes
             self.assertIn('close_1m', observation.index)
             self.assertIn('close_1h', observation.index)
-        
+
         # Total observations should be sum of rows for all assets
         expected_obs_count = sum(self.data_loader.asset_total_rows.values())
         self.assertEqual(obs_count, expected_obs_count)
@@ -135,7 +135,7 @@ class TestComprehensiveDataLoader(unittest.TestCase):
         # Consume some data
         for _ in range(self.chunk_size + 1): # Go into second chunk of first asset
             self.data_loader.get_next_observation()
-        
+
         self.data_loader.reset()
         self.assertEqual(self.data_loader.current_asset_index, 0)
         self.assertIsNone(self.data_loader.current_asset)
@@ -154,7 +154,7 @@ class TestComprehensiveDataLoader(unittest.TestCase):
         # Consume all data
         while self.data_loader.get_next_observation() is not None:
             pass
-        
+
         self.assertAlmostEqual(self.data_loader.get_overall_progress(), 100.0)
 
 if __name__ == '__main__':

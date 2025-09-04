@@ -28,15 +28,15 @@ environment:
     shuffle: true
   mode: backtest
   observation:
-    shape: [3, 20, 15]
+    shape: [3, 20, 13]  # Mise à jour de la forme pour refléter le nouveau nombre de fonctionnalités
     window_sizes:
       5m: 20
-      1h: 10
-      4h: 5
+      1h: 20
+      4h: 20
     features_per_timeframe:
-      5m: 15
-      1h: 15
-      4h: 15
+      5m: 13  # OPEN, HIGH, LOW, CLOSE, VOLUME, RSI_14, ATR_14, ADX_14, EMA_5, EMA_20, EMA_50, MACD_HIST, SUPERTREND_14_2.0
+      1h: 13  # OPEN, HIGH, LOW, CLOSE, VOLUME, RSI_14, ATR_14, ADX_14, EMA_12, EMA_50, EMA_200, MACD_HIST, SUPERTREND_14_2.0
+      4h: 13  # OPEN, HIGH, LOW, CLOSE, VOLUME, RSI_14, ATR_14, ADX_14, EMA_12, EMA_50, EMA_200, MACD_HIST, SUPERTREND_14_2.0
     warmup_steps: 10
   penalties:
     base_inaction_penalty: -0.001
@@ -89,15 +89,14 @@ data:
     - CLOSE
     - VOLUME
     - RSI_14
-    - CCI_20_0.015
-    - MFI_14
     - ATR_14
-    - STOCH_14_3
-    - MACD_12_26_9
-    - MACD_HIST_12_26_9
-    - ICHIMOKU_9_26_52
-    - PSAR_0.02_0.2
-    - SUPERTREND_14_3.0
+    - ADX_14
+    - EMA_5
+    - EMA_20
+    - EMA_50
+    - MACD_HIST
+    - SUPERTREND_14_2.0
+    
     1h:
     - OPEN
     - HIGH
@@ -105,15 +104,14 @@ data:
     - CLOSE
     - VOLUME
     - RSI_14
-    - CCI_20_0.015
-    - MFI_14
     - ATR_14
-    - STOCH_14_3
-    - MACD_12_26_9
-    - MACD_HIST_12_26_9
-    - ICHIMOKU_9_26_52
-    - PSAR_0.02_0.2
-    - SUPERTREND_14_3.0
+    - ADX_14
+    - EMA_12
+    - EMA_50
+    - EMA_200
+    - MACD_HIST
+    - SUPERTREND_14_2.0
+    
     4h:
     - OPEN
     - HIGH
@@ -121,15 +119,13 @@ data:
     - CLOSE
     - VOLUME
     - RSI_14
-    - CCI_20_0.015
-    - MFI_14
     - ATR_14
-    - STOCH_14_3
-    - MACD_12_26_9
-    - MACD_HIST_12_26_9
-    - ICHIMOKU_9_26_52
-    - PSAR_0.02_0.2
-    - SUPERTREND_14_3.0
+    - ADX_14
+    - EMA_12
+    - EMA_50
+    - EMA_200
+    - MACD_HIST
+    - SUPERTREND_14_2.0
 paths:
   indicators_data_dir: /home/morningstar/Documents/trading/bot/data/processed/indicators
 portfolio:
@@ -143,4 +139,3 @@ portfolio:
   - max_drawdown_pct
   - num_positions
   - largest_positions: 5
-

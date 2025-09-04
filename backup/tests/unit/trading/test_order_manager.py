@@ -75,7 +75,7 @@ class TestOrderManager(unittest.TestCase):
         # First, open a position to be able to sell
         self.order_manager.execute_action(1, 20000, 'BTCUSDT') # BUY
         self.assertTrue(self.mock_portfolio_manager.positions['BTCUSDT'].is_open)
-        
+
         initial_cash = self.mock_portfolio_manager.cash
         realized_pnl = self.order_manager.execute_action(2, 20500, 'BTCUSDT') # Action 2 is SELL
         self.assertFalse(self.mock_portfolio_manager.positions['BTCUSDT'].is_open)

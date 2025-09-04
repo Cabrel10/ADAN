@@ -18,7 +18,7 @@ sys.path.insert(0, str(src_path))
 try:
     from src.adan_trading_bot.common.utils import load_config
     from src.adan_trading_bot.exchange_api.connector import (
-        get_exchange_client, 
+        get_exchange_client,
         validate_exchange_config,
         ExchangeConnectionError,
         ExchangeConfigurationError
@@ -42,14 +42,14 @@ def check_environment():
     """Vérifie l'environnement et les prérequis."""
     print("\n📋 VÉRIFICATION DE L'ENVIRONNEMENT")
     print("-" * 50)
-    
+
     status = {
         'conda_env': False,
         'ccxt_available': False,
         'api_keys': False,
         'config_file': False
     }
-    
+
     # Vérifier l'environnement conda
     conda_env = os.environ.get('CONDA_DEFAULT_ENV', 'Non défini')
     if conda_env == 'trading_env':
@@ -57,18 +57,18 @@ def check_environment():
         status['conda_env'] = True
     else:
         print(f"⚠️  Environnement Conda: {conda_env} (Recommandé: trading_env)")
-    
+
     # Vérifier CCXT
     try:
         print(f"✅ CCXT Version: {ccxt.__version__}")
         status['ccxt_available'] = True
     except Exception as e:
         print(f"❌ CCXT: Erreur - {e}")
-    
+
     # Vérifier les variables d'environnement
     api_key = os.environ.get("BINANCE_TESTNET_API_KEY")
     secret_key = os.environ.get("BINANCE_TESTNET_SECRET_KEY")
-    
+
     if api_key and secret_key:
         print(f"✅ API Key: {api_key[:8]}... (Masquée)")
         print(f"✅ Secret Key: {secret_key[:8]}... (Masquée)")
@@ -78,7 +78,7 @@ def check_environment():
         print("   Commandes pour définir:")
         print("   export BINANCE_TESTNET_API_KEY='VOTRE_CLE'")
         print("   export BINANCE_TESTNET_SECRET_KEY='VOTRE_SECRET'")
-    
+
     # Vérifier le fichier de configuration
     config_path = project_root / "config" / "main_config.yaml"
     if config_path.exists():
@@ -86,24 +86,24 @@ def check_environment():
         status['config_file'] = True
     else:
         print(f"❌ Fichier de config: {config_path} (Non trouvé)")
-    
+
     return status
 
 def check_configuration():
     """Vérifie la configuration du paper trading."""
     print("\n⚙️  VÉRIFICATION DE LA CONFIGURATION")
     print("-" * 50)
-    
+
     try:
         config_path = project_root / "config" / "main_config.yaml"
         config = load_config(str(config_path))
-        
+
         paper_config = config.get('paper_trading', {})
         if paper_config:
             print("✅ Section paper_trading trouvée:")
             print(f"   - exchange_id: {paper_config.get('exchange_id', 'Non défini')}")
             print(f"   - use_testnet: {paper_config.get('use_testnet', 'Non défini')}")
-            
+
             # Vérifier la configuration complète
             if paper_config.get('exchange_id') == 'binance' and paper_config.get('use_testnet') is True:
                 print("✅ Configuration correcte pour Binance Testnet")
@@ -114,7 +114,7 @@ def check_configuration():
         else:
             print("❌ Section paper_trading manquante")
             return False, config
-            
+
     except Exception as e:
         print(f"❌ Erreur lors du chargement de la configuration: {e}")
         return False, None
@@ -123,18 +123,18 @@ def test_connection():
     """Teste la connexion au Binance Testnet."""
     print("\n🌐 TEST DE CONNEXION BINANCE TESTNET")
     print("-" * 50)
-    
+
     # Vérifier d'abord les prérequis
     env_status = check_environment()
     if not env_status['api_keys']:
         print("❌ Impossible de tester la connexion: Clés API manquantes")
         return False
-    
+
     config_valid, config = check_configuration()
     if not config_valid or not config:
         print("❌ Impossible de tester la connexion: Configuration invalide")
         return False
-    
+
     try:
         # Valider la configuration
         print("🔍 Validation de la configuration...")
@@ -142,31 +142,31 @@ def test_connection():
             print("❌ Échec de la validation de la configuration")
             return False
         print("✅ Configuration validée")
-        
+
         # Créer le client d'exchange
         print("🔌 Création du client d'exchange...")
         exchange = get_exchange_client(config)
         print(f"✅ Client créé: {exchange.id}")
-        
+
         # Test de base: heure du serveur
         print("⏰ Test de l'heure du serveur...")
         server_time = exchange.fetch_time()
         print(f"✅ Heure du serveur: {exchange.iso8601(server_time)}")
-        
+
         # Test: chargement des marchés
         print("📊 Chargement des marchés...")
         markets = exchange.load_markets()
         print(f"✅ Marchés chargés: {len(markets)} paires")
-        
+
         # Vérifier les paires importantes
         important_pairs = ['BTC/USDT', 'ETH/USDT', 'ADA/USDT', 'BNB/USDT', 'XRP/USDT']
         available_pairs = [pair for pair in important_pairs if pair in markets]
         print(f"✅ Paires ADAN disponibles: {', '.join(available_pairs)}")
-        
+
         # Test: récupération du solde
         print("💰 Récupération du solde...")
         balance = exchange.fetch_balance()
-        
+
         # Afficher les soldes non nuls
         non_zero_balances = {k: v for k, v in balance['total'].items() if v > 0}
         if non_zero_balances:
@@ -175,15 +175,15 @@ def test_connection():
                 print(f"   - {currency}: {amount}")
         else:
             print("ℹ️  Aucun solde affiché (normal sur testnet)")
-        
+
         # Test: données de marché en temps réel
         print("📈 Test des données de marché...")
         ticker = exchange.fetch_ticker('BTC/USDT')
         print(f"✅ BTC/USDT - Prix: {ticker['last']}, Volume: {ticker['baseVolume']}")
-        
+
         print("\n🎉 CONNEXION TESTNET RÉUSSIE !")
         return True
-        
+
     except ExchangeConfigurationError as e:
         print(f"❌ Erreur de configuration: {e}")
         return False
@@ -207,7 +207,7 @@ def show_next_steps(success):
     """Affiche les prochaines étapes selon le résultat."""
     print("\n🚀 PROCHAINES ÉTAPES")
     print("-" * 50)
-    
+
     if success:
         print("✅ Connexion Exchange opérationnelle !")
         print("\n📋 Actions recommandées:")
@@ -237,11 +237,11 @@ def generate_summary():
     """Génère un résumé du statut."""
     print("\n📊 RÉSUMÉ DU STATUT")
     print("-" * 50)
-    
+
     env_status = check_environment()
     config_valid, _ = check_configuration()
     connection_ok = False
-    
+
     # Test de connexion simplifié
     if env_status['api_keys'] and config_valid:
         try:
@@ -253,23 +253,23 @@ def generate_summary():
             connection_ok = True
         except:
             connection_ok = False
-    
+
     # Calcul du score
     checks = [
         env_status['conda_env'],
-        env_status['ccxt_available'], 
+        env_status['ccxt_available'],
         env_status['api_keys'],
         env_status['config_file'],
         config_valid,
         connection_ok
     ]
-    
+
     score = sum(checks)
     total = len(checks)
     percentage = (score / total) * 100
-    
+
     print(f"Score global: {score}/{total} ({percentage:.1f}%)")
-    
+
     if percentage >= 80:
         status_icon = "🟢"
         status_text = "OPÉRATIONNEL"
@@ -279,30 +279,30 @@ def generate_summary():
     else:
         status_icon = "🔴"
         status_text = "NON OPÉRATIONNEL"
-    
+
     print(f"Statut: {status_icon} {status_text}")
-    
+
     return connection_ok
 
 def main():
     """Fonction principale."""
     print_header()
-    
+
     # Tests principaux
     env_status = check_environment()
     config_valid, config = check_configuration()
     connection_success = test_connection()
-    
+
     # Résumé et prochaines étapes
     final_success = generate_summary()
     show_next_steps(final_success)
-    
+
     # Footer
     print("\n" + "=" * 80)
     print(" 📞 Support: Consultez GUIDE_TEST_EXCHANGE_CONNECTOR.md")
     print(" 🔄 Mise à jour: Relancez ce script après modifications")
     print("=" * 80)
-    
+
     return final_success
 
 if __name__ == "__main__":

@@ -17,7 +17,7 @@ def clean_pycache():
             print(f"  Suppression de {dir_path}")
             shutil.rmtree(dir_path, ignore_errors=True)
             dirs.remove("__pycache__")
-        
+
         # Supprimer les fichiers .pyc
         for file in files:
             if file.endswith('.pyc') or file.endswith('.pyo') or file.endswith('.pyd'):
@@ -32,7 +32,7 @@ def clean_build_dirs():
     """Supprime les dossiers de build et de distribution."""
     print("\n🧹 Nettoyage des dossiers de build...")
     build_dirs = ["build", "dist", "*.egg-info"]
-    
+
     for pattern in build_dirs:
         for path in Path('.').glob(f"**/{pattern}"):
             if path.is_dir():
@@ -43,7 +43,7 @@ def clean_test_outputs():
     """Supprime les fichiers de sortie des tests."""
     print("\n🧹 Nettoyage des sorties de tests...")
     test_dirs = ["tests/outputs", "tests/__pycache__"]
-    
+
     for test_dir in test_dirs:
         if os.path.exists(test_dir):
             print(f"  Suppression de {test_dir}")
@@ -53,7 +53,7 @@ def clean_logs():
     """Supprime les fichiers de logs."""
     print("\n🧹 Nettoyage des logs...")
     log_dirs = ["logs"]
-    
+
     for log_dir in log_dirs:
         if os.path.exists(log_dir):
             print(f"  Suppression des logs dans {log_dir}")
@@ -69,13 +69,13 @@ def clean_logs():
 
 def main():
     print("🚀 Démarrage du nettoyage du projet...")
-    
+
     # Exécution des différentes étapes de nettoyage
     clean_pycache()
     clean_build_dirs()
     clean_test_outputs()
     clean_logs()
-    
+
     print("\n✅ Nettoyage terminé avec succès !")
 
 if __name__ == "__main__":

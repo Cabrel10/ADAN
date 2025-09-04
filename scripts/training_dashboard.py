@@ -99,32 +99,32 @@ class LogMonitor:
 
     def parse_json_log(self, log_entry: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         """Parse a JSON log entry and extract relevant metrics.
-        
+
         Args:
             log_entry: Dictionary containing log entry data
-            
+
         Returns:
             Dictionary of extracted metrics or None if entry is invalid
         """
         if not isinstance(log_entry, dict):
-            logger.warning("Skipping invalid log entry (expected dict): %s", 
+            logger.warning("Skipping invalid log entry (expected dict): %s",
                          str(log_entry)[:100])
             return None
-            
+
         if 'status' in log_entry and log_entry['status'] in ['error', 'failed']:
             error_msg = log_entry.get('message', 'Unknown error')
             instance_id = log_entry.get('instance_id', 'unknown')
             logger.warning("Error in instance %s: %s", instance_id, error_msg)
             return None
-            
+
         metrics = {}
         metrics['timestamp'] = log_entry.get('timestamp', datetime.now().isoformat())
-        
+
         # Détection du mode parallèle
         if 'parallel' in log_entry:
             metrics['parallel_workers'] = log_entry.get('parallel', {}).get('workers', 0)
             metrics['active_workers'] = log_entry.get('parallel', {}).get('active', 0)
-            
+
         # Détection des métriques d'épisode
         if 'episode' in log_entry:
             ep = log_entry['episode']
@@ -135,26 +135,26 @@ class LogMonitor:
                 'episode_time': ep.get('time', 0),
                 'episode_trades': ep.get('trades', 0)
             })
-            
+
             # Mise à jour des statistiques globales
             self.global_stats['total_episodes'] += 1
             self.global_stats['total_trades'] += metrics['episode_trades']
             self.global_stats['total_episode_time'] += metrics['episode_time']
-            
+
             # Calcul du taux d'épisodes par seconde
             time_diff = time.time() - self.global_stats['last_update']
             if time_diff > 0:
                 self.global_stats['episodes_per_second'] = 1.0 / time_diff
             self.global_stats['last_update'] = time.time()
         metrics['instance_id'] = log_entry.get('instance_id', 'unknown')
-        
+
         # Extract portfolio metrics
         portfolio = log_entry.get('portfolio', {})
         metrics['portfolio_value'] = float(portfolio.get('portfolio_value', 0.0))
         metrics['cash'] = float(portfolio.get('cash', 0.0))
         metrics['shares'] = float(portfolio.get('shares', 0.0))
         metrics['asset_value'] = float(portfolio.get('asset_value', 0.0))
-        
+
         # Extract episode and training metrics
         metrics['episode'] = int(log_entry.get('episode', 0))
         metrics['step'] = int(log_entry.get('step', 0))
@@ -162,13 +162,13 @@ class LogMonitor:
         metrics['total_reward'] = float(log_entry.get('total_reward', 0.0))
         metrics['action'] = log_entry.get('action', 0)
         metrics['done'] = bool(log_entry.get('done', False))
-        
+
         # Extract training metrics if available
         training = log_entry.get('training', {})
         metrics['loss'] = float(training.get('loss', 0.0))
         metrics['learning_rate'] = float(training.get('learning_rate', 0.0))
         metrics['epsilon'] = float(training.get('epsilon', 0.0))
-        
+
         # Add additional training metrics if available
         try:
             metrics.update({
@@ -180,12 +180,12 @@ class LogMonitor:
         except (ValueError, TypeError, AttributeError) as e:
             logger.error("Error parsing training metrics: %s", e, exc_info=True)
             # Continue with basic metrics if additional ones fail
-            
+
         return metrics
-            
+
     def update_from_json_file(self, file_path: str):
         """Update metrics from a JSON or JSONL log file.
-        
+
         Args:
             file_path: Path to the log file to process
         """
@@ -194,7 +194,7 @@ class LogMonitor:
                 content = f.read().strip()
                 if not content:
                     return
-                    
+
                 try:
                     # Try to parse as JSON array first
                     entries = json.loads(content)
@@ -216,13 +216,13 @@ class LogMonitor:
                                 line, str(e)
                             )
                             continue
-                            
+
                 valid_entries = 0
                 for entry in entries:
                     if not isinstance(entry, dict):
                         logger.warning("Skipping non-dict entry: %s", entry)
                         continue
-                        
+
                     metrics = self.parse_json_log(entry)
                     if metrics is not None:
                         valid_entries += 1
@@ -230,28 +230,28 @@ class LogMonitor:
                         for key, value in metrics.items():
                             if key in self.data[metrics['instance_id']]:
                                 self.data[metrics['instance_id']][key].append(value)
-                        
+
                         # Mettre à jour les statistiques globales
                         self._update_global_stats(metrics['instance_id'], metrics)
-                        
+
                         logger.debug(f"Métriques mises à jour pour {metrics['instance_id']}: {metrics}")
-                    
+
                 if valid_entries > 0:
                     logger.info(
-                        "Processed %d valid entries from %s", 
+                        "Processed %d valid entries from %s",
                         valid_entries, os.path.basename(file_path)
                     )
-                    
+
         except (IOError, OSError) as e:
             logger.error("Error reading file %s: %s", file_path, str(e))
         except Exception as e:  # pylint: disable=broad-except
             logger.error(
-                "Unexpected error processing file %s: %s", 
+                "Unexpected error processing file %s: %s",
                 file_path, str(e), exc_info=True
-            )        
-                    
+            )
+
             logger.error(f"Erreur lors de la lecture du fichier {file_path}: {str(e)}")
-    
+
     def _update_global_stats(self, worker_id: str, metrics: Dict[str, Any]):
         """Met à jour les statistiques globales."""
         # Mettre à jour le nombre total d'épisodes
@@ -260,26 +260,26 @@ class LogMonitor:
                 self.global_stats['total_episodes'],
                 metrics['episode']
             )
-        
+
         # Mettre à jour le nombre total de trades
         if 'trades' in metrics:
             self.global_stats['total_trades'] = max(
                 self.global_stats['total_trades'],
                 metrics['trades']
             )
-        
+
         # Mettre à jour le meilleur et le pire worker
         if 'reward' in metrics:
             current_reward = metrics['reward']
-            
-            if (self.global_stats['best_worker'] is None or 
+
+            if (self.global_stats['best_worker'] is None or
                 current_reward > self.data[self.global_stats['best_worker']]['reward'][-1]):
                 self.global_stats['best_worker'] = worker_id
-                
-            if (self.global_stats['worst_worker'] is None or 
+
+            if (self.global_stats['worst_worker'] is None or
                 current_reward < self.data[self.global_stats['worst_worker']]['reward'][-1]):
                 self.global_stats['worst_worker'] = worker_id
-    
+
     def check_for_new_logs(self):
         """Vérifie les nouveaux fichiers de logs et les traite."""
         try:
@@ -287,23 +287,23 @@ class LogMonitor:
             if not os.path.exists(self.log_dir):
                 logger.warning(f"Le répertoire de logs {self.log_dir} n'existe pas")
                 return
-            
+
             # Parcourir les fichiers de logs
             for filename in os.listdir(self.log_dir):
                 if filename.startswith('parallel_training_results_') and filename.endswith('.json'):
                     file_path = os.path.join(self.log_dir, filename)
-                    
+
                     # Vérifier si le fichier a été modifié depuis la dernière vérification
                     mtime = os.path.getmtime(file_path)
                     if mtime > self.last_modified:
                         self.update_from_json_file(file_path)
                         self.last_modified = mtime
-                        
+
                         # Ajouter le fichier à la liste des fichiers traités
                         if file_path not in self.processed_files:
                             self.processed_files.add(file_path)
                             logger.info(f"Nouveau fichier de log détecté: {filename}")
-        
+
         except Exception as e:
             logger.error(f"Erreur lors de la vérification des logs: {str(e)}")
 
@@ -346,17 +346,17 @@ app.layout = dbc.Container([
         interval=5*1000,  # en millisecondes
         n_intervals=0
     ),
-    
+
     # En-tête avec indicateurs globaux
     dbc.Row([
         dbc.Col([
             html.H1([
-                html.Img(src="/assets/adan.jpg", style={'height':'50px', 'margin-right':'15px'}), 
+                html.Img(src="/assets/adan.jpg", style={'height':'50px', 'margin-right':'15px'}),
                 "l'entrainement de adan"
             ], className="text-center mb-4", style={"color": "#00ff88"})
         ], width=12)
     ]),
-    
+
     dcc.Tabs(id="tabs", value='overview', children=[
         dcc.Tab(label='Overview', value='overview'),
         dcc.Tab(label='Per-worker', value='per-worker'),
@@ -430,7 +430,7 @@ def render_content(tab):
                     ], style=card_style)
                 ], md=6)
             ], className="mb-4"),
-            
+
             # Graphiques secondaires
             dbc.Row([
                 dbc.Col([
@@ -522,30 +522,30 @@ def render_content(tab):
     elif tab == 'cnn-perceptual':
         return html.Div([html.H3('CNN & Perceptual')])
 
-def create_enhanced_line_chart(data: Dict, metric: str, title: str, 
+def create_enhanced_line_chart(data: Dict, metric: str, title: str,
                               y_title: str, color_discrete_map: Dict = None):
     """Crée un graphique amélioré avec des couleurs et styles personnalisés."""
     fig = go.Figure()
-    
+
     # Trier les workers pour un ordre cohérent
     sorted_workers = sorted(data.items(), key=lambda x: x[0])
-    
+
     for worker_id, worker_data in sorted_workers:
         if metric in worker_data and worker_data[metric]:
             # Calculer la moyenne mobile pour un affichage plus lisse
             values = list(worker_data[metric])
             window_size = max(1, len(values) // 10)  # Taille de fenêtre adaptative
-            
+
             if window_size > 1:
                 df = pd.Series(values)
                 smoothed = df.rolling(window=window_size, min_periods=1).mean()
                 y_values = smoothed.values
             else:
                 y_values = values
-            
+
             # Choisir une couleur en fonction de l'ID du worker
             color_idx = hash(worker_id) % len(COLOR_PALETTE)
-            
+
             fig.add_trace(go.Scatter(
                 x=list(range(len(y_values))),
                 y=y_values,
@@ -558,7 +558,7 @@ def create_enhanced_line_chart(data: Dict, metric: str, title: str,
                             f'{y_title}: %{{y:.2f}}<br>' +
                             'Étape: %{x}<extra></extra>'
             ))
-    
+
     # Ajouter une ligne de tendance si plus d'un point
     if len(fig.data) > 0 and len(fig.data[0].y) > 1:
         for trace in fig.data:
@@ -566,7 +566,7 @@ def create_enhanced_line_chart(data: Dict, metric: str, title: str,
             y = np.array(trace.y)
             z = np.polyfit(x, y, 1)
             p = np.poly1d(z)
-            
+
             fig.add_trace(go.Scatter(
                 x=x,
                 y=p(x),
@@ -579,7 +579,7 @@ def create_enhanced_line_chart(data: Dict, metric: str, title: str,
                 showlegend=False,
                 hoverinfo='skip'
             ))
-    
+
     fig.update_layout(
         title=dict(
             text=title,
@@ -601,13 +601,13 @@ def create_enhanced_line_chart(data: Dict, metric: str, title: str,
             x=1
         )
     )
-    
+
     # Ajouter des annotations pour les valeurs min/max
     for trace in fig.data:
         if len(trace.y) > 0 and 'tendance' not in trace.name:
             max_idx = np.argmax(trace.y)
             min_idx = np.argmin(trace.y)
-            
+
             fig.add_annotation(
                 x=max_idx,
                 y=trace.y[max_idx],
@@ -617,7 +617,7 @@ def create_enhanced_line_chart(data: Dict, metric: str, title: str,
                 ax=0,
                 ay=-40
             )
-            
+
             if max_idx != min_idx:  # Ne pas ajouter d'annotation si min = max
                 fig.add_annotation(
                     x=min_idx,
@@ -628,7 +628,7 @@ def create_enhanced_line_chart(data: Dict, metric: str, title: str,
                     ax=0,
                     ay=40
                 )
-    
+
     return fig
 
 @app.callback(
@@ -645,7 +645,7 @@ def create_enhanced_line_chart(data: Dict, metric: str, title: str,
 )
 def update_dashboard(n: int):
     """Met à jour tous les éléments du dashboard."""
-    
+
     # Simuler des données si pas de vraies données disponibles
     if not log_monitor.data:
         # Générer des données de test
@@ -661,11 +661,11 @@ def update_dashboard(n: int):
                 log_monitor.data[worker_name]['win_loss_ratio'].append(random.uniform(0, 2))
 
     data = dict(log_monitor.data)
-    
+
     # Créer les graphiques
     capital_fig = create_enhanced_line_chart(data, 'capital', 'Capital au fil du temps', 'Capital ($)')
     reward_fig = create_enhanced_line_chart(data, 'reward', 'Reward cumulé', 'Reward')
-    
+
     # Créer un graphique de l'utilisation des workers
     worker_fig = go.Figure()
     for worker_id, worker_data in data.items():
@@ -675,7 +675,7 @@ def update_dashboard(n: int):
                 y=list(worker_data['parallel_workers']),
                 name=f'Worker {worker_id}'
             ))
-    
+
     worker_fig.update_layout(
         title='Utilisation des workers parallèles',
         xaxis_title='Étapes',
@@ -692,14 +692,14 @@ def update_dashboard(n: int):
             x=1
         )
     )
-    
+
     # Créer des graphiques supplémentaires
     drawdown_fig = create_enhanced_line_chart(data, 'drawdown', 'Drawdown Analysis', 'Drawdown (%)')
     sharpe_fig = create_enhanced_line_chart(data, 'sharpe', 'Sharpe Ratio Evolution', 'Sharpe Ratio')
-    
+
     # Mettre à jour les statistiques globales
     stats = log_monitor.global_stats
-    
+
     # Calculer les performances des workers
     table_data = []
     active_workers = 0
@@ -714,7 +714,7 @@ def update_dashboard(n: int):
                 best_worker = worker
             active_workers += 1
             avg_capital += worker_data['capital'][-1]
-            
+
             # Calculer les performances
             current_capital = worker_data['capital'][-1]
             pnl_pct = (current_capital - 20) / 20 * 100 if current_capital > 0 else 0
@@ -724,7 +724,7 @@ def update_dashboard(n: int):
                 status = "🔴 En Perte"
             else:
                 status = "🟡 Neutre"
-            
+
             # Données pour le tableau
             table_data.append({
                 'worker': worker,
@@ -737,10 +737,10 @@ def update_dashboard(n: int):
                 'win_loss_ratio': worker_data['win_loss_ratio'][-1] if worker_data['win_loss_ratio'] else 0,
                 'status': status
             })
-    
+
     if active_workers > 0:
         avg_capital /= active_workers
-    
+
     # Déterminer la santé du modèle
     if avg_capital > 20:
         model_health = "🟢"  # Bon
@@ -748,11 +748,11 @@ def update_dashboard(n: int):
         model_health = "🟡"  # Moyen
     else:
         model_health = "🔴"  # Mauvais
-    
+
     return (
-        capital_fig, 
-        reward_fig, 
-        drawdown_fig, 
+        capital_fig,
+        reward_fig,
+        drawdown_fig,
         sharpe_fig,
         str(active_workers),
         f"${avg_capital:.2f}",
@@ -773,12 +773,12 @@ def handle_log_upload(contents):
         import base64
         content_type, content_string = contents.split(',')
         decoded = base64.b64decode(content_string).decode('utf-8')
-        
+
         # Mettre à jour le moniteur avec le contenu des logs
         log_monitor.update_from_logs(decoded, "Uploaded_Worker")
-        
+
         return dbc.Alert("Logs chargés avec succès! 📁", color="success")
-    
+
     return ""
 
 @app.callback(
@@ -816,7 +816,7 @@ def run_dashboard(host: str = "0.0.0.0", port: int = 8050, debug: bool = False) 
     print("   • Export des données")
     print("=" * 60)
     print("Appuyez sur Ctrl+C pour arrêter")
-    
+
     app.run_server(host=host, port=port, debug=debug)
 
 # Styles pour les onglets

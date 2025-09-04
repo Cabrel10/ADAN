@@ -87,7 +87,7 @@ def test_concurrent_access():
 def test_priority_updates():
     """Test la mise à jour des priorités."""
     buffer = SharedExperienceBuffer(buffer_size=100)
-    
+
     # Ajout d'expériences
     for i in range(10):
         experience = {
@@ -99,14 +99,14 @@ def test_priority_updates():
             'step': i
         }
         buffer.add(experience)
-    
+
     # Échantillonnage initial
     batch, indices, _ = buffer.sample(5)
-    
+
     # Mise à jour des priorités
     new_priorities = np.ones(len(indices)) * 10.0
     buffer.update_priorities(indices, new_priorities)
-    
+
     # Vérification que les priorités ont été mises à jour
     new_priorities, new_weights = buffer._get_priority_weights(indices)
     # Calculer la valeur attendue après transformation
@@ -121,24 +121,24 @@ def test_priority_updates():
 def test_buffer_length_and_ready():
     """Test les méthodes __len__ et is_ready."""
     buffer = SharedExperienceBuffer(buffer_size=10)
-    
+
     # Test avec buffer vide
     assert len(buffer) == 0
     assert not buffer.is_ready(1)
-    
+
     # Ajout d'une expérience
     exp = {'state': np.zeros(5), 'action': 0, 'reward': 0.0, 'next_state': np.zeros(5), 'done': False}
     buffer.add(exp)
-    
+
     # Test après ajout
     assert len(buffer) == 1
     assert buffer.is_ready(1)
     assert not buffer.is_ready(2)
-    
+
     # Remplissage du buffer
     for _ in range(9):
         buffer.add(exp)
-    
+
     # Test avec buffer plein
     assert len(buffer) == 10
     assert buffer.is_ready(10)
@@ -149,15 +149,15 @@ def test_add_edge_cases():
     """Test les cas limites de la méthode add."""
     buffer = SharedExperienceBuffer(buffer_size=2)
     exp = {'state': np.zeros(5), 'action': 0, 'reward': 0.0, 'next_state': np.zeros(5), 'done': False}
-    
+
     # Ajout normal
     buffer.add(exp)
     assert len(buffer) == 1
-    
+
     # Ajout avec priorité personnalisée
     buffer.add(exp, priority=2.0)
     assert len(buffer) == 2
-    
+
     # Dépassement de capacité (doit écraser la plus ancienne)
     buffer.add(exp)
     assert len(buffer) == 2
@@ -167,15 +167,15 @@ def test_sample_edge_cases():
     """Test les cas limites de la méthode sample."""
     buffer = SharedExperienceBuffer(buffer_size=10)
     exp = {'state': np.zeros(5), 'action': 0, 'reward': 0.0, 'next_state': np.zeros(5), 'done': False}
-    
+
     # Test avec buffer vide (devrait lever une exception)
     with pytest.raises(ValueError):
         buffer.sample(1)
-    
+
     # Ajout d'expériences
     for i in range(5):
         buffer.add(exp)
-    
+
     # Test avec batch_size > nombre d'expériences (devrait lever une exception)
     with pytest.raises(ValueError):
         buffer.sample(10)
@@ -185,16 +185,16 @@ def test_get_stats():
     """Test la méthode get_stats."""
     buffer = SharedExperienceBuffer(buffer_size=10)
     exp = {'state': np.zeros(5), 'action': 0, 'reward': 0.0, 'next_state': np.zeros(5), 'done': False}
-    
+
     # Stats avec buffer vide
     stats = buffer.get_stats()
     assert stats['max_size'] == 10
     assert stats['priority_max'] == 1.0
-    
+
     # Ajout d'expériences
     for i in range(3):
         buffer.add(exp, priority=i+1)
-    
+
     # Vérification des stats mises à jour
     stats = buffer.get_stats()
     assert stats['size'] == 3
@@ -209,25 +209,25 @@ def test_save_and_load(tmp_path):
     # Création d'un buffer de test
     buffer1 = SharedExperienceBuffer(buffer_size=5)
     exp = {'state': np.ones(3), 'action': 1, 'reward': 1.0, 'next_state': np.ones(3), 'done': False}
-    
+
     # Ajout de données
     for i in range(3):
         buffer1.add(exp, priority=i+1)
-    
+
     # Sauvegarde
     save_path = tmp_path / "test_buffer.pkl"
     buffer1.save(str(save_path))
-    
+
     # Chargement
     buffer2 = SharedExperienceBuffer.load(str(save_path))
-    
+
     # Vérification
     assert len(buffer1) == len(buffer2)
     # La taille du buffer chargé est égale au nombre d'éléments chargés, pas à la taille d'origine
     assert buffer2.buffer_size == len(buffer1)
     assert buffer1.alpha == buffer2.alpha
     assert buffer1.beta == buffer2.beta
-    
+
     # Vérification des priorités
     indices = list(range(len(buffer1)))
     p1, _ = buffer1._get_priority_weights(indices)

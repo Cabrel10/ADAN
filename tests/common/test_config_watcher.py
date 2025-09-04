@@ -52,58 +52,58 @@ class TestConfigWatcher:
     def test_load_initial_configs(self):
         """Teste le chargement initial des configurations"""
         watcher = ConfigWatcher(config_dir=TEST_CONFIG_DIR, validate=False)
-        
+
         # Vérification du chargement des configurations
         assert 'training' in watcher.current_configs
         assert 'environment' in watcher.current_configs
         assert watcher.current_configs['training']['batch_size'] == 32
         assert watcher.current_configs['environment']['name'] == 'TradingEnv'
-        
+
         watcher.stop()
 
     def test_register_callback(self):
         """Teste l'enregistrement d'un callback"""
         watcher = ConfigWatcher(config_dir=TEST_CONFIG_DIR, validate=False)
-        
+
         # Création d'un mock pour le callback
         mock_callback = MagicMock()
-        
+
         # Enregistrement du callback
         watcher.register_callback('training', mock_callback)
-        
+
         # Vérification que le callback est bien enregistré
         assert mock_callback in watcher.callbacks['training']
-        
+
         watcher.stop()
 
     def test_config_change_detection(self):
         """Teste la détection des changements de configuration"""
         watcher = ConfigWatcher(config_dir=TEST_CONFIG_DIR, validate=False)
-        
+
         # Création d'un mock pour le callback
         mock_callback = MagicMock()
         watcher.register_callback('training', mock_callback)
-        
+
         # Modification du fichier de configuration
         config_path = TEST_CONFIG_DIR / 'train_config.yaml'
         with open(config_path, 'r', encoding='utf-8') as f:
             config = yaml.safe_load(f)
-        
+
         # Modification d'une valeur
         config['batch_size'] = 64
-        
+
         with open(config_path, 'w', encoding='utf-8') as f:
             yaml.dump(config, f)
-        
+
         # Attente pour la détection du changement
         time.sleep(0.5)
-        
+
         # Vérification que le callback a été appelé
         mock_callback.assert_called_once()
-        
+
         # Vérification que la configuration a été mise à jour
         assert watcher.current_configs['training']['batch_size'] == 64
-        
+
         watcher.stop()
 
     @patch('adan_trading_bot.common.config_watcher.config_validator.ConfigValidator')
@@ -113,32 +113,32 @@ class TestConfigWatcher:
         mock_instance = MagicMock()
         mock_validator.return_value = mock_instance
         mock_instance.validate_train_config.return_value = True
-        
+
         # Création du watcher avec validation activée
         watcher = ConfigWatcher(config_dir=TEST_CONFIG_DIR, validate=True)
-        
+
         # Réinitialisation du mock pour ignorer les appels initiaux
         mock_instance.validate_train_config.reset_mock()
-        
+
         # Modification du fichier de configuration
         config_path = TEST_CONFIG_DIR / 'train_config.yaml'
         with open(config_path, 'r', encoding='utf-8') as f:
             config = yaml.safe_load(f)
-        
+
         config['batch_size'] = 128
-        
+
         with open(config_path, 'w', encoding='utf-8') as f:
             yaml.dump(config, f)
-        
+
         # Attente pour la détection du changement
         time.sleep(0.5)
-        
+
         # Vérification que la validation a été appelée
         mock_instance.validate_train_config.assert_called_once()
-        
+
         # Vérification que la configuration a été mise à jour
         assert watcher.current_configs['training']['batch_size'] == 128
-        
+
         watcher.stop()
 
     def test_config_reactive_decorator(self):
@@ -149,38 +149,38 @@ class TestConfigWatcher:
                 self.called = False
                 self.last_config = None
                 self.last_changes = None
-            
+
             @config_reactive('training')
             def on_training_config_change(self, config_type, new_config, changes):
                 self.called = True
                 self.last_config = new_config
                 self.last_changes = changes
-        
+
         # Création d'une instance de la classe de test
         test_obj = TestClass()
-        
+
         # Création du watcher et enregistrement du callback
         watcher = ConfigWatcher(config_dir=TEST_CONFIG_DIR, validate=False)
         watcher.register_callback('training', test_obj.on_training_config_change)
-        
+
         # Modification du fichier de configuration
         config_path = TEST_CONFIG_DIR / 'train_config.yaml'
         with open(config_path, 'r', encoding='utf-8') as f:
             config = yaml.safe_load(f)
-        
+
         config['batch_size'] = 256
-        
+
         with open(config_path, 'w', encoding='utf-8') as f:
             yaml.dump(config, f)
-        
+
         # Attente pour la détection du changement
         time.sleep(0.5)
-        
+
         # Vérification que la méthode décorée a été appelée
         assert test_obj.called is True
         assert test_obj.last_config['batch_size'] == 256
         assert 'batch_size' in test_obj.last_changes
-        
+
         watcher.stop()
 
     @classmethod
@@ -191,7 +191,7 @@ class TestConfigWatcher:
             path = TEST_CONFIG_DIR / filename
             if path.exists():
                 os.remove(path)
-        
+
         # Suppression du répertoire de test
         if TEST_CONFIG_DIR.exists():
             os.rmdir(TEST_CONFIG_DIR)

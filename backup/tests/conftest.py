@@ -30,12 +30,12 @@ def set_test_environment() -> Generator[None, None, None]:
     """
     # Sauvegarder l'état original des variables d'environnement
     original_environ = os.environ.copy()
-    
+
     # Configuration spécifique aux tests
     os.environ["TESTING"] = "True"
-    
+
     yield  # Les tests s'exécutent ici
-    
+
     # Restaurer l'environnement original
     os.environ.clear()
     os.environ.update(original_environ)
@@ -48,12 +48,12 @@ def tmp_data_dir(tmp_path: Path) -> Path:
     """
     data_dir = tmp_path / "test_data"
     data_dir.mkdir()
-    
+
     # Créer des sous-répertoires
     (data_dir / "raw").mkdir()
     (data_dir / "processed").mkdir()
     (data_dir / "models").mkdir()
-    
+
     return data_dir
 
 
@@ -115,10 +115,10 @@ def mock_config(tmp_path: Path, monkeypatch: MonkeyPatch) -> dict:
             "log_interval": 10
         }
     }
-    
+
     # Appliquer la configuration comme variable d'environnement
     monkeypatch.setenv("CONFIG", str(config))
-    
+
     return config
 
 

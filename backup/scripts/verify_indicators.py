@@ -17,17 +17,17 @@ def verify_parquet_files(parquet_files, expected_features_config):
     Verifies each Parquet file for NaN values and expected columns.
     """
     overall_status = "SUCCESS"
-    
+
     for file_path in parquet_files:
         logging.info(f"\n--- Verifying {file_path} ---")
         try:
             df = pd.read_parquet(file_path)
-            
+
             # Extract asset and timeframe from path
             path_parts = Path(file_path).parts
             asset = path_parts[-2] # e.g., 'BTC'
             timeframe = path_parts[-1].replace('.parquet', '') # e.g., '5m'
-            
+
             logging.info(f"Asset: {asset}, Timeframe: {timeframe}")
             logging.info(f"DataFrame shape: {df.shape}")
 
@@ -53,7 +53,7 @@ def verify_parquet_files(parquet_files, expected_features_config):
                     overall_status = "WARNING"
                 else:
                     logging.info(f"  PASS: All {len(expected_features)} expected features are present.")
-                    
+
                 # Optional: Check for unexpected columns (might indicate issues in calculation)
                 unexpected_columns = [col for col in df.columns if col not in expected_features and col != 'timestamp']
                 if unexpected_columns:
@@ -62,7 +62,7 @@ def verify_parquet_files(parquet_files, expected_features_config):
         except Exception as e:
             logging.error(f"  ERROR: Could not process {file_path}: {e}")
             overall_status = "ERROR"
-            
+
     logging.info(f"\n=== Overall Verification Status: {overall_status} ===")
     return overall_status
 
@@ -70,7 +70,7 @@ if __name__ == "__main__":
     script_dir = os.path.dirname(__file__)
     project_root = os.path.abspath(os.path.join(script_dir, '..', '..'))
     config_path = os.path.join(project_root, 'ADAN', 'config', 'config.yaml')
-    
+
     config = load_config(config_path)
     expected_features_config = config['data']['features_per_timeframe']
 
@@ -92,5 +92,5 @@ if __name__ == "__main__":
         "/home/morningstar/Documents/trading/ADAN/data/processed/indicators/ETH/5m.parquet",
         "/home/morningstar/Documents/trading/ADAN/data/processed/indicators/BTC/5m.parquet"
     ]
-    
+
     verify_parquet_files(parquet_files, expected_features_config)

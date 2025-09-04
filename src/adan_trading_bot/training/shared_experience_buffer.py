@@ -36,7 +36,7 @@ class SharedExperienceBuffer:
     ) -> None:
         """
         Initialise le buffer d'expérience partagé.
-        
+
         Args:
             buffer_size: Taille maximale du buffer
             alpha: Contrôle l'importance des priorités (0 = uniforme, 1 = pleinement prioritaire)
@@ -49,7 +49,7 @@ class SharedExperienceBuffer:
         self.beta = beta
         self.beta_increment = beta_increment
         self.epsilon = epsilon
-        
+
         # Utiliser un gestionnaire de mémoire partagée pour les données partagées
         self.manager = Manager()
         self.buffer = self.manager.list()
@@ -66,24 +66,24 @@ class SharedExperienceBuffer:
         self._shared_state['last_sample_time'] = time.time()
         self._shared_state['total_added'] = 0
         self._shared_state['total_sampled'] = 0
-    
+
     def __len__(self) -> int:
         """Retourne le nombre d'expériences actuellement dans le buffer."""
         with self._lock:
             return len(self.buffer)
-    
+
     def is_ready(self, batch_size: int) -> bool:
         """Vérifie si le buffer contient suffisamment d'expériences pour un batch."""
         return len(self) >= batch_size
-    
+
     def add(self, experience: Dict[str, Any], priority: Optional[float] = None) -> None:
         """
         Ajoute une expérience au buffer de manière thread-safe.
-        
+
         Args:
             experience: Dictionnaire contenant les données d'expérience
             priority: Priorité de l'expérience (optionnel)
-            
+
         Returns:
             int: Taille actuelle du buffer après ajout
         """
@@ -109,23 +109,23 @@ class SharedExperienceBuffer:
                 # Mettre à jour la position pour le prochain ajout
                 self._shared_state['pos'] = (idx + 1) % self.buffer_size
             self._shared_state['max_priority'] = max(self._shared_state['max_priority'], priority)
-            
+
             # Mettre à jour les compteurs et horodatages
             self._shared_state['num_additions'] += 1
             self._shared_state['total_added'] += 1
             self._shared_state['last_add_time'] = time.time()
-            
+
             # Notifier l'orchestrateur du nouvel ajout
             if hasattr(self, 'orchestrator'):
                 self.orchestrator.metrics['buffer_additions'] += 1
-    
+
     def sample(self, batch_size: int) -> Tuple[Dict[str, Any], np.ndarray, np.ndarray]:
         """
         Échantillonne un lot d'expériences du buffer de manière thread-safe.
-        
+
         Args:
             batch_size: Taille du lot à échantillonner
-            
+
         Returns:
             Tuple contenant:
                 - Dictionnaire des expériences échantillonnées, regroupées par clé
@@ -139,7 +139,7 @@ class SharedExperienceBuffer:
                     f"Tentative d'échantillonnage de {batch_size} expériences "
                     f"alors que le buffer n'en contient que {len(self.buffer)}"
                 )
-            
+
             # Convertir en listes Python pour éviter les problèmes de synchronisation
             priorities = list(self.priorities[:len(self.buffer)])
 
@@ -178,19 +178,19 @@ class SharedExperienceBuffer:
 
             # Mettre à jour beta
             self.beta = min(1.0, self.beta + self.beta_increment)
-        
+
         # Mettre à jour les statistiques d'échantillonnage
         with self._lock:
             self._shared_state['num_samples'] += batch_size
             self._shared_state['total_sampled'] += batch_size
             self._shared_state['last_sample_time'] = time.time()
-            
+
             # Notifier l'orchestrateur des échantillons utilisés
             if hasattr(self, 'orchestrator'):
                 self.orchestrator.metrics['buffer_samples_used'] += batch_size
-        
+
         return batch, indices, weights
-        
+
     def update_priorities(self, indices: List[int], priorities: np.ndarray) -> None:
         """
         Met à jour les priorités des expériences spécifiées de manière thread-safe.
@@ -216,7 +216,7 @@ class SharedExperienceBuffer:
                     priority = (abs(priority) + self.epsilon) ** self.alpha
                     self.priorities[idx] = priority
                     self._shared_state['max_priority'] = max(self._shared_state['max_priority'], priority)
-    
+
     def _update_priority(self, idx: int, priority: float) -> None:
         """
         Met à jour la priorité d'une expérience.
@@ -230,23 +230,23 @@ class SharedExperienceBuffer:
                 self.priorities[idx] = priority
                 # Mettre à jour la priorité maximale si nécessaire
                 self._shared_state['max_priority'] = max(self._shared_state['max_priority'], priority)
-                    
+
     def _get_priority_weights(self, indices: List[int]) -> Tuple[np.ndarray, np.ndarray]:
         """
         Récupère les priorités et les poids normalisés pour les indices donnés.
-        
+
         Cette méthode est principalement utilisée pour les tests.
-        
+
         Args:
             indices: Liste des indices pour lesquels récupérer les poids
-            
+
         Returns:
             Un tuple (priorities, weights) contenant les priorités brutes et les poids normalisés
         """
         with self._lock:
             # Récupérer les priorités pour les indices demandés
             priorities = np.array([self.priorities[i] for i in indices])
-            
+
             # Calculer les poids d'importance (comme dans la méthode sample)
             if len(priorities) > 0:
                 # Calculer les probabilités d'échantillonnage
@@ -256,22 +256,22 @@ class SharedExperienceBuffer:
                     probs /= probs_sum
                 else:
                     probs = np.ones_like(priorities) / len(priorities)
-                
+
                 # Calculer les poids d'importance
                 weights = (len(self.buffer) * probs) ** (-self.beta)
                 if len(weights) > 0:
                     weights /= weights.max()  # Normaliser
-                
+
                 return priorities, weights
             else:
                 weights = np.array([])
-                
+
             return priorities, weights
-    
+
     def get_stats(self) -> Dict[str, Any]:
         """
         Retourne des statistiques détaillées sur le buffer.
-        
+
         Returns:
             Dictionnaire contenant les statistiques détaillées
         """
@@ -279,17 +279,17 @@ class SharedExperienceBuffer:
             current_time = time.time()
             time_since_add = current_time - self._shared_state.get('last_add_time', current_time)
             time_since_sample = current_time - self._shared_state.get('last_sample_time', current_time)
-            
+
             add_rate = (
-                self._shared_state.get('total_added', 0) / 
+                self._shared_state.get('total_added', 0) /
                 max(1, (current_time - self._shared_state.get('creation_time', current_time)))
             )
-            
+
             sample_rate = (
-                self._shared_state.get('total_sampled', 0) / 
+                self._shared_state.get('total_sampled', 0) /
                 max(1, (current_time - self._shared_state.get('creation_time', current_time)))
             )
-            
+
             return {
                 'size': len(self.buffer),
                 'max_size': self.buffer_size,
@@ -305,7 +305,7 @@ class SharedExperienceBuffer:
                 'priority_max': self._shared_state.get('max_priority', 0.0),
                 'beta': self.beta
             }
-    
+
     def _make_serializable(self, obj: Any) -> Any:
         """
         Convertit un objet en une forme sérialisable pour le partage entre processus.
@@ -329,7 +329,7 @@ class SharedExperienceBuffer:
             return float(obj)
         except (TypeError, ValueError):
             return str(obj)
-    
+
     def save(self, path: str) -> None:
         """Sauvegarde le buffer sur le disque."""
         with self._lock:
@@ -351,7 +351,7 @@ class SharedExperienceBuffer:
             # Sauvegarder avec pickle
             with open(path, 'wb') as f:
                 pickle.dump(data, f)
-    
+
     @classmethod
     def load(cls, path: str) -> 'SharedExperienceBuffer':
         """Charge un buffer à partir du disque."""

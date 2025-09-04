@@ -124,7 +124,7 @@ def memory_efficient_forward(func):
         # Clear cache before forward pass if GPU memory is tight
         if torch.cuda.is_available() and hasattr(self, '_memory_efficient') and self._memory_efficient:
             torch.cuda.empty_cache()
-        
+
         try:
             return func(self, *args, **kwargs)
         finally:
@@ -132,7 +132,7 @@ def memory_efficient_forward(func):
             if torch.cuda.is_available() and hasattr(self, '_aggressive_cleanup') and self._aggressive_cleanup:
                 torch.cuda.empty_cache()
                 gc.collect()
-    
+
     return wrapper
 
 
@@ -189,10 +189,10 @@ class CustomCNN(BaseFeaturesExtractor):
         self._aggressive_cleanup = self.memory_config.get('aggressive_cleanup', False)
         self._mixed_precision = self.memory_config.get('enable_mixed_precision', True)
         self._gradient_checkpointing = self.memory_config.get('enable_gradient_checkpointing', False)
-        
+
         # Logger for memory tracking
         self.logger = logging.getLogger(self.__class__.__name__)
-        
+
         # Sauvegarder la configuration pour la visualisation
         self.diagnostics = diagnostics or {}
         self.attention_maps = []
@@ -240,16 +240,16 @@ class CustomCNN(BaseFeaturesExtractor):
 
         # Initialisation des poids
         self._init_weights()
-        
+
         # Memory optimization setup
         if self._gradient_checkpointing:
             self._setup_gradient_checkpointing()
-        
+
         # Model compilation for inference
         self._compiled = False
         # 'reduce-overhead' pour moins de mémoire
         self._compile_mode = 'max-autotune'
-        
+
         # Log memory configuration
         self.logger.info(
             "CustomCNN initialized with memory optimizations: "
@@ -258,7 +258,7 @@ class CustomCNN(BaseFeaturesExtractor):
             f"gradient_checkpointing={self._gradient_checkpointing}, "
             f"compilation={self._compile_mode}"
         )
-        
+
         # Compile the model if CUDA is available
         self._maybe_compile()
 
@@ -276,11 +276,11 @@ class CustomCNN(BaseFeaturesExtractor):
                 nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='leaky_relu')
                 if m.bias is not None:
                     nn.init.constant_(m.bias, 0)
-                    
+
     def _maybe_compile(self):
         """Compile the model if conditions are met."""
-        if (torch.__version__ >= '2.0.0' and 
-                torch.cuda.is_available() and 
+        if (torch.__version__ >= '2.0.0' and
+                torch.cuda.is_available() and
                 not self._compiled):
             try:
                 # Compile the model for inference
@@ -297,18 +297,18 @@ class CustomCNN(BaseFeaturesExtractor):
             except Exception as e:
                 self.logger.warning(f"Model compilation failed: {e}")
                 self._compiled = False
-    
+
     def _setup_gradient_checkpointing(self):
         """Setup gradient checkpointing for memory efficiency."""
         self.logger.info("Setting up gradient checkpointing for memory efficiency")
-        
+
         # Enable gradient checkpointing for major blocks
         if hasattr(self.block_b, 'scales'):
             for scale in self.block_b.scales:
                 for module in scale:
                     if hasattr(module, 'gradient_checkpointing'):
                         module.gradient_checkpointing = True
-    
+
     def enable_mixed_precision(self):
         """Enable mixed precision training optimizations."""
         if torch.cuda.is_available():
@@ -316,29 +316,29 @@ class CustomCNN(BaseFeaturesExtractor):
             self.logger.info("Mixed precision training enabled")
         else:
             self.logger.warning("Mixed precision requires CUDA, keeping disabled")
-    
+
     def disable_mixed_precision(self):
         """Disable mixed precision training."""
         self._mixed_precision = False
         self.logger.info("Mixed precision training disabled")
-    
+
     def get_memory_usage(self) -> Dict[str, float]:
         """
         Get current memory usage of the model.
-        
+
         Returns:
             Dict with memory usage statistics
         """
         if not torch.cuda.is_available():
             return {"error": "CUDA not available"}
-        
+
         # Calculate model parameters memory
         param_memory = sum(p.numel() * p.element_size() for p in self.parameters()) / (1024**2)  # MB
-        
+
         # Get current GPU memory
         allocated = torch.cuda.memory_allocated() / (1024**2)  # MB
         cached = torch.cuda.memory_reserved() / (1024**2)  # MB
-        
+
         return {
             "model_parameters_mb": param_memory,
             "gpu_allocated_mb": allocated,
@@ -347,32 +347,32 @@ class CustomCNN(BaseFeaturesExtractor):
             "mixed_precision": self._mixed_precision,
             "gradient_checkpointing": self._gradient_checkpointing
         }
-    
+
     def optimize_for_inference(self):
         """Optimize model for inference (disable training-specific features)."""
         self.eval()  # Set to evaluation mode
         if self._gradient_checkpointing:
             self.logger.info("Disabling gradient checkpointing for inference")
             self._gradient_checkpointing = False
-        
+
         # Disable dropout and other training-specific layers
         for module in self.modules():
             if isinstance(module, (nn.Dropout, nn.Dropout2d)):
                 module.p = 0.0
-        
+
         # Compile the model for inference
         self._maybe_compile()
-        
+
         # Clear CUDA cache and run garbage collection
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
         gc.collect()
-        
+
         # Enable cuDNN benchmarking for inference
         torch.backends.cudnn.benchmark = True
-        
+
         self.logger.info("Model optimized for inference")
-    
+
     def cleanup_memory(self):
         """Manual memory cleanup."""
         if torch.cuda.is_available():
@@ -397,7 +397,7 @@ class CustomCNN(BaseFeaturesExtractor):
                 return self._forward_impl(observations)
         else:
             return self._forward_impl(observations)
-    
+
     def _forward_impl(self, observations: Tensor) -> Tensor:
         """Internal forward implementation."""
         # Bloc A

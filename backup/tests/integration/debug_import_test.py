@@ -33,4 +33,3 @@ except Exception as e:
     print(f"\n--- DEBUG: Une erreur explicite est survenue : {e} ---")
     import traceback
     traceback.print_exc()
-

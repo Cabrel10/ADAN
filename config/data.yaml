@@ -3,46 +3,6 @@
 
 data:
   data_dir: /home/morningstar/Documents/trading/bot/data/processed/indicators
-  features_per_timeframe:
-    1h:
-    - OPEN
-    - HIGH
-    - LOW
-    - CLOSE
-    - VOLUME
-    - RSI_14
-    - CCI_20_0.015
-    - MFI_14
-    - EMA_50
-    - EMA_100
-    - SMA_200
-    4h:
-    - OPEN
-    - HIGH
-    - LOW
-    - CLOSE
-    - VOLUME
-    - RSI_14
-    - CCI_20_0.015
-    - MFI_14
-    - EMA_50
-    - SMA_200
-    5m:
-    - OPEN
-    - HIGH
-    - LOW
-    - CLOSE
-    - VOLUME
-    - RSI_14
-    - STOCHk_14_3_3
-    - STOCHd_14_3_3
-    - CCI_20_0.015
-    - ROC_9
-    - MFI_14
-    - EMA_5
-    - EMA_20
-    - SUPERTREND_14_2.0
-    - PSAR_0.02_0.2
   file_structure:
     assets:
     - BTCUSDT
@@ -164,62 +124,54 @@ feature_engineering:
         multiplier: 2.0
         window: 14
     timeframes:
-      1h:
-        momentum:
-        - RSI_14
-        - MACD_12_26_9
-        - MACD_HIST_12_26_9
-        - CCI_20
-        - MFI_14
-        trend:
-        - EMA_50
-        - EMA_100
-        - SMA_200
-        - ICHIMOKU_9_26_52
-        - PSAR_0.02_0.2
-        volatility:
-        - ATR_14
-        - BB_20_2.0
-        volume:
-        - OBV
-        - VWAP
-      4h:
-        momentum:
-        - RSI_14
-        - MACD_12_26_9
-        - CCI_20
-        - MFI_14
-        trend:
-        - SMA_200
-        - EMA_50
-        - ICHIMOKU_9_26_52
-        - SUPERTREND_14_3.0
-        - PSAR_0.02_0.2
-        volatility:
-        - ATR_14
-        - BB_20_2.0
-        volume:
-        - OBV
-        - VWAP_DAILY
-        - VWAP_WEEKLY
       5m:
-        momentum:
+        - OPEN
+        - HIGH
+        - LOW
+        - CLOSE
+        - VOLUME
         - RSI_14
-        - STOCH_14_3
-        - CCI_20
-        - ROC_9
-        - MFI_14
-        trend:
-        - EMA_5
-        - EMA_20
-        - SUPERTREND_14_2.0
-        - PSAR_0.02_0.2
-        volatility:
+        - STOCHk_14_3_3
+        - STOCHd_14_3_3
+        - MACD_HIST
         - ATR_14
-        - BB_20_2.0
-        volume:
-        - VWAP
+        - EMA_5
+        - EMA_12
+        - BB_UPPER
+        - BB_MIDDLE
+        - BB_LOWER
+      1h:
+        - OPEN
+        - HIGH
+        - LOW
+        - CLOSE
+        - VOLUME
+        - RSI_14
+        - MACD_HIST
+        - ADX_14
+        - STOCHk_14_3_3
+        - STOCHd_14_3_3
+        - EMA_26
+        - EMA_50
+        - BB_UPPER
+        - BB_MIDDLE
+        - BB_LOWER
+      4h:
+        - OPEN
+        - HIGH
+        - LOW
+        - CLOSE
+        - VOLUME
+        - RSI_14
+        - MACD_HIST
+        - ADX_14
+        - ATR_14
         - OBV
+        - EMA_50
+        - EMA_200
+        - STOCHk_14_3_3
+        - STOCHd_14_3_3
+        - SMA_200
   performance:
     cache_indicators: true
     chunk_size: 1000
@@ -239,40 +191,48 @@ feature_engineering:
     check_nan_percentage: true
     max_correlation_threshold: 0.95
     max_nan_percentage: 0.05
+
+# Configuration du prétraitement des données (mise à jour le 01/09/2025)
 preprocessing:
+  # Configuration de la normalisation
   normalization:
-    clip_values:
-    - -5
-    - 5
-    method: robust
-    scale_per_asset: true
-    scale_per_timeframe: true
+    clip_values: [-5, 5]  # Valeurs de clipping
+    method: robust        # Méthode robuste pour gérer les valeurs aberrantes
+    scale_per_asset: true # Mise à l'échelle par actif
+    scale_per_timeframe: true  # Mise à l'échelle par timeframe
+    winsorize: true       # Réduction de l'impact des valeurs extrêmes
+    winsorize_limits: [0.01, 0.99]  # Limites de winsorization
+  
+  # Transformation des séries temporelles
   stationarity:
-    price_transform: log_returns
-    volume_transform: log1p
+    price_transform: log_returns  # Transformation des prix en rendements logarithmiques
+    volume_transform: log1p       # Transformation du volume avec log(1+x)
+  
+  # Configuration des indicateurs techniques
   technical_indicators:
-    price_indicators:
-    - sma_20
-    - sma_50
-    - ema_12
-    - ema_26
-    - rsi_14
-    - macd
-    - bollinger_bands
-    - atr_14
+    # Paramètres d'activation
     use_price_indicators: true
     use_volatility_indicators: true
     use_volume_indicators: true
-    volatility_indicators:
-    - returns_std_20
-    - atr_14
-    volume_indicators:
-    - volume_sma_20
-    - obv
+    
+    # Indicateurs de prix
+    price_indicators:
+      moving_averages: [SMA_20, EMA_12, EMA_26, EMA_50]
+      momentum: [RSI_14, MACD_HIST]
+      volatility: [ATR_14, SUPERTREND_14_2.0]
+      trend: [ADX_14]
+    
+    # Indicateurs de volatilité
+    volatility_indicators: [ATR_14, VOLATILITY_20]
+    
+    # Indicateurs de volume
+    volume_indicators: [VOLUME, VOLUME_MA_20, VOLUME_MA_50, OBV]
+  
+  # Configuration des fenêtres de traitement
   window_config:
-    min_window_size: 5
-    step_size: 1
-    window_sizes:
-      1h: 10
-      4h: 5
-      5m: 20
+    min_window_size: 5     # Taille minimale de la fenêtre
+    step_size: 1           # Pas d'incrémentation de la fenêtre
+    window_sizes:          # Tailles de fenêtre par timeframe
+      5m: 20              # 20 périodes de 5 minutes (100 minutes)
+      1h: 10              # 10 périodes de 1 heure (10 heures)
+      4h: 5               # 5 périodes de 4 heures (20 heures)

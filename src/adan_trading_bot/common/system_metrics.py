@@ -26,11 +26,11 @@ class SystemMetricsCollector:
     """
     Collects and tracks system-level metrics including CPU, memory, and GPU usage.
     """
-    
+
     def __init__(self, config: Optional[Dict[str, Any]] = None):
         """
         Initialize the system metrics collector.
-        
+
         Args:
             config: Configuration dictionary for the metrics collector
         """
@@ -38,16 +38,16 @@ class SystemMetricsCollector:
         self.enabled = self.config.get('enabled', True)
         self.update_interval = self.config.get('update_interval', 5.0)  # seconds
         self.last_update = 0.0
-        
+
         # Initialize metrics storage
         self.metrics = {}
         self.gpu_available = False
-        
+
         # Check for GPU availability
         self._check_gpu_availability()
-        
+
         logger.info(f"SystemMetricsCollector initialized. GPU available: {self.gpu_available}")
-    
+
     def _check_gpu_availability(self) -> None:
         """Check if GPU is available and initialize GPU metrics if possible."""
         self.gpu_available = False
@@ -69,44 +69,44 @@ class SystemMetricsCollector:
                     }
             except Exception as e:
                 logger.warning(f"Could not initialize GPU monitoring: {e}")
-    
+
     def update_metrics(self) -> Dict[str, Any]:
         """
         Update all system metrics.
-        
+
         Returns:
             Dictionary containing the latest system metrics
         """
         if not self.enabled:
             return {}
-            
+
         current_time = time.time()
         if current_time - self.last_update < self.update_interval:
             return self.metrics
-            
+
         # Update CPU metrics
         self._update_cpu_metrics()
-        
+
         # Update memory metrics
         self._update_memory_metrics()
-        
+
         # Update GPU metrics if available
         if self.gpu_available:
             self._update_gpu_metrics()
-        
+
         # Update system info
         self._update_system_info()
-        
+
         self.last_update = current_time
         return self.metrics
-    
+
     def _update_cpu_metrics(self) -> None:
         """Update CPU-related metrics."""
         try:
             cpu_percent = psutil.cpu_percent(interval=None)
             cpu_count = psutil.cpu_count()
             cpu_freq = psutil.cpu_freq()
-            
+
             self.metrics['cpu'] = {
                 'usage_percent': cpu_percent,
                 'cores': {
@@ -127,13 +127,13 @@ class SystemMetricsCollector:
             }
         except Exception as e:
             logger.error(f"Error updating CPU metrics: {e}")
-    
+
     def _update_memory_metrics(self) -> None:
         """Update memory-related metrics."""
         try:
             virtual_mem = psutil.virtual_memory()
             swap_mem = psutil.swap_memory()
-            
+
             self.metrics['memory'] = {
                 'virtual': {
                     'total': virtual_mem.total,
@@ -153,12 +153,12 @@ class SystemMetricsCollector:
             }
         except Exception as e:
             logger.error(f"Error updating memory metrics: {e}")
-    
+
     def _update_gpu_metrics(self) -> None:
         """Update GPU-related metrics if a GPU is available."""
         if not self.gpu_available or GPUtil is None:
             return
-            
+
         try:
             gpus = GPUtil.getGPUs()
             for i, gpu in enumerate(gpus):
@@ -172,7 +172,7 @@ class SystemMetricsCollector:
                     })
         except Exception as e:
             logger.error(f"Error updating GPU metrics: {e}")
-    
+
     def _update_system_info(self) -> None:
         """Update general system information."""
         try:
@@ -196,32 +196,32 @@ class SystemMetricsCollector:
             }
         except Exception as e:
             logger.error(f"Error updating system info: {e}")
-    
+
     def get_metrics(self) -> Dict[str, Any]:
         """
         Get the current system metrics.
-        
+
         Returns:
             Dictionary containing the current system metrics
         """
         return self.metrics
-    
+
     def get_metrics_summary(self) -> Dict[str, Any]:
         """
         Get a summary of the current system metrics in a more compact format.
-        
+
         Returns:
             Dictionary containing a summary of system metrics
         """
         if not self.metrics:
             return {}
-            
+
         summary = {
             'cpu_usage': self.metrics.get('cpu', {}).get('usage_percent', 0),
             'memory_usage': self.metrics.get('memory', {}).get('virtual', {}).get('percent', 0),
             'timestamp': self.metrics.get('system', {}).get('timestamp', datetime.utcnow().isoformat())
         }
-        
+
         if 'gpu' in self.metrics and self.gpu_available:
             gpu = self.metrics['gpu']['devices'][0]  # Primary GPU
             summary.update({
@@ -229,5 +229,5 @@ class SystemMetricsCollector:
                 'gpu_memory_usage': gpu.get('memory_util', 0),
                 'gpu_temperature': gpu.get('temperature', 0)
             })
-            
+
         return summary

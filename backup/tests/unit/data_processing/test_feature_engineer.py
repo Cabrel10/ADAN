@@ -65,7 +65,7 @@ class TestFeatureEngineer(unittest.TestCase):
         self.assertIn('RSI_14_1m', processed_df.columns)
         self.assertIn('MACD_12_26_9_1m', processed_df.columns) # Default MACD columns
         self.assertIn('BBL_20_2.0_1m', processed_df.columns) # Bollinger Bands Lower
-        
+
         # Check if data is normalized (mean close to 0, std close to 1)
         for col in ['close_1m', 'RSI_14_1m']:
             if col in processed_df.columns:

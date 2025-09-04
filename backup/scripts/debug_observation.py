@@ -34,7 +34,7 @@ def debug_observation():
     config_path = os.path.join(project_root, 'config/config.yaml')
     config_loader = ConfigLoader()
     config = config_loader.load_config(config_path)
-    
+
     # Configuration du worker pour le débogage
     worker_config = {
         'id': 'debug_worker',
@@ -46,36 +46,36 @@ def debug_observation():
         'episode_length': 100,
         'reward_config': config.get('reward', {})
     }
-    
+
     # Initialiser le chargeur de données
     data_loader = ChunkedDataLoader(config, worker_config)
-    
+
     # Initialiser l'environnement
     env = MultiAssetChunkedEnv(config, worker_config, data_loader_instance=data_loader)
-    
+
     # Réinitialiser l'environnement
     logger.info("Réinitialisation de l'environnement...")
     observation = env.reset()
-    
+
     if observation is None:
         logger.error("L'observation est None après la réinitialisation")
         return
-    
+
     logger.info(f"Taille de l'observation: {observation.shape}")
     logger.info("Valeurs de l'observation:")
     logger.info(observation)
-    
+
     # Tester quelques étapes
     for i in range(5):
         logger.info(f"\n=== Étape {i+1} ===")
         action = env.action_space.sample()  # Action aléatoire
         observation, reward, done, info = env.step(action)
-        
+
         logger.info(f"Taille de l'observation: {observation.shape}")
         logger.info(f"Récompense: {reward}")
         logger.info(f"Terminé: {done}")
         logger.info(f"Infos: {info}")
-        
+
         if done:
             logger.info("L'épisode est terminé")
             break

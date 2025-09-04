@@ -21,17 +21,17 @@ console = Console()
 
 class DBELogAnalyzer:
     """Classe pour analyser les logs du Dynamic Behavior Engine."""
-    
+
     def __init__(self, log_file: str):
         """
         Initialise l'analyseur de logs.
-        
+
         Args:
             log_file: Chemin vers le fichier de log à analyser
         """
         self.log_file = Path(log_file)
         self.log_data = self._load_logs()
-    
+
     def _load_logs(self) -> List[Dict[str, Any]]:
         """Charge les logs depuis le fichier JSONL."""
         logs = []
@@ -45,23 +45,23 @@ class DBELogAnalyzer:
         except FileNotFoundError:
             console.print(f"[red]Erreur: Fichier non trouvé: {self.log_file}[/]")
             raise
-        
+
         if not logs:
             console.print("[yellow]Avertissement: Aucune donnée de log valide trouvée.[/]")
-        
+
         return logs
-    
+
     def get_summary(self) -> Dict[str, Any]:
         """Retourne un résumé des logs."""
         if not self.log_data:
             return {}
-        
+
         # Filtrer uniquement les entrées de décision
         decisions = [log for log in self.log_data if log.get('type') == 'decision']
-        
+
         if not decisions:
             return {"error": "Aucune décision trouvée dans les logs"}
-        
+
         # Statistiques de base
         summary = {
             "total_decisions": len(decisions),
@@ -80,9 +80,9 @@ class DBELogAnalyzer:
                 "volatility": self._calculate_stats(decisions, 'context.volatility')
             }
         }
-        
+
         return summary
-    
+
     def _calculate_stats(self, decisions: List[Dict], field: str) -> Dict[str, float]:
         """Calcule les statistiques pour un champ donné."""
         values = []
@@ -97,10 +97,10 @@ class DBELogAnalyzer:
                     values.append(value)
             except (KeyError, AttributeError):
                 continue
-        
+
         if not values:
             return {"count": 0, "min": None, "max": None, "mean": None, "std": None}
-        
+
         return {
             "count": len(values),
             "min": float(np.min(values)),
@@ -108,19 +108,19 @@ class DBELogAnalyzer:
             "mean": float(np.mean(values)),
             "std": float(np.std(values)) if len(values) > 1 else 0.0
         }
-    
+
     def plot_metrics(self, output_file: Optional[str] = None) -> None:
         """Génère des graphiques des métriques clés."""
         if not self.log_data:
             console.print("[red]Aucune donnée à afficher.[/]")
             return
-        
+
         # Préparer les données pour le tracé
         decisions = [log for log in self.log_data if log.get('type') == 'decision']
         if not decisions:
             console.print("[red]Aucune décision trouvée à tracer.[/]")
             return
-        
+
         # Créer un DataFrame pour faciliter l'analyse
         df = pd.DataFrame([
             {
@@ -135,14 +135,14 @@ class DBELogAnalyzer:
             }
             for d in decisions
         ])
-        
+
         if df.empty:
             console.print("[red]Aucune donnée valide à tracer.[/]")
             return
-        
+
         # Créer une figure avec plusieurs sous-graphiques
         fig, axes = plt.subplots(3, 1, figsize=(12, 15), sharex=True)
-        
+
         # Graphique 1: SL/TP
         ax1 = axes[0]
         ax1.plot(df['timestamp'], df['sl_pct'] * 100, label='Stop-Loss (%)', color='r')
@@ -151,42 +151,42 @@ class DBELogAnalyzer:
         ax1.set_ylabel('Valeur (%)')
         ax1.legend()
         ax1.grid(True)
-        
+
         # Graphique 2: Taille de position et volatilité
         ax2 = axes[1]
         ax2_twin = ax2.twinx()
-        
+
         color = 'tab:blue'
         ax2.set_ylabel('Taille de position', color=color)
         ax2.plot(df['timestamp'], df['position_size'] * 100, color=color, label='Taille de position')
         ax2.tick_params(axis='y', labelcolor=color)
-        
+
         color = 'tab:orange'
         ax2_twin.set_ylabel('Volatilité', color=color)
         ax2_twin.plot(df['timestamp'], df['volatility'] * 100, color=color, linestyle='--', label='Volatilité')
         ax2_twin.tick_params(axis='y', labelcolor=color)
-        
+
         ax2.set_title('Taille de position et volatilité')
-        
+
         # Graphique 3: Valeur du portefeuille et drawdown
         ax3 = axes[2]
         ax3_twin = ax3.twinx()
-        
+
         color = 'tab:blue'
         ax3.set_ylabel('Valeur du portefeuille (USDT)', color=color)
         ax3.plot(df['timestamp'], df['portfolio_value'], color=color, label='Valeur du portefeuille')
         ax3.tick_params(axis='y', labelcolor=color)
-        
+
         color = 'tab:red'
         ax3_twin.set_ylabel('Drawdown (%)', color=color)
         ax3_twin.plot(df['timestamp'], df['drawdown'], color=color, linestyle='--', label='Drawdown')
         ax3_twin.tick_params(axis='y', labelcolor=color)
-        
+
         ax3.set_title('Performance du portefeuille')
-        
+
         # Ajuster l'espacement et afficher
         plt.tight_layout()
-        
+
         if output_file:
             plt.savefig(output_file)
             console.print(f"[green]Graphique enregistré sous {output_file}[/]")
@@ -198,24 +198,24 @@ def display_summary(summary: Dict[str, Any]) -> None:
     if not summary:
         console.print("[red]Aucun résumé à afficher.[/]")
         return
-    
+
     # Tableau récapitulatif
     table = Table(title="Résumé des décisions du DBE")
     table.add_column("Métrique", style="cyan")
     table.add_column("Valeur", style="green")
-    
+
     # Informations générales
     table.add_row("Nombre total de décisions", str(summary['total_decisions']))
     table.add_row("Période de début", summary['time_period']['start'])
     table.add_row("Période de fin", summary['time_period']['end'])
-    
+
     console.print(table)
-    
+
     # Statistiques détaillées
     for category, stats in summary.items():
         if category in ['total_decisions', 'time_period']:
             continue
-            
+
         console.print(f"\n[bold]{category.upper()}[/]")
         cat_table = Table(show_header=True, header_style="bold magenta")
         cat_table.add_column("Paramètre")
@@ -223,7 +223,7 @@ def display_summary(summary: Dict[str, Any]) -> None:
         cat_table.add_column("Max")
         cat_table.add_column("Moyenne")
         cat_table.add_column("Écart-type")
-        
+
         for param, values in stats.items():
             if values['count'] > 0:
                 cat_table.add_row(
@@ -233,7 +233,7 @@ def display_summary(summary: Dict[str, Any]) -> None:
                     f"{values['mean']:.4f}" if values['mean'] is not None else "N/A",
                     f"{values['std']:.4f}" if values['std'] is not None else "N/A"
                 )
-        
+
         console.print(cat_table)
 
 def main(
@@ -244,15 +244,15 @@ def main(
     """Analyse les logs du Dynamic Behavior Engine."""
     try:
         analyzer = DBELogAnalyzer(log_file)
-        
+
         # Afficher le résumé
         summary = analyzer.get_summary()
         display_summary(summary)
-        
+
         # Générer les graphiques si demandé
         if plot:
             analyzer.plot_metrics(output)
-    
+
     except Exception as e:
         console.print(f"[red]Erreur lors de l'analyse des logs: {e}[/]")
         raise typer.Exit(1)

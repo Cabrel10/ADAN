@@ -74,7 +74,7 @@ class TestPortfolioManager(unittest.TestCase):
         self.portfolio_manager.reset()
         initial_equity = self.portfolio_manager.initial_equity # Should be 20.0 from config
         self.portfolio_manager.portfolio_value = initial_equity
-    
+
         # Simulate drawdown just below the threshold (Small Capital: 4.0%)
         # 3% drawdown: 20.0 - (20.0 * 0.03) = 19.4
         self.portfolio_manager.portfolio_value = initial_equity * (1 - 0.03) # 3% drawdown

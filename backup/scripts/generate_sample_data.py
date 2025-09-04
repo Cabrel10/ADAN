@@ -67,7 +67,7 @@ def process_and_save_data(config):
     # Récupération des timeframes depuis la config
     timeframes = config['feature_engineering']['timeframes']
     logger.info(f"Timeframes à traiter: {timeframes}")
-    
+
     # Création du dossier de sortie s'il n'existe pas
     processed_dir.mkdir(parents=True, exist_ok=True)
 
@@ -135,18 +135,18 @@ def process_and_save_data(config):
                     '1h': ['ISA_9', 'ISB_26', 'ITS_9', 'IKS_26', 'ICS_26'],  # Composantes ICHIMOKU
                     '4h': ['ISA_9', 'ISB_26', 'ITS_9', 'IKS_26', 'ICS_26', 'SUPERT_14_3.0']  # Composantes ICHIMOKU + SUPERTREND
                 }
-                
+
                 # Vérification des indicateurs manquants avant suppression
                 missing_indicators = [
                     ind for ind in required_indicators.get(timeframe, [])
                     if ind not in df_indic.columns
                 ]
-                
+
                 if missing_indicators:
                     logger.warning(
                         f"Missing indicators for {timeframe} before cleanup: {missing_indicators}"
                     )
-                
+
                 # Colonnes à supprimer (uniquement les colonnes vraiment inutiles)
                 columns_to_drop = [
                     # Colonnes techniques intermédiaires
@@ -158,61 +158,61 @@ def process_and_save_data(config):
                     'VWAP_D',  # VWAP journalier (on garde le VWAP par défaut)
                     # Ne plus supprimer les colonnes ICHIMOKU
                 ]
-                
+
                 # Ne supprimer que les colonnes qui existent
                 columns_to_drop = [col for col in columns_to_drop if col in df_indic.columns]
                 if columns_to_drop:
                     logger.info(f"Suppression des colonnes intermédiaires: {columns_to_drop}")
                     df_indic = df_indic.drop(columns=columns_to_drop)
-                
+
                 # Vérification finale des indicateurs requis
                 missing_indicators = [
                     ind for ind in required_indicators.get(timeframe, [])
                     if ind not in df_indic.columns
                 ]
-                
+
                 # Vérification des indicateurs manquants
                 missing_indicators = [
                     ind for ind in required_indicators.get(timeframe, [])
                     if ind not in df_indic.columns
                 ]
-                
+
                 if missing_indicators:
                     logger.warning(
                         f"Missing indicators for {timeframe}: {missing_indicators}"
                     )
-                
+
                 # Stratégie de gestion des valeurs manquantes
                 initial_rows = len(df_indic)
                 initial_na = df_indic.isna().sum().sum()
-                
+
                 if initial_na > 0:
                     logger.info(f"Traitement de {initial_na} valeurs manquantes...")
-                    
+
                     # 1. Identifier les colonnes avec trop de valeurs manquantes (>50%)
                     na_ratio = df_indic.isna().mean()
                     columns_to_drop = na_ratio[na_ratio > 0.5].index.tolist()
-                    
+
                     if columns_to_drop:
                         logger.warning(
                             f"Suppression des colonnes avec plus de 50% de valeurs manquantes: {columns_to_drop}"
                         )
                         df_indic = df_indic.drop(columns=columns_to_drop)
-                    
+
                     # 2. Remplissage des valeurs manquantes par ordre de priorité
                     # 2.1 Remplissage avant/arrière pour les indicateurs techniques
                     df_indic = df_indic.ffill().bfill()
-                    
+
                     # 2.2 Interpolation linéaire pour les séries temporelles
                     numeric_cols = df_indic.select_dtypes(include=['float64', 'int64']).columns
                     for col in numeric_cols:
                         df_indic[col] = df_indic[col].interpolate(method='linear')
-                    
+
                     # 2.3 Remplissage par la moyenne pour les colonnes numériques restantes
                     for col in numeric_cols:
                         if df_indic[col].isna().any():
                             df_indic[col] = df_indic[col].fillna(df_indic[col].mean())
-                
+
                 # Vérification finale des valeurs manquantes
                 remaining_na = df_indic.isna().sum().sum()
                 if remaining_na > 0:
@@ -221,7 +221,7 @@ def process_and_save_data(config):
                         "Ces valeurs seront remplies avec des zéros."
                     )
                     df_indic = df_indic.fillna(0)
-                
+
                 # Vérification de la taille finale du DataFrame
                 final_rows = len(df_indic)
                 if final_rows < 100:  # Seuil arbitraire pour détecter un problème
@@ -231,10 +231,10 @@ def process_and_save_data(config):
                     )
                     # Au lieu de sauter, on garde les données disponibles avec un avertissement
                     logger.warning("Conservation des données disponibles malgré le faible nombre de lignes.")
-                
+
                 # Calcul du nombre de lignes supprimées (pour la rétrocompatibilité)
                 removed = initial_rows - final_rows
-                
+
                 logger.info(
                     f"Traitement terminé. {initial_rows} lignes initiales, "
                     f"{final_rows} lignes conservées, {removed} lignes supprimées, "

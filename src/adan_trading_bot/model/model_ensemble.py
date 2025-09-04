@@ -61,27 +61,27 @@ class ModelPerformance:
         """Crée une instance à partir d'un dictionnaire."""
         # Crée une copie pour éviter de modifier le dictionnaire d'origine
         data = data.copy()
-        
+
         # Convertit la chaîne de date en objet datetime si nécessaire
         if 'last_updated' in data and isinstance(data['last_updated'], str):
             data['last_updated'] = datetime.fromisoformat(data['last_updated'])
-            
+
         # Supprime les clés qui ne sont pas des paramètres du constructeur
         data.pop('accuracy', None)
-        
+
         return cls(**data)
 
 
 class VotingMechanism:
     """Mécanisme de vote pour combiner les prédictions de plusieurs modèles."""
-    
+
     def __init__(self, method: str = 'weighted'):
         """
         Initialise le mécanisme de vote.
-        
+
         Args:
             method: Méthode de vote ('majority', 'weighted', 'average')
-            
+
         Raises:
             ValueError: Si la méthode spécifiée n'est pas valide
         """
@@ -91,54 +91,54 @@ class VotingMechanism:
                 "Les méthodes valides sont: 'majority', 'weighted', 'average'"
             )
         self.method = method
-    
-    def combine_predictions(self, predictions: List[torch.Tensor], 
+
+    def combine_predictions(self, predictions: List[torch.Tensor],
                           weights: Optional[List[float]] = None) -> torch.Tensor:
         """
         Combine les prédictions de plusieurs modèles.
-        
+
         Args:
             predictions: Liste des tenseurs de prédictions des modèles
             weights: Poids de chaque modèle (optionnel)
-            
+
         Returns:
             Prédiction combinée
-            
+
         Raises:
             ValueError: Si la méthode de vote n'est pas supportée
         """
         if not predictions:
             raise ValueError("Aucune prédiction fournie")
-            
+
         if weights is None:
             weights = [1.0] * len(predictions)
-            
+
         if len(predictions) != len(weights):
             raise ValueError("Le nombre de prédictions doit correspondre au nombre de poids")
-            
+
         # Vérifie que la méthode est valide
         if self.method not in ['majority', 'weighted', 'average']:
             raise ValueError(f"Méthode de vote non supportée: {self.method}. "
                            "Les méthodes valides sont: 'majority', 'weighted', 'average'")
-            
+
         if self.method == 'majority':
             # Vote majoritaire (pour la classification)
             stacked = torch.stack(predictions, dim=0)
             return torch.mode(stacked, dim=0).values
-            
+
         elif self.method == 'weighted':
             # Moyenne pondérée (pour la régression)
-            weights_tensor = torch.tensor(weights, 
-                                       device=predictions[0].device, 
+            weights_tensor = torch.tensor(weights,
+                                       device=predictions[0].device,
                                        dtype=predictions[0].dtype)
             weights_tensor = weights_tensor / weights_tensor.sum()  # Normalisation
-            
+
             weighted_sum = torch.zeros_like(predictions[0])
             for pred, weight in zip(predictions, weights_tensor):
                 weighted_sum += pred * weight
-                
+
             return weighted_sum
-            
+
         elif self.method == 'average':
             # Moyenne simple
             return torch.mean(torch.stack(predictions, dim=0), dim=0)
@@ -146,12 +146,12 @@ class VotingMechanism:
 
 class ModelEnsemble:
     """Classe principale pour gérer un ensemble de modèles de trading."""
-    
-    def __init__(self, voting_method: str = 'weighted', 
+
+    def __init__(self, voting_method: str = 'weighted',
                  performance_file: Optional[str] = None):
         """
         Initialise l'ensemble de modèles.
-        
+
         Args:
             voting_method: Méthode de vote ('majority', 'weighted', 'average')
             performance_file: Chemin vers le fichier de sauvegarde des performances
@@ -160,15 +160,15 @@ class ModelEnsemble:
         self.performance: Dict[str, ModelPerformance] = {}
         self.voting_mechanism = VotingMechanism(method=voting_method)
         self.performance_file = performance_file
-        
+
         if performance_file and os.path.exists(performance_file):
             self._load_performance()
-    
-    def add_model(self, model: nn.Module, model_name: str, 
+
+    def add_model(self, model: nn.Module, model_name: str,
                  initial_weight: float = 1.0, **metadata) -> None:
         """
         Ajoute un modèle à l'ensemble.
-        
+
         Args:
             model: Modèle PyTorch à ajouter
             model_name: Nom unique du modèle
@@ -177,9 +177,9 @@ class ModelEnsemble:
         """
         if model_name in self.models:
             raise ValueError(f"Un modèle avec le nom '{model_name}' existe déjà")
-            
+
         self.models[model_name] = model
-        
+
         # Si des performances existent déjà pour ce modèle (chargées depuis un fichier), on les conserve
         if model_name not in self.performance:
             self.performance[model_name] = ModelPerformance(
@@ -187,103 +187,103 @@ class ModelEnsemble:
                 weights=initial_weight,
                 metadata=metadata
             )
-    
+
     def remove_model(self, model_name: str) -> None:
         """Supprime un modèle de l'ensemble."""
         if model_name in self.models:
             del self.models[model_name]
             del self.performance[model_name]
-    
+
     def predict(self, x: torch.Tensor) -> torch.Tensor:
         """
         Effectue une prédiction en utilisant l'ensemble des modèles.
-        
+
         Args:
             x: Tenseur d'entrée
-            
+
         Returns:
             Prédiction combinée de l'ensemble
         """
         if not self.models:
             raise ValueError("Aucun modèle n'a été ajouté à l'ensemble")
-            
+
         predictions = []
         weights = []
-        
+
         with torch.no_grad():
             for name, model in self.models.items():
                 pred = model(x)
                 predictions.append(pred)
                 weights.append(self.performance[name].weights)
-        
+
         # Combinaison des prédictions selon la méthode de vote
         return self.voting_mechanism.combine_predictions(predictions, weights)
-    
+
     def update_weights(self, model_name: str, new_weight: float) -> None:
         """Met à jour le poids d'un modèle."""
         if model_name not in self.performance:
             raise ValueError(f"Modèle inconnu: {model_name}")
-            
+
         self.performance[model_name].weights = max(0.0, new_weight)
-    
+
     def update_performance(self, model_name: str, prediction_correct: bool, **metadata) -> None:
         """Met à jour les performances d'un modèle."""
         if model_name not in self.performance:
             raise ValueError(f"Modèle inconnu: {model_name}")
-            
+
         self.performance[model_name].update_performance(prediction_correct, **metadata)
-    
+
     def get_best_model(self) -> Tuple[Optional[str], float]:
         """Retourne le nom et la précision du meilleur modèle."""
         if not self.performance:
             return None, 0.0
-            
+
         best_name = max(
-            self.performance.items(), 
+            self.performance.items(),
             key=lambda x: x[1].accuracy
         )[0]
         return best_name, self.performance[best_name].accuracy
-    
+
     def save_performance(self, filepath: Optional[str] = None) -> None:
         """Sauvegarde les performances des modèles dans un fichier JSON."""
         filepath = filepath or self.performance_file
         if not filepath:
             raise ValueError("Aucun fichier de performance spécifié")
-            
+
         data = {
             'version': '1.0',
             'last_updated': datetime.utcnow().isoformat(),
             'models': {}
         }
-        
+
         for name, perf in self.performance.items():
             data['models'][name] = perf.to_dict()
-        
+
         # Création du répertoire parent si nécessaire
         os.makedirs(os.path.dirname(os.path.abspath(filepath)), exist_ok=True)
-        
+
         with open(filepath, 'w') as f:
             json.dump(data, f, indent=2)
-    
+
     def _load_performance(self) -> None:
         """Charge les performances depuis un fichier JSON.
-        
+
         Les performances sont chargées pour tous les modèles présents dans le fichier,
         même s'ils ne sont pas encore dans l'ensemble. Cela permet de conserver l'historique
         même si les modèles sont ajoutés ou supprimés ultérieurement.
         """
         if not self.performance_file or not os.path.exists(self.performance_file):
             return
-            
+
         try:
             with open(self.performance_file, 'r') as f:
                 data = json.load(f)
-                
+
             # Vérifie la version du format
             if not isinstance(data, dict) or 'models' not in data:
                 print("Format de fichier de performances invalide")
                 return
-                
+
             # Charge les performances pour chaque modèle
             for name, perf_data in data.get('models', {}).items():
                 try:
@@ -310,17 +310,17 @@ class ModelEnsemble:
                         })
                 except Exception as e:
                     print(f"Erreur lors du chargement des performances pour {name}: {e}")
-                    
+
         except (json.JSONDecodeError, IOError) as e:
             print(f"Erreur lors du chargement du fichier de performances: {e}")
         except Exception as e:
             print(f"Erreur inattendue lors du chargement des performances: {e}")
             raise  # Propager l'erreur pour faciliter le débogage
-    
+
     def __len__(self) -> int:
         """Retourne le nombre de modèles dans l'ensemble."""
         return len(self.models)
-    
+
     def __contains__(self, model_name: str) -> bool:
         """Vérifie si un modèle fait partie de l'ensemble."""
         return model_name in self.models

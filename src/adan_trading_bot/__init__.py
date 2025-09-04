@@ -23,13 +23,13 @@ logger = logging.getLogger(__name__)
 if not logging.root.handlers:
     # Try to load logging config from file
     config_path = DEFAULT_CONFIG_DIR / 'logging_config.yaml'
-    
+
     # Setup logging with config file if it exists, otherwise use defaults
     if config_path.exists():
         logger = setup_logging(config_path=config_path)
     else:
         logger = setup_logging()
-    
+
     # Setup log management
     try:
         log_manager = setup_log_management(

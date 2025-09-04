@@ -45,7 +45,7 @@ def setup_logging(
 ) -> logging.Logger:
     """
     Setup logging configuration with support for both console and JSON logging.
-    
+
     Args:
         config_path: Path to the logging configuration file.
         default_level: Default logging level if config is not found.
@@ -57,59 +57,59 @@ def setup_logging(
         max_log_size: Maximum size of log files before rotation.
         backup_count: Number of backup files to keep.
         compress_backups: Whether to compress rotated log files.
-    
+
     Returns:
         logging.Logger: Configured logger instance.
     """
     logger = logging.getLogger("adan_trading_bot")
-    
+
     # If logger is already configured, return it
     if logger.handlers:
         return logger
-    
+
     # Set the log level
     log_level = default_level
-    
+
     # Load config if provided
     if config_path and os.path.exists(str(config_path)):
         try:
             with open(str(config_path), 'r', encoding='utf-8') as f:
                 config = yaml.safe_load(f)
-            
+
             # Get log level from config
             log_level_str = config.get('level', 'INFO')
             log_level = getattr(
-                logging, 
-                log_level_str.upper(), 
+                logging,
+                log_level_str.upper(),
                 default_level
             )
-            
+
             # Update settings from config if available
             log_dir = config.get('log_dir', log_dir)
             log_file = config.get('log_file', log_file)
             enable_json_logs = config.get('enable_json_logs', enable_json_logs)
             enable_console_logs = config.get(
-                'enable_console_logs', 
+                'enable_console_logs',
                 enable_console_logs
             )
             json_log_file = config.get('json_log_file', json_log_file)
             max_log_size = config.get('max_log_size', max_log_size)
             backup_count = config.get('backup_count', backup_count)
             compress_backups = config.get('compress_backups', compress_backups)
-            
+
         except Exception as e:
             logger.warning(
                 "Error loading logging config: %s. Using default settings.",
                 str(e)
             )
-    
+
     # Ensure log directory exists
     log_dir_path = Path(log_dir)
     log_dir_path.mkdir(parents=True, exist_ok=True)
-    
+
     # Clear any existing handlers
     logger.handlers = []
-    
+
     # Set up console handler if enabled
     if enable_console_logs:
         if not force_plain_console and not any(isinstance(h, RichHandler) for h in logging.root.handlers):
@@ -133,7 +133,7 @@ def setup_logging(
             except Exception as e:
                 logger.warning(f"Failed to initialize Rich handler: {e}")
                 force_plain_console = True
-        
+
         if force_plain_console:
             # Utiliser un handler de console simple
             console_handler = logging.StreamHandler()
@@ -144,37 +144,37 @@ def setup_logging(
             console_handler.setFormatter(console_formatter)
             console_handler.setLevel(log_level)
             logger.addHandler(console_handler)
-    
+
     # Set up JSON file handler if enabled
     if enable_json_logs:
         json_log_path = log_dir_path / json_log_file
-        
+
         json_handler = JsonLogHandler(
             filename=str(json_log_path),
             max_bytes=max_log_size,
             backup_count=backup_count,
             compress_backups=compress_backups
         )
-        
+
         # Use the JSON formatter
         json_handler.setFormatter(JsonLogFormatter())
         json_handler.setLevel(log_level)
         logger.addHandler(json_handler)
-    
+
     # Set the log level for the root logger
     logger.setLevel(log_level)
-    
+
     # Suppress logging from other libraries
     logging.getLogger("urllib3").setLevel(logging.WARNING)
     logging.getLogger("matplotlib").setLevel(logging.WARNING)
     logging.getLogger("requests").setLevel(logging.WARNING)
-    
+
     return logger
 
 def get_logger():
     """
     Get the configured logger instance.
-    
+
     Returns:
         logging.Logger: Logger instance.
     """

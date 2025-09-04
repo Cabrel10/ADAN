@@ -32,12 +32,12 @@ class CircuitBreakerError(Exception):
 class CircuitBreaker(Generic[T]):
     """
     Circuit breaker implementation to handle external service failures.
-    
+
     Implements the circuit breaker pattern to detect failures and encapsulate the logic
     of preventing a service from constantly trying to execute an operation that's likely
     to fail.
     """
-    
+
     def __init__(
         self,
         name: str,
@@ -48,7 +48,7 @@ class CircuitBreaker(Generic[T]):
     ):
         """
         Initialize the circuit breaker.
-        
+
         Args:
             name: Name of the circuit breaker for identification
             failure_threshold: Number of failures before opening the circuit
@@ -61,18 +61,18 @@ class CircuitBreaker(Generic[T]):
         self.recovery_timeout = max(0.1, recovery_timeout)
         self.expected_exceptions = expected_exceptions
         self.logger = logger or logging.getLogger(__name__)
-        
+
         # Circuit state
         self._state = CircuitState.CLOSED
         self._failure_count = 0
         self._last_failure_time: Optional[float] = None
         self._success_count = 0
-    
+
     @property
     def state(self) -> CircuitState:
         """Get the current state of the circuit."""
         # Check if we should transition from OPEN to HALF_OPEN
-        if (self._state == CircuitState.OPEN and 
+        if (self._state == CircuitState.OPEN and
                 self._last_failure_time is not None and
                 time.monotonic() > self._last_failure_time + self.recovery_timeout):
             self._state = CircuitState.HALF_OPEN
@@ -80,51 +80,51 @@ class CircuitBreaker(Generic[T]):
                 f"Circuit '{self.name}' is now HALF_OPEN. Testing service recovery..."
             )
         return self._state
-    
+
     def __call__(self, func: Callable[..., T]) -> Callable[..., T]:
         """Decorator to wrap a function with circuit breaker logic."""
         @wraps(func)
         def wrapper(*args, **kwargs) -> T:
             return self.call(func, *args, **kwargs)
         return wrapper
-    
+
     def call(self, func: Callable[..., T], *args, **kwargs) -> T:
         """
         Execute the function with circuit breaker logic.
-        
+
         Args:
             func: The function to call
             *args: Positional arguments to pass to the function
             **kwargs: Keyword arguments to pass to the function
-            
+
         Returns:
             The result of the function call
-            
+
         Raises:
             CircuitBreakerError: If the circuit is open
             Exception: Any exception raised by the wrapped function
         """
         # Check circuit state
         current_state = self.state
-        
+
         if current_state == CircuitState.OPEN:
             retry_after = (self._last_failure_time or 0) + self.recovery_timeout - time.monotonic()
             raise CircuitBreakerError(
-                self.name, 
-                CircuitState.OPEN, 
+                self.name,
+                CircuitState.OPEN,
                 max(0, retry_after)
             )
-        
+
         # Try to execute the function
         try:
             result = func(*args, **kwargs)
             self._on_success()
             return result
-            
+
         except self.expected_exceptions as e:
             self._on_failure()
             raise  # Re-raise the original exception
-            
+
         except Exception as e:
             # Log unexpected exceptions but don't count them as failures
             self.logger.error(
@@ -132,45 +132,45 @@ class CircuitBreaker(Generic[T]):
                 exc_info=True
             )
             raise
-    
+
     def _on_success(self):
         """Handle a successful function call."""
         if self._state == CircuitState.HALF_OPEN:
             self._success_count += 1
-            
+
             # If we've had enough successful calls, close the circuit
             if self._success_count >= self.failure_threshold:
                 self._close()
-        
+
         # Reset failure count on success
         self._failure_count = 0
-    
+
     def _on_failure(self):
         """Handle a failed function call."""
         self._failure_count += 1
         self._success_count = 0
         self._last_failure_time = time.monotonic()
-        
+
         # Check if we should open the circuit
-        if (self._state == CircuitState.CLOSED and 
+        if (self._state == CircuitState.CLOSED and
                 self._failure_count >= self.failure_threshold):
             self._open()
         elif self._state == CircuitState.HALF_OPEN:
             # If we fail in half-open state, go back to open
             self._open()
-    
+
     def _open(self):
         """Open the circuit."""
         old_state = self._state
         self._state = CircuitState.OPEN
-        
+
         if old_state != CircuitState.OPEN:
             self.logger.error(
                 f"Circuit '{self.name}' is now OPEN. "
                 f"Failed {self._failure_count} times. "
                 f"Will retry after {self.recovery_timeout} seconds."
             )
-    
+
     def _close(self):
         """Close the circuit."""
         old_state = self._state
@@ -178,17 +178,17 @@ class CircuitBreaker(Generic[T]):
         self._failure_count = 0
         self._success_count = 0
         self._last_failure_time = None
-        
+
         if old_state != CircuitState.CLOSED:
             self.logger.info(f"Circuit '{self.name}' is now CLOSED. Service is healthy.")
 
 # Example usage:
 if __name__ == "__main__":
     import random
-    
+
     # Configure logging
     logging.basicConfig(level=logging.INFO)
-    
+
     # Create a circuit breaker
     cb = CircuitBreaker["example"](
         name="example_service",
@@ -196,14 +196,14 @@ if __name__ == "__main__":
         recovery_timeout=5.0,
         expected_exceptions=(ConnectionError, TimeoutError)
     )
-    
+
     # Function that might fail
     @cb
     def unreliable_service():
         if random.random() < 0.7:  # 70% chance of failure
             raise ConnectionError("Service unavailable")
         return "Success!"
-    
+
     # Test the circuit breaker
     for i in range(10):
         try:

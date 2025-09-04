@@ -16,18 +16,18 @@ modules:
   paths: "paths.yaml"          # System paths and general settings
   model: "model.yaml"          # Model architecture and diagnostics
   environment: "environment.yaml"  # Trading environment and portfolio
-  
+
   # Data and processing configurations
   data: "data.yaml"            # Data processing and feature engineering
-  
+
   # Training and agent configurations
   agent: "agent.yaml"          # RL agent configuration and hyperparameters
   training: "training.yaml"    # Training configuration and reward shaping
   workers: "workers.yaml"      # Worker-specific configurations
-  
+
   # Trading and risk management
   trading: "trading.yaml"      # Trading rules and capital tiers
-  
+
   # System configurations
   logging: "logging.yaml"      # Logging configuration (if exists)
 
@@ -47,7 +47,7 @@ overrides:
       timesteps_per_instance: 10000  # Shorter training for testing
     agent:
       learning_rate: 1e-3     # Higher learning rate for faster convergence
-      
+
   # Production overrides
   production:
     general:
@@ -71,7 +71,7 @@ validation:
   enabled: true
   schema_dir: "schemas/"
   strict_mode: false  # If true, fails on any validation error
-  
+
 # Hot-reload settings
 hot_reload:
   enabled: true

@@ -53,14 +53,14 @@ class TestWorkerEnvironment(unittest.TestCase):
 
         # Initialiser l'environnement pour ce worker
         env = MultiAssetChunkedEnv(
-            config=self.full_config, 
+            config=self.full_config,
             worker_config=worker_config
         )
 
         # 1. Vérifier les timeframes chargés
         self.assertEqual(
-            env.timeframes, 
-            ['5m'], 
+            env.timeframes,
+            ['5m'],
             "Le Worker 1 doit charger uniquement le timeframe '5m'"
         )
 
@@ -77,15 +77,15 @@ class TestWorkerEnvironment(unittest.TestCase):
 
         # Initialiser l'environnement
         env = MultiAssetChunkedEnv(
-            config=self.full_config, 
+            config=self.full_config,
             worker_config=worker_config
         )
 
         # 1. Vérifier les timeframes
         expected_timeframes = ['1h', '4h']
         self.assertCountEqual(
-            env.timeframes, 
-            expected_timeframes, 
+            env.timeframes,
+            expected_timeframes,
             "Le Worker 2 doit charger les timeframes '1h' et '4h'"
         )
 
@@ -95,16 +95,16 @@ class TestWorkerEnvironment(unittest.TestCase):
             with self.subTest(worker=worker_id):
                 try:
                     env = MultiAssetChunkedEnv(
-                        config=self.full_config, 
+                        config=self.full_config,
                         worker_config=worker_config
                     )
                     # Vérification simple
                     self.assertIsNotNone(
-                        env.observation_space, 
+                        env.observation_space,
                         f"L'espace d'observation est nul pour {worker_id}"
                     )
                     self.assertIsNotNone(
-                        env.action_space, 
+                        env.action_space,
                         f"L'espace d'action est nul pour {worker_id}"
                     )
                 except Exception as e:

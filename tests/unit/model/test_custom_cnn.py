@@ -17,7 +17,7 @@ class TestCustomCNN(unittest.TestCase):
         # Ajuster la dimension de sortie attendue à 128 pour correspondre à la configuration par défaut
         self.features_dim = 128
         self.batch_size = 4
-        
+
         # Créer un modèle de test
         self.model = CustomCNN(
             observation_space=self.observation_space,
@@ -57,41 +57,41 @@ class TestCustomCNN(unittest.TestCase):
                 'aggressive_cleanup': False
             }
         )
-        
+
         # Créer des données d'entrée factices
         self.dummy_input = torch.randn(
-            self.batch_size, 
+            self.batch_size,
             *self.observation_space.shape
         )
-    
+
     def test_forward_pass(self):
         """Test du passage avant du modèle."""
         # Act
         output = self.model(self.dummy_input)
-        
+
         # Assert
         self.assertIsInstance(output, torch.Tensor)
         self.assertEqual(output.shape, (self.batch_size, self.features_dim))
-    
+
     @patch('torch.compile')
     def test_model_compilation(self, mock_compile):
         """Test de la compilation du modèle."""
         # Arrange
         mock_compile.return_value = self.model._forward_impl
-        
+
         # Act
         self.model._maybe_compile()
-        
+
         # Assert
         if torch.__version__ >= '2.0.0' and torch.cuda.is_available():
             mock_compile.assert_called_once()
             self.assertTrue(self.model._compiled)
-    
+
     def test_optimize_for_inference(self):
         """Test de l'optimisation pour l'inférence."""
         # Act
         self.model.optimize_for_inference()
-        
+
         # Assert
         self.assertFalse(self.model.training)
         for module in self.model.modules():
@@ -104,7 +104,7 @@ class TestCustomCNN(unittest.TestCase):
         self.model.enable_mixed_precision()
         with torch.amp.autocast(device_type='cuda', enabled=True):
             output = self.model(self.dummy_input)
-        
+
         # Assert
         self.assertIsInstance(output, torch.Tensor)
         # Vérifier que le modèle est en mode précision mixte
