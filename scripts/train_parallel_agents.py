@@ -7,6 +7,7 @@ import logging
 import os
 import signal
 import sys
+import psutil
 import time
 import traceback
 import warnings
@@ -30,7 +31,8 @@ import yaml
 from gymnasium.wrappers import FlattenObservation
 from stable_baselines3 import PPO
 from stable_baselines3.common.logger import configure as sb3_logger_configure
-from stable_baselines3.common.callbacks import BaseCallback, EvalCallback
+from stable_baselines3.common.callbacks import BaseCallback, CallbackList, CheckpointCallback, EvalCallback
+from adan_trading_bot.training.callbacks import CustomTrainingInfoCallback
 from stable_baselines3.common.vec_env import VecEnv
 from typing import Dict, Any, Optional, Union, List, Tuple
 import time
@@ -1037,7 +1039,7 @@ def make_env(rank: int, seed: Optional[int] = None, config: Optional[Dict] = Non
         assets = [a.lower() for a in config.get("data", {}).get("assets", ["btcusdt"])]
         timeframes = [str(tf).lower() for tf in config.get("data", {}).get("timeframes", ["5m", "1h", "4h"])]
         data_split = config.get("data", {}).get("data_split", "val").lower()
-        
+
         worker_config = {
             "rank": rank,
             "num_workers": config.get("num_workers", 1),
@@ -1054,17 +1056,17 @@ def make_env(rank: int, seed: Optional[int] = None, config: Optional[Dict] = Non
     # Extraire les paramètres nécessaires de la configuration
     data_config = config.get("data", {})
     env_config = config.get("environment", {})
-    
+
     # Récupérer les paramètres du worker
     assets = [a.lower() for a in worker_config.get("assets", [])]
     timeframes = [str(tf).lower() for tf in worker_config.get("timeframes", [])]
-    
+
     # Récupérer le data_split de la configuration du worker, avec une valeur par défaut
     data_split = worker_config.get("data_split", "val").lower()
-    
+
     # Dossier de base des données (utiliser data_dirs[data_split] s'il existe, sinon data_dirs.base)
     data_dirs = config.get("data", {}).get("data_dirs", {})
-    
+
     # Utiliser le dossier spécifique au split s'il existe, sinon utiliser le dossier de base
     if data_split in data_dirs:
         data_dir = Path(data_dirs[data_split])
@@ -1072,62 +1074,62 @@ def make_env(rank: int, seed: Optional[int] = None, config: Optional[Dict] = Non
         data_dir = Path(data_dirs["base"]) / data_split
     else:
         data_dir = Path("data/processed/indicators") / data_split
-    
+
     logger.info(f"Configuration data_dirs: {data_dirs}")
     logger.info(f"Data split utilisé: {data_split}")
     logger.info(f"Dossier de données final: {data_dir}")
-    
+
     # Vérifier que le répertoire existe
     if not data_dir.exists():
         raise FileNotFoundError(f"Le répertoire de données {data_dir} n'existe pas")
-    
+
     # Vérifier que le répertoire existe
     if not data_dir.exists():
         raise FileNotFoundError(f"Le répertoire de données {data_dir} n'existe pas")
-        
+
     logger.info(f"Chargement des données depuis : {data_dir}")
     logger.info(f"Actifs: {assets}")
     logger.info(f"Timeframes: {timeframes}")
     logger.info(f"Split de données: {data_split}")
-    
+
     # Dictionnaire pour stocker les données chargées
     data = {}
     data_found = False
-    
+
     # Charger les données pour chaque actif et chaque timeframe
     for asset in assets:
         # Nettoyer le nom de l'actif (supprimer / et -) et forcer en minuscules
         clean_asset = asset.replace("/", "").replace("-", "").lower()
         data[clean_asset.upper()] = {}
         asset_data_found = False
-        
+
         for tf in timeframes:
             # Construire le chemin du fichier dans le format: {split}/{asset}/{timeframe}.parquet
             file_path = data_dir / clean_asset / f"{tf}.parquet"
-            
+
             # Vérifier si le fichier existe
             if not file_path.exists():
                 logger.warning(f"Fichier non trouvé: {file_path}")
                 continue
-                
+
             try:
                 # Charger les données Parquet
                 df = pd.read_parquet(file_path)
-                
+
                 # Vérifier que le DataFrame n'est pas vide
                 if df.empty:
                     logger.warning(f"Le fichier {file_path} est vide.")
                     continue
-                
+
                 # Stocker les données dans la structure attendue
                 data[clean_asset.upper()][tf] = df
                 logger.info(f"Données chargées: {clean_asset.upper()}/{tf} - {len(df)} lignes")
                 data_found = True
                 asset_data_found = True
-                
+
             except Exception as e:
                 logger.error(f"Erreur lors du chargement de {file_path}: {str(e)}")
-        
+
         if not asset_data_found:
             logger.warning(f"Aucune donnée valide trouvée pour l'actif {clean_asset.upper()}")
             del data[clean_asset.upper()]
@@ -1141,10 +1143,10 @@ def make_env(rank: int, seed: Optional[int] = None, config: Optional[Dict] = Non
     # Définir la taille de la fenêtre et la configuration des caractéristiques
     window_size = config.get("environment", {}).get("window_size", 50)
     features_config = config.get("environment", {}).get("features_config", {})
-    
+
     logger.info(f"Taille de la fenêtre: {window_size}")
     logger.info(f"Configuration des caractéristiques: {features_config}")
-    
+
     # Créer l'environnement avec les données chargées
     env = MultiAssetChunkedEnv(
         data=data,
@@ -1162,16 +1164,12 @@ def make_env(rank: int, seed: Optional[int] = None, config: Optional[Dict] = Non
         config=config
     )
 
-    # Appliquer les wrappers dans le bon ordre
-    # 1. D'abord le wrapper ResetObsAdapter pour gérer les retours de reset
-    env = ResetObsAdapter(env)
-
-    # 2. Ensuite le wrapper de compatibilité SB3 pour traiter l'observation
-    env = SB3GymCompatibilityWrapper(env)
-
-    # 3. Enfin, le wrapper GymnasiumToGymWrapper pour assurer la compatibilité avec SB3
-    # (ce wrapper doit être le plus externe pour gérer correctement les retours de reset et step)
-    env = GymnasiumToGymWrapper(env)
+    # Les wrappers de compatibilité complexes ont été supprimés.
+    # L'environnement de base est maintenant directement utilisé, en supposant
+    # qu'il est compatible avec l'API Gymnasium, ce que Stable Baselines 3 gère nativement.
+    # env = ResetObsAdapter(env)
+    # env = SB3GymCompatibilityWrapper(env)
+    # env = GymnasiumToGymWrapper(env)
 
     # Configurer la graine pour la reproductibilité
     if seed is not None:
@@ -1251,7 +1249,7 @@ def main(
             "num_workers": num_envs,
             "assets": assets,  # Liste des actifs
             "timeframes": timeframes,  # Liste des timeframes
-            "chunk_sizes": {tf: 50 for tf in timeframes},  # Taille réduite des chunks
+            "chunk_sizes": {tf: 1000 for tf in timeframes}, # Chunk size augmentée pour le warm-up
             "data_loader": {
                 "batch_size": config.get("batch_size", 32),
                 "shuffle": True,
@@ -1312,63 +1310,8 @@ def main(
         if config.get('normalize_observations', True):
             env = VecNormalize(env, norm_obs=True, norm_reward=True)
 
-        # Valider l'environnement
-        try:
-            logger.info("Validation de l'environnement...")
-            # Valider l'environnement sans les wrappers en évitant les attributs dépréciés
-            base_env = env
-
-            # Déroulage sûr des wrappers sans accès direct aux attributs dépréciés
-            try:
-                # Essayer d'utiliser l'API VecEnv pour récupérer l'env sous-jacent
-                # (certaines implémentations exposent get_attr)
-                if hasattr(env, 'get_attr'):
-                    inner_envs = env.get_attr('env', indices=0)
-                    if inner_envs:
-                        base_env = inner_envs[0]
-            except Exception:
-                pass
-
-            # Fallback générique: dérouler prudemment sans supposer .venv
-            visited = set()
-            for _ in range(10):  # éviter les boucles infinies
-                obj_id = id(base_env)
-                if obj_id in visited:
-                    break
-                visited.add(obj_id)
-
-                # Éviter d'accéder directement à .envs (déprécié). Utiliser unwrapped si disponible
-                if hasattr(base_env, 'unwrapped'):
-                    base_env = base_env.unwrapped
-                    continue
-
-                # Wrappers gymnasium: .env
-                if hasattr(base_env, 'env'):
-                    base_env = base_env.env
-                    continue
-
-                break
-
-            # Valider l'environnement de base
-            logger.info("Validation de l'environnement de base...")
-            base_obs, _ = base_env.reset()
-            logger.info(f"Observation de base après reset: {base_obs}")
-            logger.info(f"Type de l'observation de base: {type(base_obs)}")
-
-            # Valider l'observation de base
-            if not isinstance(base_obs, dict):
-                raise TypeError(f"Type d'observation de base invalide: {type(base_obs)} - attendu un dictionnaire")
-
-            required = {'observation', 'portfolio_state'}
-            if not required.issubset(set(base_obs.keys())):
-                raise KeyError(f"Dictionnaire d'observation de base manquant des clés requises. Clés présentes: {list(base_obs.keys())}")
-
-            logger.info("Environnement de base validé avec succès.")
-            logger.info("Environnement validé avec succès.")
-        except Exception as e:
-            logger.error(f"Erreur de validation de l'environnement: {str(e)}", exc_info=True)
-            env.close()
-            return False
+        # Le bloc de validation de l'environnement a été supprimé car il était défectueux
+        # et incompatible avec la nouvelle structure d'environnement simplifiée.
 
         logger.info(f"Environnement vectorisé créé avec {num_envs} environnements")
 
@@ -1681,7 +1624,7 @@ def main(
         use_custom_progress = config.get('training', {}).get('use_custom_progress', False)
         if use_custom_progress:
             # Créer une instance de notre callback personnalisé
-            progress_callback = TrainingProgressCallback(check_freq=1000, verbose=1)
+            progress_callback = CustomTrainingInfoCallback(check_freq=1000, verbose=1)
             callbacks.append(progress_callback)
             logger.info("Barre de progression personnalisée activée pour le suivi de l'entraînement")
 

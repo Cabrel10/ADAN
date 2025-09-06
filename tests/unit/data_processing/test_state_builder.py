@@ -45,7 +45,7 @@ class TestStateBuilder(unittest.TestCase):
             close = base + noise
             high = close * (1 + np.abs(np.random.normal(0, 0.01, size)))
             low = close * (1 - np.abs(np.random.normal(0, 0.01, size)))
-            
+
             return {
                 'OPEN': close * (1 + np.random.normal(0, 0.005, size)),
                 'HIGH': high,
@@ -128,7 +128,7 @@ class TestStateBuilder(unittest.TestCase):
         invalid_data = self.sample_data.copy()
         timeframes = ['15m', '1h', '4h']  # Mise à jour des timeframes
         assets = ['BTC/USDT', 'ETH/USDT']
-        
+
         for tf in timeframes:
             for asset in assets:
                 if tf in invalid_data and asset in invalid_data[tf]:

@@ -15,7 +15,7 @@ environment:
   memory:
     aggressive_cleanup: true
     batch_size: 32
-    chunk_size: 50
+    chunk_size: 1000
     drop_last: true
     force_gc_after_chunk: true
     include_portfolio_state: true
@@ -45,7 +45,7 @@ environment:
     invalid_action: -0.1
     order_rejection: -0.5
   reward_shaping:
-    chunk_size: 50
+    chunk_size: 1000
     ewc_lambda: 0.2
     optimal_trade_bonus: 2.0
     performance_threshold: 0.6
@@ -96,7 +96,7 @@ data:
     - EMA_50
     - MACD_HIST
     - SUPERTREND_14_2.0
-    
+
     1h:
     - OPEN
     - HIGH
@@ -111,7 +111,7 @@ data:
     - EMA_200
     - MACD_HIST
     - SUPERTREND_14_2.0
-    
+
     4h:
     - OPEN
     - HIGH

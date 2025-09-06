@@ -205,7 +205,7 @@ class MultiAssetChunkedEnv(gym.Env):
     def _epoch_reset(self, force: bool = False, new_epoch: bool = False):
         """
         Centralized call to portfolio.reset(...) with config-driven threshold.
-        
+
         Args:
             force: Force a full reset if True
             new_epoch: If True, indicates this is the start of a new epoch
@@ -214,8 +214,8 @@ class MultiAssetChunkedEnv(gym.Env):
         try:
             # Only pass new_epoch=True if explicitly requested
             self.portfolio.reset(
-                new_epoch=new_epoch, 
-                force=force, 
+                new_epoch=new_epoch,
+                force=force,
                 min_capital_before_reset=min_cap
             )
         except TypeError:
@@ -345,55 +345,75 @@ class MultiAssetChunkedEnv(gym.Env):
             return 0.15  # Retourne une volatilité par défaut en cas d'erreur
 
     def _get_current_market_indicators(self) -> Dict[str, float]:
-        """Récupère les indicateurs de marché actuels."""
+        """Récupère les indicateurs de marché actuels à partir de l'observation construite."""
         try:
-            # Récupération des données de marché actuelles
-            prices = self._get_current_prices()
-            if not prices:
+            # Obtenir l'observation complète pour l'étape actuelle
+            # _get_observation() utilise déjà self.state_builder et self.current_step
+            observation_dict = self._get_observation()
+            market_observation = observation_dict.get("observation")
+
+            if market_observation is None or market_observation.size == 0:
+                self.logger.warning("Observation de marché vide ou invalide pour les indicateurs.")
                 return {}
 
-            # Calcul des indicateurs techniques
-            indicators = {}
-            for asset, price in prices.items():
-                # Ici, on utilise les données du dernier chandelier disponible
-                # En production, il faudrait calculer les indicateurs sur une fenêtre glissante
-                # Récupérer les indicateurs du dernier chandelier disponible
-                if asset in self.current_data and "5m" in self.current_data[asset]:
-                    df = self.current_data[asset]["5m"]
-                    if not df.empty and len(df) > 0:
-                        last_row = df.iloc[-1]
-                        indicators.update({
-                            "close": last_row.get("CLOSE", price),
-                            "volume": last_row.get("VOLUME", 0),
-                            "rsi": last_row.get("RSI_14", 50),
-                            "atr": last_row.get("ATR_14", 0),
-                            "adx": last_row.get("ADX_14", 0),
-                            "ema_fast": last_row.get("EMA_5", 0),
-                            "ema_slow": last_row.get("EMA_20", 0),
-                            "ema_trend": last_row.get("EMA_50", 0),
-                        })
-                        break  # On sort après avoir traité le premier timeframe
-                
-                # Valeurs par défaut si les données ne sont pas disponibles
-                if not indicators:
-                    indicators.update({
-                        "close": price,
-                        "volume": 0,
-                        "rsi": 50,
-                        "atr": 0,
-                        "adx": 0,
-                        "ema_fast": 0,
-                        "ema_slow": 0,
-                        "ema_trend": 0,
-                    })
-                break  # On se limite au premier actif pour l'instant
+            # Extraire les indicateurs du timeframe 5m (le plus granulaire)
+            # L'observation est de forme (timeframes, window_size, features)
+            # Assumons que 5m est le premier timeframe (index 0)
+            # et que les features sont dans un ordre connu
+            # (OPEN, HIGH, LOW, CLOSE, VOLUME, RSI_14, STOCH_K_14_3_3, STOCH_D_14_3_3, MACD_HIST_12_26_9, ATR_14, EMA_5, EMA_12, BB_UPPER, BB_MIDDLE, BB_LOWER)
+            # Il faut s'assurer que l'ordre des features est cohérent avec features_per_timeframe dans config.yaml
 
-            return indicators
+            # Récupérer les noms des features pour le timeframe 5m
+            features_5m = self.config.get("data", {}).get("features_per_timeframe", {}).get("5m", [])
+
+            # Récupérer la dernière ligne de données du timeframe 5m dans l'observation
+            # La dernière ligne de la fenêtre correspond à l'état actuel
+            if market_observation.shape[1] > 0: # Check if window_size is > 0
+                current_5m_data = market_observation[0, -1, :] # Premier timeframe, dernière ligne de la fenêtre
+            else:
+                self.logger.warning("Taille de fenêtre 5m insuffisante pour extraire les indicateurs.")
+                return {}
+
+            indicators = {}
+            # Mapper les valeurs numériques aux noms des features
+            for i, feature_name in enumerate(features_5m):
+                if i < len(current_5m_data):
+                    val = current_5m_data[i]
+                    # Remplacer NaN ou Inf par des valeurs par défaut
+                    if np.isnan(val) or np.isinf(val):
+                        if "RSI" in feature_name: val = 50.0
+                        elif "ADX" in feature_name: val = 20.0
+                        elif "ATR" in feature_name: val = 0.0
+                        elif "EMA" in feature_name: val = 0.0
+                        elif "MACD_HIST" in feature_name: val = 0.0
+                        elif "CLOSE" in feature_name: val = 1.0 # Prix par défaut
+                        else: val = 0.0 # Valeur par défaut générique
+                        self.logger.warning(f"NaN/Inf détecté pour {feature_name}, remplacé par {val}")
+                    indicators[feature_name.upper()] = float(val)
+                else:
+                    self.logger.warning(f"Feature {feature_name} non trouvée dans les données 5m de l'observation.")
+
+            # Assurer la présence des clés essentielles pour le DBE avec des valeurs par défaut si manquantes
+            final_indicators = {
+                "CLOSE": indicators.get("CLOSE", 1.0),
+                "VOLUME": indicators.get("VOLUME", 0.0),
+                "RSI_14": indicators.get("RSI_14", 50.0),
+                "ATR_14": indicators.get("ATR_14", 0.0),
+                "ADX_14": indicators.get("ADX_14", 0.0),
+                "EMA_5": indicators.get("EMA_5", 0.0),
+                "EMA_20": indicators.get("EMA_20", 0.0),
+                "EMA_50": indicators.get("EMA_50", 0.0),
+                "MACD_HIST_12_26_9": indicators.get("MACD_HIST_12_26_9", 0.0), # Ajout de MACD_HIST
+                # Ajouter d'autres indicateurs si nécessaire pour le DBE
+            }
+
+            # Log pour débogage
+            self.logger.debug(f"Indicateurs extraits pour DBE: {final_indicators}")
+
+            return final_indicators
 
         except Exception as e:
-            self.logger.error(
-                f"Erreur lors de la récupération des indicateurs: {str(e)}"
-            )
+            self.logger.error(f"Erreur lors de la récupération des indicateurs de marché: {str(e)}", exc_info=True)
             return {}
 
     def _detect_market_regime(self, market_data: Dict[str, float]) -> Tuple[str, float]:
@@ -452,11 +472,11 @@ class MultiAssetChunkedEnv(gym.Env):
 
             # Ajustement basé sur la volatilité
             if (
-                "atr" in market_data
-                and "close" in market_data
-                and market_data["close"] > 0
+                "ATR_14" in market_data
+                and "CLOSE" in market_data
+                and market_data["CLOSE"] > 0
             ):
-                volatility = market_data["atr"] / market_data["close"]
+                volatility = market_data["ATR_14"] / market_data["CLOSE"]
                 vol_factor = np.clip(
                     volatility / max(self.baseline_volatility, 1e-6),
                     0.5,
@@ -763,6 +783,14 @@ class MultiAssetChunkedEnv(gym.Env):
         # Assurez-vous que la configuration des paramètres de risque est correctement chargée
         dbe_config.setdefault("risk_parameters", {})
 
+        # Inject position_sizing config into DBE config if not present
+        if 'position_sizing' not in dbe_config:
+            env_risk_management = self.config.get('environment', {}).get('risk_management', {})
+            if 'position_sizing' in env_risk_management:
+                dbe_config['position_sizing'] = env_risk_management['position_sizing']
+            else:
+                dbe_config['position_sizing'] = {}
+
         # Initialisation du DBE avec la configuration fusionnée
         self.dynamic_behavior_engine = DynamicBehaviorEngine(
             config=dbe_config, finance_manager=self.portfolio_manager
@@ -1033,6 +1061,40 @@ class MultiAssetChunkedEnv(gym.Env):
             logger.error(f"Error in _get_initial_observation: {str(e)}", exc_info=True)
             return default_observation
 
+    def _set_start_step_for_chunk(self):
+        """Calculates and sets the starting step within a new chunk to account for indicator warmup."""
+        try:
+            # Use a fixed safe warmup period to ensure all indicators are calculated.
+            # Based on indicators like SMA_200, a larger warmup is needed.
+            warmup = 250
+            min_len = None
+
+            if isinstance(self.current_data, dict) and self.current_data:
+                lengths = []
+                for asset_dict in self.current_data.values():
+                    if not isinstance(asset_dict, dict):
+                        continue
+                    for tf in getattr(self, "timeframes", []):
+                        df = asset_dict.get(tf)
+                        if isinstance(df, pd.DataFrame):
+                            lengths.append(len(df))
+                if lengths:
+                    min_len = min(lengths)
+
+            if min_len is not None and min_len > 1:
+                # Clamp warmup to available length-1 to leave at least 1 row ahead
+                self.step_in_chunk = max(1, min(warmup, min_len - 1))
+            else:
+                # Fallback to warmup; _build_observation will still be defensive
+                self.step_in_chunk = warmup
+
+            logger.info(
+                f"Repositioning to step {self.step_in_chunk} in new chunk to allow for indicator warmup ({warmup} steps)."
+            )
+        except Exception as e:
+            logger.warning(f"Failed to set warmup step_in_chunk: {e}")
+            self.step_in_chunk = 250 # Safe fallback
+
     def reset(self, *, seed=None, options=None):
         """Reset the environment to start a new episode.
 
@@ -1057,10 +1119,10 @@ class MultiAssetChunkedEnv(gym.Env):
 
         # Determine if this is a true new episode or just a reset
         is_new_episode = not hasattr(self, '_episode_initialized') or getattr(self, '_needs_full_reset', False)
-        
+
         # Reset the environment with appropriate parameters
         self._epoch_reset(force=False, new_epoch=is_new_episode)
-        
+
         # Mark that we've initialized at least one episode
         self._episode_initialized = True
         self._needs_full_reset = False  # Reset the flag
@@ -1069,39 +1131,7 @@ class MultiAssetChunkedEnv(gym.Env):
         self.current_data = self.data_loader.load_chunk(self.current_chunk_idx)
 
         # Position the step within the chunk to ensure a non-empty observation window
-        try:
-            # Prefer the StateBuilder's effective window size (usually max across timeframes)
-            warmup = int(
-                getattr(
-                    self.state_builder, "window_size", getattr(self, "window_size", 20)
-                )
-            )
-            min_len = None
-
-            if isinstance(self.current_data, dict) and self.current_data:
-                lengths = []
-                for asset_dict in self.current_data.values():
-                    if not isinstance(asset_dict, dict):
-                        continue
-                    for tf in getattr(self, "timeframes", []):
-                        df = asset_dict.get(tf)
-                        if isinstance(df, pd.DataFrame):
-                            lengths.append(len(df))
-                if lengths:
-                    min_len = min(lengths)
-
-            if min_len is not None and min_len > 1:
-                # Clamp warmup to available length-1 to leave at least 1 row ahead
-                self.step_in_chunk = max(1, min(warmup, min_len - 1))
-            else:
-                # Fallback to warmup; _build_observation will still be defensive
-                self.step_in_chunk = warmup
-
-            logger.debug(
-                f"Reset warmup positioning: warmup={warmup}, min_len={min_len}, step_in_chunk={self.step_in_chunk}"
-            )
-        except Exception as e:
-            logger.warning(f"Failed to set warmup step_in_chunk on reset: {e}")
+        self._set_start_step_for_chunk()
 
         # Get initial observation using the robust _get_initial_observation method
         observation = self._get_initial_observation()
@@ -1732,7 +1762,7 @@ class MultiAssetChunkedEnv(gym.Env):
                     self.current_data = self.data_loader.load_chunk(
                         self.current_chunk_idx
                     )
-                    self.step_in_chunk = 0
+                    self._set_start_step_for_chunk()  # Reposition step to skip warmup period
 
                     # Réinitialiser les composants pour le nouveau chunk si nécessaire
                     if hasattr(self.dbe, "_reset_for_new_chunk"):
@@ -3285,9 +3315,9 @@ class MultiAssetChunkedEnv(gym.Env):
 
             # Récupérer les paramètres de trade
             try:
-                position_size = trade_params["final_position_value"]
-                stop_loss_pct = trade_params["stop_loss_pct"]
-                take_profit_pct = trade_params.get("take_profit_pct", None)
+                position_size = trade_params["position_size_usdt"]
+                stop_loss_pct = trade_params["sl_pct"]
+                take_profit_pct = trade_params.get("tp_pct", None)
 
                 # Log des paramètres de trade
                 self.logger.debug(
@@ -3311,9 +3341,11 @@ class MultiAssetChunkedEnv(gym.Env):
 
                 # Ouvrir la position si action d'achat
                 if action_value > 0.1:  # Seuil d'achat
-                    entry_price = price  # Prix d'entrée pour le log
-                    self.portfolio_manager.open_position(asset, price, position_size)
-                    trade_executed = True
+                    entry_price = price
+                    size_in_asset_units = position_size / price if price > 0 else 0
+                    if size_in_asset_units > 0:
+                        self.portfolio_manager.open_position(asset.upper(), price, size_in_asset_units)
+                        trade_executed = True
                     # Log de l'exécution
                     self.logger.debug(
                         "[TRADE EXECUTED] asset=%s, action=BUY, entry_price=%.8f, "
@@ -3368,7 +3400,7 @@ class MultiAssetChunkedEnv(gym.Env):
 
                 # Fermer la position
                 pnl = self.portfolio_manager.close_position(
-                    asset=asset, price=price, timestamp=self._get_current_timestamp()
+                    asset=asset.upper(), price=price, timestamp=self._get_current_timestamp()
                 )
 
                 if pnl is not None:

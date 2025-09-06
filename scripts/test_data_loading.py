@@ -34,7 +34,7 @@ def test_data_loading():
     try:
         # Charger la configuration
         config = load_config()
-        
+
         # Configuration spécifique pour le test
         worker_config = {
             'timeframes': ['5m', '1h'],
@@ -46,27 +46,27 @@ def test_data_loading():
                 '1h': ['Open', 'High', 'Low', 'Close', 'Volume', 'RSI_14', 'EMA_20']
             }
         }
-        
+
         logger.info("Initialisation du ChunkedDataLoader...")
         loader = ChunkedDataLoader(config, worker_config)
-        
+
         logger.info("Chargement d'un chunk de données...")
         data = loader.load_chunk(chunk_idx=0)
-        
+
         # Vérifier que les données ont été chargées correctement
         if not data:
             raise ValueError("Aucune donnée n'a été chargée.")
-        
-        logger.info("Données chargées avec succès pour les actifs : %s", 
+
+        logger.info("Données chargées avec succès pour les actifs : %s",
                    ', '.join(data.keys()))
-        
+
         # Afficher des informations sur les données chargées
         for asset, timeframes in data.items():
             logger.info("\nActif: %s", asset)
             for tf, df in timeframes.items():
                 if df is not None and not df.empty:
                     # Afficher les premières et dernières lignes pour vérification
-                    logger.info("  %s: %d lignes, colonnes: %s", 
+                    logger.info("  %s: %d lignes, colonnes: %s",
                               tf, len(df), ', '.join(df.columns))
                     logger.info("  Première ligne: %s", df.index[0] if hasattr(df.index, '__len__') and len(df.index) > 0 else 'N/A')
                     logger.info("  Dernière ligne: %s", df.index[-1] if hasattr(df.index, '__len__') and len(df.index) > 0 else 'N/A')
@@ -74,24 +74,24 @@ def test_data_loading():
                     if len(df) > 0:
                         sample = df.iloc[0]
                         logger.info("    Open: %.2f, Close: %.2f, RSI_14: %.2f, EMA_20: %.2f",
-                                  sample.get('Open', float('nan')), 
+                                  sample.get('Open', float('nan')),
                                   sample.get('Close', float('nan')),
                                   sample.get('RSI_14', float('nan')),
                                   sample.get('EMA_20', float('nan')))
                 else:
                     logger.warning("  %s: Aucune donnée chargée", tf)
-        
+
         return True
-    
+
     except Exception as e:
-        logger.error("Erreur lors du test de chargement des données : %s", str(e), 
+        logger.error("Erreur lors du test de chargement des données : %s", str(e),
                    exc_info=True)
         return False
 
 if __name__ == "__main__":
     logger.info("Début du test de chargement des données...")
     success = test_data_loading()
-    
+
     if success:
         logger.info("Test de chargement des données réussi !")
         sys.exit(0)

@@ -202,32 +202,32 @@ preprocessing:
     scale_per_timeframe: true  # Mise à l'échelle par timeframe
     winsorize: true       # Réduction de l'impact des valeurs extrêmes
     winsorize_limits: [0.01, 0.99]  # Limites de winsorization
-  
+
   # Transformation des séries temporelles
   stationarity:
     price_transform: log_returns  # Transformation des prix en rendements logarithmiques
     volume_transform: log1p       # Transformation du volume avec log(1+x)
-  
+
   # Configuration des indicateurs techniques
   technical_indicators:
     # Paramètres d'activation
     use_price_indicators: true
     use_volatility_indicators: true
     use_volume_indicators: true
-    
+
     # Indicateurs de prix
     price_indicators:
       moving_averages: [SMA_20, EMA_12, EMA_26, EMA_50]
       momentum: [RSI_14, MACD_HIST]
       volatility: [ATR_14, SUPERTREND_14_2.0]
       trend: [ADX_14]
-    
+
     # Indicateurs de volatilité
     volatility_indicators: [ATR_14, VOLATILITY_20]
-    
+
     # Indicateurs de volume
     volume_indicators: [VOLUME, VOLUME_MA_20, VOLUME_MA_50, OBV]
-  
+
   # Configuration des fenêtres de traitement
   window_config:
     min_window_size: 5     # Taille minimale de la fenêtre

@@ -1,3 +1,4 @@
+
 """
 Dynamic Behavior Engine (DBE) - Module de contrôle adaptatif pour l'agent de trading.
 
@@ -243,6 +244,11 @@ class DynamicBehaviorEngine:
         self.current_sl_multiplier = 1.0
         self.current_tp_multiplier = 1.0
         self.current_position_size_multiplier = 1.0
+
+        # Log available config keys for debugging
+        if 'position_sizing' not in self.config:
+            logger.error(f"'position_sizing' key not found in DBE config. Available keys: {list(self.config.keys())}")
+
         self.max_position_size = self.config['position_sizing']['max_position_size']
 
         # Paramètres de lissage
@@ -357,7 +363,7 @@ class DynamicBehaviorEngine:
             max_capital = tier.get('max_capital')
             if max_capital is None: # For the highest tier, max_capital can be null
                 max_capital = float('inf')
-            
+
             if min_capital <= portfolio_value < max_capital:
                 logger.debug(f"Capital {portfolio_value:.2f} USDT correspond au palier: {tier.get('name')}")
                 return tier
@@ -372,7 +378,7 @@ class DynamicBehaviorEngine:
         try:
             # --- Nouvelle logique de Paliers de Capital ---
             tier = self._get_capital_tier(portfolio_value)
-            
+
             # Détection du régime de marché
             new_regime, confidence = self.detect_market_regime(market_data)
             if (confidence > self.config.get('market_regime_detection', {}).get('regime_confidence_threshold', 0.7) and
@@ -382,7 +388,7 @@ class DynamicBehaviorEngine:
 
             regime_params = self.config.get('regime_parameters', {}).get(self.current_regime, {})
             risk_params = self.config.get('risk_parameters', {})
-            
+
             # --- Calcul de la taille de position basé sur les paliers ---
             position_size_pct = risk_params.get('initial_position_size', 0.1) # Default
 
@@ -390,14 +396,14 @@ class DynamicBehaviorEngine:
                 exposure_range = tier.get('exposure_range', [1, 10])
                 min_exposure_pct = exposure_range[0] / 100.0
                 max_exposure_pct = exposure_range[1] / 100.0
-                
+
                 risk_level = self.state.get('current_risk_level', 1.0)
                 # Normaliser le niveau de risque (0.3-2.0) en un facteur (0-1)
                 normalized_risk = (risk_level - 0.3) / (2.0 - 0.3)
-                
+
                 # Calculer la taille de position en %% en utilisant l'intervalle du palier
                 position_size_pct = min_exposure_pct + (max_exposure_pct - min_exposure_pct) * normalized_risk
-                
+
                 # Appliquer la contrainte max du palier
                 max_tier_size_pct = tier.get('max_position_size_pct', 90) / 100.0
                 position_size_pct = min(position_size_pct, max_tier_size_pct)
@@ -433,7 +439,7 @@ class DynamicBehaviorEngine:
             min_vol = vol_management.get('min_volatility', 0.01)
             max_vol = vol_management.get('max_volatility', 0.20)
             vol_adjustment = np.clip((volatility - min_vol) / (max_vol - min_vol + 1e-6) * 1.5 + 0.5, 0.5, 2.0)
-            
+
             base_sl_pct = risk_params.get('base_sl_pct', 0.02)
             sl_multiplier = regime_params.get('sl_multiplier', 1.0)
             min_sl_pct = risk_params.get('min_sl_pct', 0.005)
@@ -744,9 +750,6 @@ class DynamicBehaviorEngine:
             # Ajout à l'historique des décisions
             self.decision_history.append(snapshot)
             self.state['last_modulation'] = mod.copy()
-
-            # Journalisation de la décision
-            self._log_decision(snapshot, mod)
 
             return mod
 
@@ -1410,7 +1413,7 @@ class DynamicBehaviorEngine:
             if not exposure_range or not isinstance(exposure_range, list) or len(exposure_range) != 2:
                 logger.warning(f"[DBE_CALC] Échec: 'exposure_range' invalide ou manquant dans le palier {tier_config.get('name')}. Reçu: {exposure_range}")
                 return {'feasible': False, 'reason': f"exposure_range invalide pour le palier {tier_config.get('name')}"}
-            
+
             logger.debug(f"[DBE_CALC] Palier '{tier_config.get('name')}': exposure_range={exposure_range}")
 
             min_position_pct = exposure_range[0] / 100.0
@@ -1439,10 +1442,20 @@ class DynamicBehaviorEngine:
 
             sl_pct = risk_params.get('sl_pct', 0.02)
             tp_pct = risk_params.get('tp_pct', sl_pct * 2)
-            
-            logger.info(
-                f"🔧 Paramètres de trade - Agressivité: {aggressivity:.2f} | Taille: {position_pct:.1%} ({position_size_usdt:.2f} USDT) | SL: {sl_pct:.2%} | TP: {tp_pct:.2%}"
+
+            # Log the decision with the final calculated position size
+            snapshot = DBESnapshot(
+                step=self.state['current_step'],
+                market_regime=risk_params.get('regime', 'neutral'),
+                risk_level=risk_params.get('risk_level', 1.0),
+                sl_pct=sl_pct,
+                tp_pct=tp_pct,
+                position_size_pct=position_pct, # Use the calculated value
+                reward_boost=risk_params.get('reward_boost', 1.0),
+                penalty_inaction=risk_params.get('penalty_inaction', 0.0),
+                metrics=self.state.get('performance_metrics', {}).copy()
             )
+            self._log_decision(snapshot, risk_params)
 
             return {
                 'feasible': True,
@@ -1547,16 +1560,17 @@ class DynamicBehaviorEngine:
         if self.finance_manager:
             self.finance_manager.set_balance(worker_id, restore_capital)
 
-        # 3) Réinitialiser l'état du worker
+        # 3) Réinitialiser l'état du worker (mode partiel pour conserver la mémoire longue)
+        # On ne réinitialise que le capital et les compteurs d'épisode, pas l'historique.
         state.update({
             'initial_capital': restore_capital,
-            'cumulative_loss': 0.0,
             'last_trade_ts': None,
-            'consecutive_losses': 0,
-            'trade_history': []
+            'consecutive_losses': 0
         })
+        # NOTE: 'cumulative_loss' et 'trade_history' sont intentionnellement conservés
+        # pour permettre au DBE d'apprendre des échecs passés.
 
-        self.logger.info(f"[RESET] Worker {worker_id} réinitialisé -> capital défini à {restore_capital:.2f} USDT")
+        self.logger.info(f"[RESET PARTIEL] Worker {worker_id} -> capital restauré à {restore_capital:.2f} USDT. Mémoire des erreurs conservée.")
 
     def reset_flow(self, worker_id: str) -> bool:
         """
@@ -1788,12 +1802,12 @@ class DynamicBehaviorEngine:
                 logger.info(
                     f"🔧 Paramètres de risque - "
                     f"Régime: {self.current_regime.upper()} | "
-                    f"Drawdown: {current_drawdown:.2%} | "
-                    f"Volatilité: {volatility:.2%} | "
-                    f"Win Rate: {win_rate:.1%} | "
+                    f"Drawdown: {current_drawdown:.2f}% | "
+                    f"Volatilité: {volatility:.2f}% | "
+                    f"Win Rate: {win_rate:.1f}% | "
                     f"Sharpe: {sharpe_ratio:.2f}\n"
-                    f"SL: {new_sl:.2%} (lissé: {mod['sl_pct']:.2%}) | "
-                    f"TP: {new_tp:.2%} (lissé: {mod['tp_pct']:.2%}) | "
+                    f"SL: {new_sl:.2f}% (lissé: {mod['sl_pct']:.2f}%) | "
+                    f"TP: {new_tp:.2f}% (lissé: {mod['tp_pct']:.2f}%) | "
                     f"Niveau de risque: {mod['risk_level']:.2f}"
                 )
 

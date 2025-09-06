@@ -60,7 +60,8 @@ class PositionSizer:
                  risk_params: Optional[RiskParameters] = None,
                  enable_dynamic_sizing: bool = True,
                  min_position_size: float = 0.001,
-                 max_position_size: float = 1.0):
+                 max_position_size: float = 1.0,
+                 sizing_config: Optional[Dict[str, Any]] = None):
         """
         Initialize the PositionSizer.
 
@@ -70,12 +71,15 @@ class PositionSizer:
             enable_dynamic_sizing: Whether to use dynamic sizing
             min_position_size: Minimum position size
             max_position_size: Maximum position size
+            sizing_config: Configuration for position sizing, including capital tiers.
         """
         self.default_method = default_method
         self.risk_params = risk_params or RiskParameters()
         self.enable_dynamic_sizing = enable_dynamic_sizing
         self.min_position_size = min_position_size
         self.max_position_size = max_position_size
+        self.sizing_config = sizing_config
+        self.capital_tiers = sizing_config.get('capital_tiers') if sizing_config else None
 
         # Historical data for calculations
         self.price_history = {}
@@ -224,22 +228,66 @@ class PositionSizer:
             }
         }
 
+    def _get_tiered_percentage(self, portfolio_value: float) -> tuple[float, str]:
+        """
+        Determine position size percentage based on capital tiers.
+
+        Args:
+            portfolio_value: The total value of the portfolio.
+
+        Returns:
+            A tuple containing the percentage of the portfolio to allocate and the tier name.
+        """
+        if not self.capital_tiers:
+            return 0.1, "Default"  # Fallback to default
+
+        # Sort tiers to handle them in order
+        sorted_tiers = sorted(self.capital_tiers, key=lambda x: x.get('min_capital', 0))
+
+        for tier in sorted_tiers:
+            min_capital = tier.get('min_capital')
+            max_capital = tier.get('max_capital')
+            tier_name = tier.get('name', 'Unnamed Tier')
+
+            if min_capital is None:
+                continue
+
+            is_in_tier = False
+            if max_capital is None:  # For the highest tier
+                if portfolio_value >= min_capital:
+                    is_in_tier = True
+            elif min_capital <= portfolio_value < max_capital:
+                is_in_tier = True
+
+            if is_in_tier:
+                return (tier.get('max_position_size_pct', 10) / 100.0), tier_name
+
+        return 0.1, "Fallback" # Default if no tier is matched
+
     def _calculate_percentage_size(self,
                                  portfolio_value: float,
                                  available_capital: float,
                                  confidence: float) -> Dict[str, Any]:
-        """Calculate percentage-based position size."""
-        base_percentage = 0.1  # 10% of portfolio
+        """
+        Calculate percentage-based position size.
+        Uses capital tiers if available, otherwise a fixed percentage.
+        """
+        base_percentage, tier_name = self._get_tiered_percentage(portfolio_value)
+
+        metadata = {
+            'tier_name': tier_name,
+            'base_percentage': base_percentage,
+            'portfolio_value': portfolio_value
+        }
+
         adjusted_percentage = base_percentage * confidence
         position_value = portfolio_value * adjusted_percentage
 
+        metadata['adjusted_percentage'] = adjusted_percentage
+
         return {
             'size': position_value,
-            'metadata': {
-                'base_percentage': base_percentage,
-                'adjusted_percentage': adjusted_percentage,
-                'portfolio_value': portfolio_value
-            }
+            'metadata': metadata
         }
 
     def _calculate_volatility_adjusted_size(self,

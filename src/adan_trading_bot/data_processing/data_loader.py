@@ -153,17 +153,17 @@ class ChunkedDataLoader:
     def _get_data_path(self, asset: str, timeframe: str) -> Path:
         """
         Construit le chemin vers le fichier de données pour un actif et un timeframe donnés.
-        
+
         La structure attendue est : {split}/{asset}/{timeframe}.parquet
         Par exemple: data/processed/indicators/val/btcusdt/5m.parquet
-        
+
         Args:
             asset: Symbole de l'actif (ex: 'BTCUSDT')
             timeframe: Période de temps (ex: '5m', '1h')
-            
+
         Returns:
             Chemin vers le fichier de données
-            
+
         Raises:
             FileNotFoundError: Si le fichier n'est pas trouvé
             KeyError: Si la configuration est manquante
@@ -171,10 +171,10 @@ class ChunkedDataLoader:
         try:
             # Récupérer le répertoire de base des données
             base_dir = Path(self.config['paths']['processed_data_dir'])
-            
+
             # Utiliser directement le répertoire du split spécifié dans data_dirs
             data_dirs = self.config.get('data', {}).get('data_dirs', {})
-            
+
             # Déterminer le répertoire de données en fonction du split
             if self.data_split in data_dirs:
                 data_dir = Path(data_dirs[self.data_split])
@@ -182,30 +182,30 @@ class ChunkedDataLoader:
                 data_dir = Path(data_dirs['base']) / self.data_split
             else:
                 data_dir = base_dir / 'indicators' / self.data_split
-            
+
             logger.debug(f"Recherche des données dans: {data_dir}")
-            
+
             # Nettoyer le nom de l'actif (supprimer / et -) et forcer en minuscules
             clean_asset = asset.replace("/", "").replace("-", "").lower()
-            
+
             # Extraire le timeframe de base (sans les combinaisons)
             base_timeframe = timeframe.split('_')[0] if '_' in timeframe else timeframe
             base_timeframe = base_timeframe.lower()  # Forcer en minuscules
-            
+
             # Liste des variantes de casse à essayer pour l'actif
             asset_variants = [
                 clean_asset.lower(),  # Tout en minuscules (ex: btcusdt) - structure actuelle
                 clean_asset.upper(),  # Tout en majuscules (ex: BTCUSDT)
                 clean_asset           # Cas d'origine
             ]
-            
+
             # Liste des variantes de casse à essayer pour le timeframe
             timeframe_variants = [
                 base_timeframe.lower(),  # minuscules (ex: 5m)
                 base_timeframe.upper(),  # majuscules (ex: 5M)
                 base_timeframe           # cas d'origine
             ]
-            
+
             # Essayer chaque combinaison de variantes
             for asset_variant in asset_variants:
                 for tf_variant in timeframe_variants:
@@ -213,7 +213,7 @@ class ChunkedDataLoader:
                     if file_path.exists():
                         logger.debug(f"Fichier trouvé: {file_path}")
                         return file_path
-            
+
             # Si on arrive ici, aucun fichier n'a été trouvé
             error_msg = (
                 f"Fichier de données introuvable pour {asset}/{timeframe}.\n"
@@ -224,7 +224,7 @@ class ChunkedDataLoader:
                 f"Structure attendue: {{split}}/{{asset}}/{{timeframe}}.parquet"
             )
             raise FileNotFoundError(error_msg)
-            
+
         except KeyError as e:
             logger.error(f"Configuration des chemins manquante ou incorrecte: {str(e)}")
             raise
@@ -271,7 +271,7 @@ class ChunkedDataLoader:
                     f"Colonnes manquantes dans {file_path}: {missing_columns}\n"
                     f"Colonnes disponibles: {sorted(df.columns)}"
                 )
-                
+
             # Renommer les colonnes pour s'assurer qu'elles sont en majuscules
             column_mapping = {
                 'Open': 'OPEN',
@@ -364,6 +364,7 @@ class ChunkedDataLoader:
                         try:
                             asset, tf, df = future.result()
                             # Appliquer la taille de chunk cible par timeframe (prend les dernières lignes)
+                            logger.debug(f"[DEBUG] Before slicing - Asset: {asset}, Timeframe: {tf}, Original df len: {len(df)}, Target len: {self.chunk_sizes.get(tf, len(df))}")
                             target_len = int(self.chunk_sizes.get(tf, len(df)))
                             if target_len <= 0:
                                 target_len = len(df)
@@ -374,6 +375,7 @@ class ChunkedDataLoader:
                                 logger.warning(
                                     f"{asset} {tf}: données ({len(df)}) plus courtes que la taille de chunk cible ({target_len})."
                                 )
+                            logger.debug(f"[DEBUG] After slicing - Asset: {asset}, Timeframe: {tf}, Final df len: {len(df)}")
                             data[asset][tf] = df
                             pbar.update(1)
                             pbar.set_postfix_str(f"{asset} {tf} - {len(df)} lignes")

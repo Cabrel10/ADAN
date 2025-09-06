@@ -123,11 +123,11 @@ class TimeframeConfig:
         """
         self.timeframe = timeframe
         self.features = (
-            features if (features is not None and len(features) > 0) 
+            features if (features is not None and len(features) > 0)
             else []
         )
         self.window_size = (
-            window_size if window_size is not None 
+            window_size if window_size is not None
             else 100
         )
         self.normalize = normalize
@@ -178,11 +178,11 @@ class StateBuilder:
         Args:
             features_config: Dictionary mapping timeframes to their feature lists
             window_size: Base number of time steps to include in each observation
-            include_portfolio_state: Whether to include portfolio state in 
+            include_portfolio_state: Whether to include portfolio state in
                 observations
             normalize: Whether to normalize the data
             scaler_path: Path to save/load the scaler
-            adaptive_window: Whether to use adaptive window sizing based on 
+            adaptive_window: Whether to use adaptive window sizing based on
                 volatility
             min_window_size: Minimum window size for adaptive mode
             max_window_size: Maximum window size for adaptive mode
@@ -274,22 +274,22 @@ class StateBuilder:
             # STOCH génère %K et %D (les noms réels dans les données)
             'STOCH_14_3_3': ['STOCHk_14_3_3', 'STOCHd_14_3_3'],
             'MACD_12_26_9': [
-                'MACD_12_26_9', 
-                'MACD_SIGNAL_12_26_9', 
+                'MACD_12_26_9',
+                'MACD_SIGNAL_12_26_9',
                 'MACD_HIST_12_26_9'
             ],
             'ICHIMOKU_9_26_52': [
-                'TENKAN_9', 
-                'KIJUN_26', 
-                'SENKOU_A', 
-                'SENKOU_B', 
+                'TENKAN_9',
+                'KIJUN_26',
+                'SENKOU_A',
+                'SENKOU_B',
                 'CHIKOU_26'
             ]
         }
 
         # Utilisation directe de la configuration fournie
         self.expected_features = self.features_config
-        
+
         # Journalisation des fonctionnalités configurées
         for tf in self.expected_features:
             logger.info(f"Configuration des fonctionnalités pour {tf}: {self.expected_features[tf]}")
@@ -435,8 +435,9 @@ class StateBuilder:
             f"StateBuilder initialized with base_window_size={window_size}, "
             f"adaptive_window={adaptive_window}, "
             f"timeframes={self.timeframes}, "
-            f"features_per_timeframe={self.nb_features_per_tf}"
+            f"features_per_timeframe={{self.nb_features_per_tf}}"
         )
+        self._verbose_logging_done = False
 
     def set_timeframe_config(self, timeframe: str, window_size: int, features: List[str]) -> None:
         """
@@ -1186,33 +1187,33 @@ class StateBuilder:
                         if tf_prefixed.upper() in window.columns:
                             return tf_prefixed.upper()
                     return default
-                
+
                 # Recherche des colonnes nécessaires
                 close_col = find_column(["close", "CLOSE", "price", "PRICE"], None)
                 high_col = find_column(["high", "HIGH"], close_col)
                 low_col = find_column(["low", "LOW"], close_col)
-                
+
                 # Vérification des colonnes requises
                 if close_col is None:
                     logger.warning(f"Aucune colonne de prix de clôture trouvée pour {tf}. Colonnes disponibles: {list(window.columns)}")
                     logger.warning(f"Types des colonnes: {[type(c) for c in window.columns]}")
                     logger.warning(f"Colonnes en minuscules: {[c.lower() for c in window.columns]}")
                     continue
-                    
+
                 # Vérification des autres colonnes
                 missing_columns = []
                 if high_col is None:
                     missing_columns.append("high")
                 if low_col is None:
                     missing_columns.append("low")
-                    
+
                 if missing_columns:
                     logger.warning(f"Colonnes manquantes pour {tf}: {', '.join(missing_columns)}. Utilisation des valeurs de clôture comme substitut.")
                     if high_col is None:
                         high_col = close_col
                     if low_col is None:
                         low_col = close_col
-                
+
                 # Vérification finale des colonnes
                 try:
                     logger.debug(f"=== DÉBUT VÉRIFICATION COLONNES POUR {tf} ===")
@@ -1221,42 +1222,42 @@ class StateBuilder:
                     logger.debug(f"Valeurs de close_col: '{close_col}', type: {type(close_col)}")
                     logger.debug(f"Valeurs de high_col: '{high_col}', type: {type(high_col)}")
                     logger.debug(f"Valeurs de low_col: '{low_col}', type: {type(low_col)}")
-                    
+
                     # Vérification des colonnes dans le DataFrame
                     logger.debug(f"close_col in columns: {close_col in window.columns}")
                     logger.debug(f"high_col in columns: {high_col in window.columns}")
                     logger.debug(f"low_col in columns: {low_col in window.columns}")
-                    
+
                     # Vérification des valeurs
                     close_val = window[close_col].iloc[-1] if not window[close_col].empty else None
                     high_val = window[high_col].iloc[-1] if not window[high_col].empty else None
                     low_val = window[low_col].iloc[-1] if not window[low_col].empty else None
-                    
+
                     logger.debug(f"Colonnes sélectionnées pour {tf} - Close: '{close_col}', High: '{high_col}', Low: '{low_col}'")
                     logger.debug(f"Valeurs de test - Close: {close_val}, High: {high_val}, Low: {low_val}")
                     logger.debug(f"Types des données - Close: {type(close_val)}, High: {type(high_val)}, Low: {type(low_val)}")
                     logger.debug(f"=== FIN VÉRIFICATION COLONNES POUR {tf} ===")
-                    
+
                 except Exception as e:
                     logger.error(f"Erreur lors de l'accès aux colonnes: {str(e)}")
                     logger.error(f"Colonnes disponibles: {list(window.columns)}")
                     logger.error(f"Types des colonnes: {[type(c) for c in window.columns]}")
                     raise
-                
+
                 try:
                     # Vérification supplémentaire de la colonne close_col
                     if close_col not in window.columns:
                         logger.error(f"ERREUR CRITIQUE: La colonne '{close_col}' n'existe pas dans le DataFrame. Colonnes disponibles: {list(window.columns)}")
                         logger.error(f"Types des colonnes: {[type(c) for c in window.columns]}")
                         continue
-                        
+
                     prices = window[close_col]
                     if len(prices) < 20:  # Minimum 20 périodes
                         logger.warning(f"Pas assez de données pour {tf}: {len(prices)} périodes (minimum 20 requises)")
                         continue
-                        
+
                     logger.debug(f"Données de prix pour {tf} - Taille: {len(prices)}, Valeurs: {prices.tolist()[-5:]}")
-                    
+
                 except Exception as e:
                     logger.error(f"Erreur lors de l'accès à la colonne {close_col}: {str(e)}")
                     logger.error(f"Colonnes disponibles: {list(window.columns)}")
@@ -1266,7 +1267,7 @@ class StateBuilder:
 
                 try:
                     logger.debug(f"=== DÉBUT CALCUL VOLATILITÉ POUR {tf} ===")
-                    
+
                     # Vérification des données d'entrée
                     logger.debug(f"Type de window: {type(window)}")
                     logger.debug(f"Colonnes dans window: {window.columns.tolist()}")
@@ -1274,50 +1275,50 @@ class StateBuilder:
                     logger.debug(f"low_col: '{low_col}', type: {type(low_col)}")
                     logger.debug(f"prices type: {type(prices)}")
                     logger.debug(f"prices sample: {prices.head(3).tolist()}")
-                    
+
                     # Calcul de la volatilité (ATR sur 14 périodes)
                     high = window[high_col]
                     low = window[low_col]
-                    
+
                     logger.debug(f"high sample: {high.head(3).tolist()}")
                     logger.debug(f"low sample: {low.head(3).tolist()}")
-                    
+
                     # True Range = max(high-low, |high - close_prev|, |low - close_prev|)
                     tr1 = high - low
                     logger.debug(f"tr1 sample: {tr1.head(3).tolist()}")
-                    
+
                     prices_shifted = prices.shift(1)
                     logger.debug(f"prices_shifted sample: {prices_shifted.head(3).tolist()}")
-                    
+
                     tr2 = (high - prices_shifted).abs()
                     logger.debug(f"tr2 sample: {tr2.head(3).tolist()}")
-                    
+
                     tr3 = (low - prices_shifted).abs()
                     logger.debug(f"tr3 sample: {tr3.head(3).tolist()}")
-                    
+
                     true_range_df = pd.DataFrame({'tr1': tr1, 'tr2': tr2, 'tr3': tr3})
                     logger.debug(f"true_range_df head:\n{true_range_df.head()}")
-                    
+
                     true_range = true_range_df.max(axis=1)
                     logger.debug(f"true_range sample: {true_range.head(3).tolist()}")
-                    
+
                     # ATR = Moyenne mobile du True Range
                     atr_series = true_range.rolling(window=14, min_periods=1).mean()
                     logger.debug(f"atr_series sample: {atr_series.head(3).tolist()}")
-                    
+
                     atr = atr_series.iloc[-1] if not atr_series.empty else 0
                     logger.debug(f"ATR: {atr}")
-                    
+
                     # Normalisation par le prix moyen
                     prices_mean = prices.mean()
                     logger.debug(f"prices_mean: {prices_mean}")
-                    
+
                     atr_normalized = atr / prices_mean if prices_mean != 0 else 0
                     logger.debug(f"ATR normalisé: {atr_normalized}")
-                    
+
                     volatility_scores.append(atr_normalized)
                     logger.debug(f"=== FIN CALCUL VOLATILITÉ POUR {tf} ===")
-                    
+
                 except Exception as e:
                     logger.warning(f"Erreur lors du calcul de la volatilité pour {tf}: {str(e)}")
                     continue
@@ -2531,7 +2532,8 @@ class StateBuilder:
         data: Dict[str, Dict[str, pd.DataFrame]],
         tf: str,
         current_idx: int,
-        max_features: int
+        max_features: int,
+        verbose_log: bool
     ) -> Tuple[str, np.ndarray]:
         """
         Traite les données pour un timeframe spécifique et retourne un tableau numpy
@@ -2545,12 +2547,14 @@ class StateBuilder:
             tf: Timeframe à traiter (ex: '5m', '1h', '4h')
             current_idx: Index actuel dans les données
             max_features: Nombre maximum de caractéristiques à travers tous les timeframes (non utilisé ici)
+            verbose_log: Booléen pour activer/désactiver les logs détaillés.
 
         Returns:
             Tuple de (timeframe, processed_data) où processed_data a la forme (window_size, 15)
         """
-        logger.info(f"\n=== Traitement du timeframe {tf} ===")
-        logger.info(f"Index courant: {current_idx}, Taille max des caractéristiques: {max_features}")
+        if verbose_log:
+            logger.info(f"\n=== Traitement du timeframe {tf} ===")
+            logger.info(f"Index courant: {current_idx}, Taille max des caractéristiques: {max_features}")
 
         # Obtenir les caractéristiques attendues pour ce timeframe
         expected_features = self.expected_features.get(tf, [])
@@ -2558,9 +2562,10 @@ class StateBuilder:
         # Développer les indicateurs composites
         expected_features = self._expand_composite_indicators(expected_features)
 
-        logger.info(f"Caractéristiques attendues pour {tf} ({len(expected_features)}): {expected_features}")
+        if verbose_log:
+            logger.info(f"Caractéristiques attendues pour {tf} ({len(expected_features)}): {expected_features}")
 
-        
+
 
         def create_default_observation():
             """Crée une observation par défaut avec la forme attendue."""
@@ -2619,13 +2624,15 @@ class StateBuilder:
                     df = df.drop(columns=[timestamp_col])
                     logger.debug("Timestamp extrait et retiré des features (colonne: %s)", timestamp_col)
                 else:
-                    logger.warning("Aucune colonne 'timestamp' (insensible à la casse) trouvée dans les données")
+                    if verbose_log:
+                        logger.warning("Aucune colonne 'timestamp' (insensible à la casse) trouvée dans les données")
 
                 # 5. Créer un nouveau DataFrame avec les colonnes dans l'ordre attendu
                 # et remplir avec des zéros les colonnes manquantes
-                logger.info("Création du DataFrame traité avec les colonnes attendues")
-                logger.info("Colonnes attendues: %s", expected_features)
-                logger.info("Colonnes disponibles dans les données: %s", df.columns.tolist())
+                if verbose_log:
+                    logger.info("Création du DataFrame traité avec les colonnes attendues")
+                    logger.info("Colonnes attendues: %s", expected_features)
+                    logger.info("Colonnes disponibles dans les données: %s", df.columns.tolist())
 
                 processed_data = pd.DataFrame(index=df.index)
 
@@ -2654,11 +2661,12 @@ class StateBuilder:
                         logger.debug("Colonne %s manquante, remplacée par des zéros", col)
 
                 # 5. Vérification finale des dimensions
-                logger.info("Colonnes ajoutées au DataFrame traité: %s", added_columns)
-                logger.info("Nombre de colonnes dans le DataFrame traité: %d", len(processed_data.columns))
-                logger.info("Colonnes actuelles: %s", processed_data.columns.tolist())
+                if verbose_log:
+                    logger.info("Colonnes ajoutées au DataFrame traité: %s", added_columns)
+                    logger.info("Nombre de colonnes dans le DataFrame traité: %d", len(processed_data.columns))
+                    logger.info("Colonnes actuelles: %s", processed_data.columns.tolist())
 
-                
+
 
                 # 6. S'assurer que nous avons suffisamment de données
                 if len(processed_data) < self.window_size:
@@ -2698,8 +2706,9 @@ class StateBuilder:
                     new_result[:min_rows, :min_cols] = result[:min_rows, :min_cols]
                     result = new_result
 
-                logger.info("Observation traitée pour %s: shape=%s, type=%s",
-                           tf, result.shape, type(result).__name__)
+                if verbose_log:
+                    logger.info("Observation traitée pour %s: shape=%s, type=%s",
+                               tf, result.shape, type(result).__name__)
                 return tf, result
 
             except Exception as e:
@@ -2730,9 +2739,13 @@ class StateBuilder:
             - 'observation': Tableau numpy des observations (n_timeframes, window_size, n_features)
             - 'portfolio_state': État du portefeuille (17,)
         """
-        logger.info("\n=== Construction de l'observation ===")
-        logger.info("Index courant: %d", current_idx)
-        logger.info("Timeframes disponibles: %s", list(data.get(next(iter(data)), {}).keys()))
+        asset_name = next(iter(data), "UNKNOWN_ASSET")
+        if not self._verbose_logging_done:
+            logger.info("\n=== Construction de l'observation (premier appel) ===")
+            logger.info("Index courant: %d", current_idx)
+            logger.info("Timeframes disponibles: %s", list(data.get(asset_name, {}).keys()))
+        else:
+            logger.info(f"Construction de l'observation pour l'actif {asset_name} - OK")
 
         try:
             # Initialiser le dictionnaire des observations
@@ -2742,34 +2755,40 @@ class StateBuilder:
             max_features = 0
             if self.features_config:
                 max_features = max(len(feats) for feats in self.features_config.values())
-                logger.info("Nombre maximum de fonctionnalités configurées: %d", max_features)
+                if not self._verbose_logging_done:
+                    logger.info("Nombre maximum de fonctionnalités configurées: %d", max_features)
 
-                # Afficher les fonctionnalités configurées pour chaque timeframe
-                logger.info("Configuration des fonctionnalités par timeframe:")
-                for tf, feats in self.features_config.items():
-                    logger.info("  - %s: %d fonctionnalités - %s", tf, len(feats), feats)
+                    # Afficher les fonctionnalités configurées pour chaque timeframe
+                    logger.info("Configuration des fonctionnalités par timeframe:")
+                    for tf, feats in self.features_config.items():
+                        logger.info("  - %s: %d fonctionnalités - %s", tf, len(feats), feats)
             else:
                 logger.warning("Aucune configuration de fonctionnalités trouvée, utilisation de 0 comme valeur par défaut")
 
             # Traiter chaque timeframe
             for tf in self.timeframes:
                 try:
-                    logger.info("\n--- Traitement du timeframe: %s ---", tf)
-                    tf_result = self._process_timeframe_data(data, tf, current_idx, max_features)
+                    if not self._verbose_logging_done:
+                        logger.info("\n--- Traitement du timeframe: %s ---", tf)
+
+                    tf_result = self._process_timeframe_data(data, tf, current_idx, max_features, verbose_log=(not self._verbose_logging_done))
+
                     if tf_result is not None:  # Vérification explicite de None
                         tf_key, obs = tf_result
                         observations[tf_key] = obs
-                        logger.info("Observation traitée pour %s: shape=%s, type=%s",
-                                  tf_key, obs.shape if hasattr(obs, 'shape') else 'invalide',
-                                  type(obs).__name__)
+                        if not self._verbose_logging_done:
+                            logger.info("Observation traitée pour %s: shape=%s, type=%s",
+                                      tf_key, obs.shape if hasattr(obs, 'shape') else 'invalide',
+                                      type(obs).__name__)
                     else:
                         logger.warning("Résultat nul pour le timeframe %s, ignoré", tf)
                 except Exception as e:
                     logger.error("Erreur lors du traitement du timeframe %s: %s",
                                tf, str(e), exc_info=True)
 
-            logger.info("\n=== Alignement des observations ===")
-            logger.info("Timeframes à aligner: %s", list(observations.keys()))
+            if not self._verbose_logging_done:
+                logger.info("\n=== Alignement des observations ===")
+                logger.info("Timeframes à aligner: %s", list(observations.keys()))
 
             # Aligner les dimensions des observations
             aligned_obs = self.align_timeframe_dims(observations)
@@ -2779,9 +2798,10 @@ class StateBuilder:
                 logger.warning("Observation alignée invalide, utilisation d'un tableau de zéros")
                 aligned_obs = np.zeros(self.observation_shape, dtype=np.float32)
 
-            # Vérifier la forme de l'observation alignée
-            logger.info("Forme de l'observation alignée: %s", aligned_obs.shape)
-            logger.info("Forme attendue: %s", self.observation_shape)
+            if not self._verbose_logging_done:
+                # Vérifier la forme de l'observation alignée
+                logger.info("Forme de l'observation alignée: %s", aligned_obs.shape)
+                logger.info("Forme attendue: %s", self.observation_shape)
 
             if aligned_obs.shape != self.observation_shape:
                 logger.error("ERREUR: La forme de l'observation alignée (%s) ne correspond pas à la forme attendue (%s)",
@@ -2808,7 +2828,7 @@ class StateBuilder:
                 logger.warning("État du portefeuille invalide, utilisation d'un tableau de zéros")
                 portfolio_state = np.zeros(17, dtype=np.float32)
 
-            
+
 
             # Créer l'observation finale avec vérification de type
             final_observation = {
@@ -2818,10 +2838,11 @@ class StateBuilder:
 
             # Vérification finale de la forme de l'observation
             obs_shape = final_observation['observation'].shape
-            logger.info("\n=== Vérification finale de l'observation ===")
-            logger.info("Forme de l'observation: %s", obs_shape)
-            logger.info("Type de l'observation: %s", type(final_observation['observation']))
-            logger.info("Forme de l'état du portefeuille: %s", final_observation['portfolio_state'].shape)
+            if not self._verbose_logging_done:
+                logger.info("\n=== Vérification finale de l'observation ===")
+                logger.info("Forme de l'observation: %s", obs_shape)
+                logger.info("Type de l'observation: %s", type(final_observation['observation']))
+                logger.info("Forme de l'état du portefeuille: %s", final_observation['portfolio_state'].shape)
 
             if len(obs_shape) != 3:
                 logger.error("ERREUR: L'observation doit avoir 3 dimensions, mais a %d", len(obs_shape))
@@ -2836,6 +2857,8 @@ class StateBuilder:
             logger.debug("Observation finale construite: shape=%s, type=%s",
                         obs_shape, type(final_observation['observation']))
 
+            # Set the flag to True after the first successful run
+            self._verbose_logging_done = True
             return final_observation
 
         except Exception as e:
