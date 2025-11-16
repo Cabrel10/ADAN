@@ -1,0 +1,32 @@
+profile: "scalper"
+agent:
+    learning_rate: 1.2559709591136891e-05
+    gamma: 0.9850768814062466
+    ent_coef: 0.002346522999773963
+reward_shaping:
+    pnl_weight: 0.514799920235364
+    sharpe_weight: 0.2731223834852475
+    drawdown_penalty_weight: -0.17538665673757167
+risk_management:
+    kelly_max_fraction: 0.12497073956034235
+    exit_growth_factor: 1.0979633089563472
+    stop_loss_pct: 0.005597422490434563
+    take_profit_pct: 0.02896361911271155
+    position_sizing:
+        initial_position_size: 0.19018553191030663
+trading_rules:
+  frequency:
+    force_trade_steps:
+      5m: 12
+      1h: 10
+      4h: 19
+    freq_penalty_weight: 0.27409396585119694
+  risk:
+    position_size: 0.1
+    sl_range: [0.5, 2.0]
+    tp_range: [1.0, 4.0]
+  max_daily_trades: 20
+  max_trades_per_tf:
+    5m: 8
+    1h: 4
+    4h: 2

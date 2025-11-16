@@ -1,0 +1,16 @@
+profile: "aggressive"
+agent:
+    learning_rate: 0.00031916907479304714
+    gamma: 0.9955913699798518
+risk_management:
+    stop_loss_pct: 0.021431410975611454
+    take_profit_pct: 0.03300348666174923
+    position_sizing:
+        initial_position_size: 0.1186481738677556
+trading_rules:
+  frequency:
+    force_trade_steps:
+      5m: 12
+      1h: 13
+      4h: 16
+    freq_penalty_weight: 1.1309727879060552

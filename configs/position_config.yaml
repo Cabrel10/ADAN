@@ -1,0 +1,16 @@
+profile: "position"
+agent:
+    learning_rate: 1.634342388771402e-05
+    gamma: 0.9955426518256824
+risk_management:
+    stop_loss_pct: 0.1414404341733319
+    take_profit_pct: 0.16130878648387342
+    position_sizing:
+        initial_position_size: 0.3346087855775234
+trading_rules:
+  frequency:
+    force_trade_steps:
+      5m: 50
+      1h: 54
+      4h: 88
+    freq_penalty_weight: 4.830326985016187

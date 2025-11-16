@@ -1,0 +1,16 @@
+profile: "swing"
+agent:
+    learning_rate: 2.060264039107269e-06
+    gamma: 0.9949552450648048
+risk_management:
+    stop_loss_pct: 0.032954999272788825
+    take_profit_pct: 0.07444488792112011
+    position_sizing:
+        initial_position_size: 0.34460346761634025
+trading_rules:
+  frequency:
+    force_trade_steps:
+      5m: 28
+      1h: 28
+      4h: 42
+    freq_penalty_weight: 1.404506490307887

@@ -1,0 +1,12 @@
+# Ignore everything
+*
+
+# But not directories, so we can recurse into them
+!*/
+
+# Un-ignore .py and .yaml files
+!*.py
+!*.yaml
+
+# Don't ignore the .gitignore file itself
+!.gitignore

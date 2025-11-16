@@ -1,0 +1,42 @@
+# Configuration par défaut pour l'optimisation ADAN
+# Ce fichier peut être modifié selon les besoins
+
+# Paramètres du modèle d'attention
+num_attention_heads:
+  - 4
+  - 8
+  - 16
+
+hidden_dims:
+  - 128
+  - 256
+  - 512
+
+learning_rates:
+  - 0.0001
+  - 0.0003
+  - 0.001
+
+# Paramètres d'entraînement
+n_epochs: 50
+batch_size: 64
+early_stopping_patience: 10
+
+# Paramètres du modèle CNN-PPO
+n_steps: 2048
+gamma: 0.99
+gae_lambda: 0.95
+clip_range: 0.2
+ent_coef: 0.01
+vf_coef: 0.5
+max_grad_norm: 0.5
+
+# Paramètres d'optimisation
+n_trials: 100
+timeout: 3600  # 1 heure en secondes
+n_jobs: 1
+
+# Chemins de sauvegarde
+save_path: "optimization_results"
+log_path: "logs/optimization"
+model_save_path: "models/optimized"
