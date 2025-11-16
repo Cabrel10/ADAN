@@ -558,7 +558,7 @@ class MultiAssetChunkedEnv(gym.Env):
     def update_risk_parameters(self, market_conditions=None):
         """
         Met à jour les paramètres de risque en fonction des conditions de marché
-        et du régime de marché détecté.
+        et du régime de marché détecté, EN PRIORISANT LES VALEURS DU DBE.
 
         Args:
             market_conditions: Dictionnaire contenant les indicateurs de marché actuels.
@@ -605,11 +605,29 @@ class MultiAssetChunkedEnv(gym.Env):
                 market_conditions = self._get_default_market_conditions()
                 close_price = market_conditions.get("close", 50000.0)
 
+            # ✅ NOUVEAU: Appeler le DBE pour obtenir les modulations de risque
+            dbe_modulation = None
+            if hasattr(self, "dynamic_behavior_engine") and self.dynamic_behavior_engine:
+                try:
+                    # compute_dynamic_modulation n'a besoin que de l'env
+                    dbe_modulation = self.dynamic_behavior_engine.compute_dynamic_modulation(env=self)
+                    logger.debug(f"[DBE_MODULATION] Worker {self.worker_id}: {dbe_modulation}")
+                except Exception as e:
+                    logger.warning(f"[DBE_MODULATION_ERROR] Worker {self.worker_id}: {e}")
+                    dbe_modulation = None
+
             # 1. Détection du régime de marché
             regime, confidence = self._detect_market_regime(market_conditions)
 
             # 2. Mise à jour des paramètres de risque en fonction du régime
             risk_params = self._calculate_risk_parameters(regime, market_conditions)
+
+            # ✅ PRIORITÉ: Si le DBE fournit des modulations, les utiliser
+            if dbe_modulation:
+                risk_params["stop_loss_pct"] = dbe_modulation.get("sl_pct", risk_params.get("stop_loss_pct", 0.02))
+                risk_params["take_profit_pct"] = dbe_modulation.get("tp_pct", risk_params.get("take_profit_pct", 0.04))
+                risk_params["position_size_pct"] = dbe_modulation.get("position_size_pct", risk_params.get("position_size_pct", 0.1))
+                logger.info(f"[RISK_PARAMS_FROM_DBE] Worker {self.worker_id}: SL={risk_params['stop_loss_pct']:.4f}, TP={risk_params['take_profit_pct']:.4f}, PosSize={risk_params['position_size_pct']:.4f}")
 
             # 3. Application des limites de risque
             self._apply_risk_limits(risk_params)
@@ -622,16 +640,17 @@ class MultiAssetChunkedEnv(gym.Env):
                     logger.warning(
                         "[FALLBACK] update_risk_parameters absent – Valeurs par défaut."
                     )
-                    self.portfolio.sl_pct = risk_params.get("sl", 0.02)
+                    self.portfolio.sl_pct = risk_params.get("stop_loss_pct", 0.02)
+                    self.portfolio.tp_pct = risk_params.get("take_profit_pct", 0.04)
                     self.portfolio.pos_size_pct = min(
-                        risk_params.get("pos_size", 0.825), 0.9
+                        risk_params.get("position_size_pct", 0.825), 0.9
                     )  # Clip à 90%
                     logging.warning("update_risk_parameters manquant - Ajouté fallback")
                     # Fallback direct pour éviter le crash
                     if hasattr(self.portfolio, "sl_pct"):
-                        self.portfolio.sl_pct = risk_params.get("sl", 0.02)
+                        self.portfolio.sl_pct = risk_params.get("stop_loss_pct", 0.02)
                     if hasattr(self.portfolio, "tp_pct"):
-                        self.portfolio.tp_pct = risk_params.get("tp", 0.04)
+                        self.portfolio.tp_pct = risk_params.get("take_profit_pct", 0.04)
 
                 # Journalisation des changements significatifs
                 if hasattr(self, "last_risk_params") and self.last_risk_params:
