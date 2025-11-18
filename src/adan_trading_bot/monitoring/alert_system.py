@@ -242,7 +242,7 @@ class NotificationHandler:
 
         payload = {
             'alert': alert.to_dict(),
-            'timestamp': datetime.utcnow().isoformat(),
+            'timestamp': datetime.now(datetime.timezone.utc).isoformat(),
             'source': 'adan_trading_bot'
         }
 

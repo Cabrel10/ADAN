@@ -236,7 +236,7 @@ class ReplayLogger:
     def _should_flush(self) -> bool:
         """Détermine si le buffer doit être vidé."""
         # Vérifier le temps écoulé depuis le dernier flush
-        time_since_flush = (datetime.utcnow() - self.last_flush).total_seconds()
+        time_since_flush = (datetime.now(datetime.timezone.utc) - self.last_flush).total_seconds()
         return time_since_flush > 300  # 5 minutes
     
     @staticmethod

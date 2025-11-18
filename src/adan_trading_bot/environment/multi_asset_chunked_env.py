@@ -1792,7 +1792,7 @@ class MultiAssetChunkedEnv(gym.Env):
 
             # Map timeframe to pandas frequency
             tf_to_freq = {"5m": "5min", "1h": "1h", "4h": "4h"}
-            now = pd.Timestamp.utcnow().floor("min")
+            now = pd.Timestamp.now(tz="UTC").floor("min")
 
             result: Dict[str, Dict[str, pd.DataFrame]] = {}
             for asset in assets:

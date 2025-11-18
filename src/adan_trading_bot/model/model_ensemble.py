@@ -252,7 +252,7 @@ class ModelEnsemble:
 
         data = {
             'version': '1.0',
-            'last_updated': datetime.utcnow().isoformat(),
+            'last_updated': datetime.now(datetime.timezone.utc).isoformat(),
             'models': {}
         }
 
@@ -295,7 +295,7 @@ class ModelEnsemble:
                             'weights': perf_data.get('weights', 1.0),
                             'total_predictions': perf_data.get('total_predictions', 0),
                             'correct_predictions': perf_data.get('correct_predictions', 0),
-                            'last_updated': perf_data.get('last_updated', datetime.utcnow().isoformat()),
+                            'last_updated': perf_data.get('last_updated', datetime.now(datetime.timezone.utc).isoformat()),
                             'metadata': perf_data.get('metadata', {})
                         })
                     else:
@@ -305,7 +305,7 @@ class ModelEnsemble:
                             'weights': perf_data.get('weights', 1.0),
                             'total_predictions': perf_data.get('total_predictions', 0),
                             'correct_predictions': perf_data.get('correct_predictions', 0),
-                            'last_updated': perf_data.get('last_updated', datetime.utcnow().isoformat()),
+                            'last_updated': perf_data.get('last_updated', datetime.now(datetime.timezone.utc).isoformat()),
                             'metadata': perf_data.get('metadata', {})
                         })
                 except Exception as e:

@@ -158,7 +158,7 @@ class CheckpointManager(Generic[T]):
                 json.dump(metadata.to_dict(), f, default=_safe_default)
 
             # Create checkpoint directory with timestamp
-            timestamp = datetime.utcnow().strftime('%Y%m%d_%H%M%S')
+            timestamp = datetime.now(datetime.timezone.utc).strftime('%Y%m%d_%H%M%S')
             checkpoint_name = f"checkpoint_{timestamp}_ep{episode:06d}_step{total_steps:010d}"
             if is_final:
                 checkpoint_name += "_final"
