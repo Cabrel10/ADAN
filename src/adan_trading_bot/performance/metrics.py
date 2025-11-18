@@ -4,7 +4,7 @@ Module de calcul et de suivi des métriques de performance du portefeuille.
 import numpy as np
 from typing import List, Dict, Optional
 from collections import deque
-from datetime import datetime
+from datetime import datetime, timezone
 import json
 import os
 from pathlib import Path
@@ -30,7 +30,7 @@ class PerformanceMetrics:
         self.drawdowns = deque(maxlen=10000)
         self.equity_curve = deque(maxlen=10000)
         self.trades = deque(maxlen=5000)
-        self.start_time = datetime.now(datetime.timezone.utc)
+        self.start_time = datetime.now(timezone.utc)
 
         # Worker ID pour éviter la duplication de logs
         self.worker_id = worker_id
