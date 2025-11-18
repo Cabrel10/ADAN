@@ -1,0 +1,37 @@
+# ADAN Trading Bot - Colab Dependencies (Pinned Versions)
+# Last Updated: 2025-11-18
+# Python 3.11+
+
+# Core ML/RL
+torch==2.8.0
+numpy>=1.24.0,<2.0.0
+pandas>=2.0.0,<3.0.0
+scipy>=1.10.0,<2.0.0
+
+# Reinforcement Learning
+stable-baselines3==2.7.0
+gymnasium>=0.28.0,<1.0.0
+
+# Data & Technical Analysis
+ta-lib>=0.4.28
+pandas-ta>=0.3.14b0
+yfinance>=0.2.32
+
+# Optimization
+optuna>=4.5.0
+scikit-optimize>=0.9.1
+
+# Utilities
+pyyaml>=6.0
+python-dotenv>=1.0.0
+requests>=2.31.0
+
+# Logging & Monitoring
+tensorboard>=2.14.0
+wandb>=0.15.0
+
+# Development (optional)
+pytest>=7.4.0
+pytest-cov>=4.1.0
+black>=23.0.0
+flake8>=6.0.0
