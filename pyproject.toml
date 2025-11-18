@@ -1,0 +1,80 @@
+[build-system]
+requires = ["setuptools>=65.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "adan_trading_bot"
+version = "0.1.0"
+description = "ADAN Trading Bot - Advanced Deep Adaptive Networks for Algorithmic Trading"
+readme = "README.md"
+requires-python = ">=3.8"
+authors = [
+    {name = "ADAN Team", email = "info@adan.trading"}
+]
+license = {text = "MIT"}
+keywords = ["trading", "bot", "reinforcement-learning", "deep-learning", "algorithmic-trading"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.8",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+]
+
+dependencies = [
+    "numpy>=1.24.0,<2.0.0",
+    "pandas>=2.0.0",
+    "scipy>=1.10.0",
+    "scikit-learn>=1.3.0",
+    "matplotlib>=3.7.0",
+    "yfinance>=0.2.0",
+    "pandas-ta>=0.3.14b0",
+    "torch>=2.0.0",
+    "gymnasium>=0.29.0",
+    "stable-baselines3>=2.0.0",
+    "optuna>=3.0.0",
+    "pyyaml>=6.0",
+    "tqdm>=4.65.0",
+    "TA-Lib>=0.4.28",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0",
+    "pytest-cov>=4.0",
+    "black>=23.0",
+    "flake8>=6.0",
+    "isort>=5.12",
+]
+colab = [
+    "google-colab>=1.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/Cabrel10/ADAN0"
+Repository = "https://github.com/Cabrel10/ADAN0.git"
+Issues = "https://github.com/Cabrel10/ADAN0/issues"
+
+[tool.setuptools]
+packages = ["adan_trading_bot"]
+package-dir = {"" = "src"}
+
+[tool.setuptools.package-data]
+adan_trading_bot = ["**/*.yaml", "**/*.yml"]
+
+[tool.black]
+line-length = 120
+target-version = ['py38', 'py39', 'py310', 'py311', 'py312']
+
+[tool.isort]
+profile = "black"
+line_length = 120
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+addopts = "-v --tb=short"

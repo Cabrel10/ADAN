@@ -5850,7 +5850,7 @@ class MultiAssetChunkedEnv(gym.Env):
     ) -> None:
         """Enregistre un log riche décrivant la décision de l'agent."""
         try:
-            now = datetime.utcnow().strftime("%H:%M:%S")
+            now = datetime.now(datetime.timezone.utc).strftime("%H:%M:%S")
             rsi = observation_summary.get("rsi", 0.0)
             trend = observation_summary.get("trend", 0.0)
             trend_label = "UP" if trend > 0 else "DOWN" if trend < 0 else "FLAT"
