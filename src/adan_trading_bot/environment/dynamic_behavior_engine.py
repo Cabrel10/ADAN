@@ -66,10 +66,6 @@ class DynamicBehaviorEngine:
         # Initialisation du logger personnalisé
         self.logger = logging.getLogger(f"dbe.{self.__class__.__name__}")
 
-        # S'assurer que le logger est bien de type DBELogger
-        if not isinstance(self.logger, DBELogger):
-            self.logger.__class__ = DBELogger
-
         # Initialisation des historiques
         self.decision_history = []  # Historique des décisions prises
         self.trade_history = []  # Historique des trades

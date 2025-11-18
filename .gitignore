@@ -1,4 +1,4 @@
-# Python
+# Fichiers ignorés par défaut
 __pycache__/
 *.py[cod]
 *$py.class
@@ -20,37 +20,58 @@ wheels/
 .installed.cfg
 *.egg
 
-# Logs
-*.log
-logs/
-*.out
-
-# Checkpoints et modèles
-checkpoints/
-models/
-*.zip
-
-# IDE
-.vscode/
-.idea/
-*.swp
-*.swo
-
-# OS
-.DS_Store
-Thumbs.db
-
-# Environnement
+# Environnements virtuels
 .env
 .venv
 env/
 venv/
+ENV/
 
-# Jupyter
+# Fichiers de configuration locaux
+*.local
+
+# Fichiers de logs
+logs/
+*.log
+
+# Fichiers de checkpoints
+checkpoints/
+
+# Fichiers de données volumineux (ignorés par défaut)
+data/raw/
+
+# Fichiers système
+.DS_Store
+Thumbs.db
+
+# Fichiers IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Fichiers Jupyter Notebook
 .ipynb_checkpoints/
 
-# Documentation temporaire
-CRITICAL_FIX_SUMMARY.md
+# Fichiers de test
+.coverage
+htmlcov/
+.pytest_cache/
 
-# NE PAS IGNORER les fichiers parquet
-!data/**/*.parquet
+# Fichiers de documentation
+_build/
+docs/_build/
+
+# Fichiers de déploiement
+*.zip
+*.gz
+*.tar
+
+# Fichiers de configuration spécifiques au projet
+.env
+.env.*
+!.env.example
+
+# INCLURE les données de trading essentielles
+!data/processed/indicators/**/*.parquet
+!data/processed/indicators/
