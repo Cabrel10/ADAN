@@ -1,0 +1,94 @@
+================================================================================
+ADAN TRADING BOT - COLAB COPY-PASTE COMMANDS
+================================================================================
+
+Copy-paste each command in a separate Colab cell.
+
+================================================================================
+CELL 1: Clone and setup
+================================================================================
+
+cd /content
+git clone https://github.com/Cabrel10/ADAN0.git bot
+cd bot
+
+================================================================================
+CELL 2: Install dependencies
+================================================================================
+
+pip install -q -r requirements-colab.txt
+
+================================================================================
+CELL 3: Verify imports (optional but recommended)
+================================================================================
+
+python -c "
+from adan_trading_bot.common.config_loader import ConfigLoader
+from adan_trading_bot.data_processing.data_loader import ChunkedDataLoader
+from adan_trading_bot.environment.multi_asset_chunked_env import MultiAssetChunkedEnv
+print('✅ All imports successful - Ready to train!')
+"
+
+================================================================================
+CELL 4: Run training (MAIN COMMAND)
+================================================================================
+
+python scripts/train_parallel_agents.py \
+  --config-path config/config.yaml \
+  --checkpoint-dir checkpoints \
+  --resume
+
+================================================================================
+CELL 5 (Optional): Run hyperparameter optimization
+================================================================================
+
+python scripts/optimize_hyperparams.py \
+  --n-trials 100 \
+  --timeout 3600
+
+================================================================================
+NOTES:
+================================================================================
+
+✅ Training duration: 6-8 hours
+✅ 4 workers run in parallel (DummyVecEnv - no pickle errors)
+✅ GPU is automatically detected and optimized
+✅ Logs are saved in logs/ directory
+✅ Models are saved in checkpoints/ directory
+✅ Expected Sharpe Ratio: > 2.0 after 300k steps
+✅ Expected Max Drawdown: < 20%
+✅ Expected Win Rate: > 50%
+
+================================================================================
+TROUBLESHOOTING:
+================================================================================
+
+If you get import errors:
+  - Make sure you're in the /content/bot directory
+  - Run: pip install -q -r requirements-colab.txt again
+
+If training is slow:
+  - Check GPU usage: !nvidia-smi
+  - Verify 4 workers are running
+  - Check logs in logs/ directory
+
+If you get memory errors:
+  - Reduce batch_size in config/config.yaml
+  - Reduce timesteps_per_instance
+
+================================================================================
+IMPORTANT:
+================================================================================
+
+DO NOT MODIFY:
+  - palier_tiers in config.yaml (capital tiers)
+  - force_trade.enabled = True
+  - 4 workers parallel
+  - timesteps_per_instance = 500000
+
+CAN MODIFY:
+  - batch_size (64 by default)
+  - learning_rate (0.0003 by default)
+  - n_epochs (10 by default)
+
+================================================================================
