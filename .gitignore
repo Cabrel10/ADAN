@@ -75,3 +75,83 @@ docs/_build/
 # INCLURE les données de trading essentielles
 !data/processed/indicators/**/*.parquet
 !data/processed/indicators/
+
+# ===================== AJOUTS SUPPLÉMENTAIRES =====================
+# Journaux et artefacts de debug/monitoring
+logs/**
+**/*.jsonl
+**/*_logs/**
+**/tb_logs/**
+**/tensorboard/**
+**/runs/**
+**/wandb/**
+**/mlruns/**
+**/profiling/**
+**/*.prof
+**/*.out
+
+# Checkpoints / modèles / artefacts d'entraînement
+checkpoints/**
+**/checkpoints/**
+**/trained_models/**
+**/models/**
+**/artifacts/**
+**/outputs/**
+**/experiments/**
+
+# Fichiers binaires volumineux
+*.pth
+*.pt
+*.onnx
+*.h5
+*.ckpt
+*.pkl
+*.npz
+*.npy
+*.pickle
+
+# Données brutes et dérivées volumineuses
+data/raw/**
+data/tmp/**
+data/cache/**
+data/interim/**
+data/processed/**
+# Ré-inclure explicitement les indicateurs essentiels (déjà ci-dessus)
+!data/processed/indicators/
+!data/processed/indicators/**/*.parquet
+
+# Parquets et CSV globaux (sauf indicateurs)
+*.parquet
+*.csv
+!data/processed/indicators/**/*.parquet
+
+# Bases de données locales / Optuna
+*.db
+*.sqlite
+optuna.db
+
+# Caches et artefacts de tooling
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+.coverage*
+coverage.xml
+.benchmarks/
+
+# Notebooks et caches associés
+.ipynb_checkpoints/
+**/.ipynb_checkpoints/**
+*.nbconvert.ipynb
+
+# Images/vidéos générées dans les logs (laisser le code source d'assets)
+logs/**/*.png
+logs/**/*.jpg
+logs/**/*.jpeg
+logs/**/*.gif
+logs/**/*.mp4
+
+# Systèmes/OS additionnels
+.Trash-*/
+*.tmp
+*.bak
+*.orig
