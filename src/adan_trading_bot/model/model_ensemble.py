@@ -26,7 +26,7 @@ class ModelPerformance:
     weights: float = 1.0
     total_predictions: int = 0
     correct_predictions: int = 0
-    last_updated: datetime = field(default_factory=lambda: datetime.now(datetime.timezone.utc))
+    last_updated: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     metadata: Dict[str, Any] = field(default_factory=dict)
 
     @property
@@ -41,7 +41,7 @@ class ModelPerformance:
         self.total_predictions += 1
         if prediction_correct:
             self.correct_predictions += 1
-        self.last_updated = datetime.now(datetime.timezone.utc)
+        self.last_updated = datetime.now(timezone.utc)
         self.metadata.update(metadata)
 
     def to_dict(self) -> Dict[str, Any]:
@@ -252,7 +252,7 @@ class ModelEnsemble:
 
         data = {
             'version': '1.0',
-            'last_updated': datetime.now(datetime.timezone.utc).isoformat(),
+            'last_updated': datetime.now(timezone.utc).isoformat(),
             'models': {}
         }
 
@@ -295,7 +295,7 @@ class ModelEnsemble:
                             'weights': perf_data.get('weights', 1.0),
                             'total_predictions': perf_data.get('total_predictions', 0),
                             'correct_predictions': perf_data.get('correct_predictions', 0),
-                            'last_updated': perf_data.get('last_updated', datetime.now(datetime.timezone.utc).isoformat()),
+                            'last_updated': perf_data.get('last_updated', datetime.now(timezone.utc).isoformat()),
                             'metadata': perf_data.get('metadata', {})
                         })
                     else:
@@ -305,7 +305,7 @@ class ModelEnsemble:
                             'weights': perf_data.get('weights', 1.0),
                             'total_predictions': perf_data.get('total_predictions', 0),
                             'correct_predictions': perf_data.get('correct_predictions', 0),
-                            'last_updated': perf_data.get('last_updated', datetime.now(datetime.timezone.utc).isoformat()),
+                            'last_updated': perf_data.get('last_updated', datetime.now(timezone.utc).isoformat()),
                             'metadata': perf_data.get('metadata', {})
                         })
                 except Exception as e:

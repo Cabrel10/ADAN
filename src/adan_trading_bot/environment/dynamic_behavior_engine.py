@@ -1075,7 +1075,7 @@ class DynamicBehaviorEngine:
 
         # Construction du dictionnaire de résultats
         metrics = {
-            "timestamp": datetime.now(datetime.timezone.utc).isoformat(),
+            "timestamp": datetime.now(timezone.utc).isoformat(),
             "step": self.state["current_step"],
             "portfolio": {
                 "total_value": portfolio_metrics.get("total_capital", 0.0),
@@ -1320,7 +1320,7 @@ class DynamicBehaviorEngine:
             free_cash = metrics.get("free_capital", 0.0)
 
         return {
-            "timestamp": datetime.now(datetime.timezone.utc).isoformat(),
+            "timestamp": datetime.now(timezone.utc).isoformat(),
             "step": self.state["current_step"],
             "market_regime": self.state["market_regime"],
             "risk_level": self.state["current_risk_level"],
@@ -1862,7 +1862,7 @@ class DynamicBehaviorEngine:
         state = self.worker_states[worker_id]
 
         # Mettre à jour l'historique des trades
-        state["last_trade_ts"] = datetime.now(datetime.timezone.utc)
+        state["last_trade_ts"] = datetime.now(timezone.utc)
         state["trade_history"].append(trade_result)
 
         # Mettre à jour les pertes cumulées

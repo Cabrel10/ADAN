@@ -329,7 +329,7 @@ class RiskAssessor:
             "var": var,
             "cvar": cvar,
             "leverage": total_value / equity if equity > 0 else 0,
-            "timestamp": datetime.now(datetime.timezone.utc).isoformat(),
+            "timestamp": datetime.now(timezone.utc).isoformat(),
         }
 
         # Check risk limits

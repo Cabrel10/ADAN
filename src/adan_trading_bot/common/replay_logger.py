@@ -115,7 +115,7 @@ class ReplayLogger:
         """
         log_entry = {
             "type": "decision",
-            "timestamp": datetime.now(datetime.timezone.utc).isoformat() + 'Z',  # UTC avec Z pour le fuseau
+            "timestamp": datetime.now(timezone.utc).isoformat() + 'Z',  # UTC avec Z pour le fuseau
             "step": step_index,
             "modulation": self._serialize(modulation_dict),
             "context": self._serialize(context_metrics),
@@ -155,12 +155,12 @@ class ReplayLogger:
         """
         log_entry = {
             "type": "episode_end",
-            "timestamp": datetime.now(datetime.timezone.utc).isoformat() + 'Z',
+            "timestamp": datetime.now(timezone.utc).isoformat() + 'Z',
             "episode": episode,
             "total_reward": float(total_reward),  # S'assurer que c'est sérialisable
             "metrics": self._serialize(episode_metrics),
             "decision_count": self.decision_count,
-            "duration_seconds": (datetime.now(datetime.timezone.utc) - self.last_flush).total_seconds()
+            "duration_seconds": (datetime.now(timezone.utc) - self.last_flush).total_seconds()
         }
         
         # Ajout au buffer mais on flush immédiatement pour les fins d'épisode
@@ -178,7 +178,7 @@ class ReplayLogger:
         
         # Réinitialisation des compteurs pour le prochain épisode
         self.decision_count = 0
-        self.last_flush = datetime.now(datetime.timezone.utc)
+        self.last_flush = datetime.now(timezone.utc)
     
     def _write_line(self, data: Dict[str, Any]) -> None:
         """
@@ -236,7 +236,7 @@ class ReplayLogger:
     def _should_flush(self) -> bool:
         """Détermine si le buffer doit être vidé."""
         # Vérifier le temps écoulé depuis le dernier flush
-        time_since_flush = (datetime.now(datetime.timezone.utc) - self.last_flush).total_seconds()
+        time_since_flush = (datetime.now(timezone.utc) - self.last_flush).total_seconds()
         return time_since_flush > 300  # 5 minutes
     
     @staticmethod

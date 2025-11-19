@@ -192,7 +192,7 @@ class SystemMetricsCollector:
                 },
                 'boot_time': psutil.boot_time(),
                 'users': [user._asdict() for user in psutil.users()],
-                'timestamp': datetime.now(datetime.timezone.utc).isoformat()
+                'timestamp': datetime.now(timezone.utc).isoformat()
             }
         except Exception as e:
             logger.error(f"Error updating system info: {e}")
@@ -219,7 +219,7 @@ class SystemMetricsCollector:
         summary = {
             'cpu_usage': self.metrics.get('cpu', {}).get('usage_percent', 0),
             'memory_usage': self.metrics.get('memory', {}).get('virtual', {}).get('percent', 0),
-            'timestamp': self.metrics.get('system', {}).get('timestamp', datetime.now(datetime.timezone.utc).isoformat())
+            'timestamp': self.metrics.get('system', {}).get('timestamp', datetime.now(timezone.utc).isoformat())
         }
 
         if 'gpu' in self.metrics and self.gpu_available:

@@ -117,7 +117,7 @@ class PerformanceMetrics:
 
         self._log_metrics({
             "event": "trade_closed",
-            "timestamp": datetime.now(datetime.timezone.utc).isoformat(),
+            "timestamp": datetime.now(timezone.utc).isoformat(),
             "worker_id": self.worker_id,
             **trade_result
         })
@@ -132,7 +132,7 @@ class PerformanceMetrics:
             self.invalid_trade_attempts += 1
         payload = {
             "event": "trade_attempt",
-            "timestamp": datetime.now(datetime.timezone.utc).isoformat(),
+            "timestamp": datetime.now(timezone.utc).isoformat(),
             "worker_id": self.worker_id,
             "valid": bool(valid),
         }
@@ -154,7 +154,7 @@ class PerformanceMetrics:
         self.executed_trades_opened += 1
         payload = {
             "event": "trade_opened",
-            "timestamp": datetime.now(datetime.timezone.utc).isoformat(),
+            "timestamp": datetime.now(timezone.utc).isoformat(),
             "worker_id": self.worker_id,
         }
         try:
@@ -568,7 +568,7 @@ class PerformanceMetrics:
 
         start_value = self.equity_curve[0]
         end_value = self.equity_curve[-1]
-        years = (datetime.now(datetime.timezone.utc) - self.start_time).days / 365.25
+        years = (datetime.now(timezone.utc) - self.start_time).days / 365.25
 
         if years <= 0 or start_value == 0:
             return 0.0
@@ -662,7 +662,7 @@ class PerformanceMetrics:
         metrics = self.get_metrics_summary()
         self._log_metrics({
             "event": "periodic_update",
-            "timestamp": datetime.now(datetime.timezone.utc).isoformat(),
+            "timestamp": datetime.now(timezone.utc).isoformat(),
             **metrics
         })
 
@@ -697,7 +697,7 @@ class PerformanceMetrics:
                     f.write("timestamp,step,sharpe,max_dd,win_rate,combined_win_rate,total_trades,open_positions,unrealized_pnl,cagr,profit_factor,pos_5m,pos_1h,pos_4h,pos_total\n")
 
                 f.write(
-                    f"{datetime.now(datetime.timezone.utc).isoformat()},"
+                    f"{datetime.now(timezone.utc).isoformat()},"
                     f"{step},"
                     f"{metrics['sharpe_ratio']:.3f},"
                     f"{metrics['max_drawdown']:.2f},"
