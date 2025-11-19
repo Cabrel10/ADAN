@@ -18,18 +18,13 @@ from stable_baselines3.common.callbacks import CheckpointCallback, BaseCallback
 
 from adan_trading_bot.common.config_loader import ConfigLoader
 from adan_trading_bot.common.custom_logger import setup_logging
-from adan_trading_bot.utils.environment_detector import (
-    get_optimal_vec_env_type,
-    get_optimal_num_workers,
-    configure_gpu_optimization,
-    print_environment_info,
-)
 import logging
 from adan_trading_bot.data_processing.data_loader import ChunkedDataLoader
-from adan_trading_bot.environment.multi_asset_chunked_env import MultiAssetChunkedEnv
+from adan_trading_bot.environment.multi_asset_chunked_env import (
+    MultiAssetChunkedEnv
+)
 from adan_trading_bot.model.model_ensemble import ModelEnsemble
 import signal
-import math
 import time
 
 def linear_schedule(start_val, end_val, progress):
@@ -655,28 +650,14 @@ def main(
         final_export_dir = os.path.join(checkpoint_dir, "final")
         os.makedirs(final_export_dir, exist_ok=True)
 
-        # --- Environment Setup with Automatic Detection ---
-        # Print environment info
-        print_environment_info()
-
-        # Detect optimal configuration
-        vec_env_type = get_optimal_vec_env_type()
-        optimal_workers = get_optimal_num_workers()
-
-        # Configure GPU optimization
-        configure_gpu_optimization()
-
-        # Override num_envs based on environment detection
-        if num_envs != optimal_workers:
-            logger.warning(
-                f"Adjusting num_envs from {num_envs} to {optimal_workers} "
-                f"(optimal for {vec_env_type})"
-            )
-            num_envs = optimal_workers
+        # --- Environment Setup: 4 workers with DummyVecEnv ---
+        # Force 4 workers everywhere (Colab + Local)
+        num_envs = 4
+        logger.info("🔄 Using DummyVecEnv with 4 workers (no pickle issues)")
 
         # Create individual environments for each worker
         env_fns = []
-        worker_ids = ["w1", "w2", "w3", "w4"][:num_envs]
+        worker_ids = ["w1", "w2", "w3", "w4"]
 
         for i in range(num_envs):
             worker_id = worker_ids[i]
@@ -758,31 +739,11 @@ def main(
                 lambda kwargs=env_kwargs: MultiAssetChunkedEnv(**kwargs)
             )
 
-            logger.info(
-                f"✅ Configured {worker_id}: "
-                f"{worker_config.get('name', 'N/A')}"
-            )
+            logger.info(f"✅ Configured {worker_id}")
 
-        # Create vectorized environment based on detection
-        if vec_env_type == "dummy":
-            logger.info(
-                f"🔄 Using DummyVecEnv ({num_envs} worker(s)) - "
-                f"No multiprocessing"
-            )
-            env = DummyVecEnv(env_fns)
-        else:
-            logger.info(
-                f"🔄 Using SubprocVecEnv ({num_envs} workers) - "
-                f"True parallelism"
-            )
-            env = SubprocVecEnv(env_fns, start_method="spawn")
-
-        logger.info(
-            f"✅ Created {vec_env_type} environment with "
-            f"{num_envs} worker(s)"
-        )
-
-        # Environment already created above with forced SubprocVecEnv
+        # Use DummyVecEnv everywhere (no pickle issues)
+        env = DummyVecEnv(env_fns)
+        logger.info(f"✅ Created DummyVecEnv with {num_envs} workers")
 
         # --- Model Instantiation ---
         policy_kwargs = copy.deepcopy(
