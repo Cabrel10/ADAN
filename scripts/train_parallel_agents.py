@@ -18,6 +18,12 @@ from stable_baselines3.common.callbacks import CheckpointCallback, BaseCallback
 
 from adan_trading_bot.common.config_loader import ConfigLoader
 from adan_trading_bot.common.custom_logger import setup_logging
+from adan_trading_bot.utils.environment_detector import (
+    get_optimal_vec_env_type,
+    get_optimal_num_workers,
+    configure_gpu_optimization,
+    print_environment_info,
+)
 import logging
 from adan_trading_bot.data_processing.data_loader import ChunkedDataLoader
 from adan_trading_bot.environment.multi_asset_chunked_env import MultiAssetChunkedEnv
@@ -649,33 +655,64 @@ def main(
         final_export_dir = os.path.join(checkpoint_dir, "final")
         os.makedirs(final_export_dir, exist_ok=True)
 
-        # --- Environment Setup (Matching Optuna Configuration) ---
-        # Force 4 workers to match Optuna optimization
-        if num_envs != 4:
-            logger.warning(
-                f"Forcing num_envs to 4 workers to match Optuna configuration (was {num_envs})"
-            )
-            num_envs = 4
+        # --- Environment Setup with Automatic Detection ---
+        # Print environment info
+        print_environment_info()
 
-        # Create individual environments for each worker with their specific configs
+        # Detect optimal configuration
+        vec_env_type = get_optimal_vec_env_type()
+        optimal_workers = get_optimal_num_workers()
+
+        # Configure GPU optimization
+        configure_gpu_optimization()
+
+        # Override num_envs based on environment detection
+        if num_envs != optimal_workers:
+            logger.warning(
+                f"Adjusting num_envs from {num_envs} to {optimal_workers} "
+                f"(optimal for {vec_env_type})"
+            )
+            num_envs = optimal_workers
+
+        # Create individual environments for each worker
         env_fns = []
-        worker_ids = ["w1", "w2", "w3", "w4"]
+        worker_ids = ["w1", "w2", "w3", "w4"][:num_envs]
 
         for i in range(num_envs):
             worker_id = worker_ids[i]
             worker_config = copy.deepcopy(config["workers"][worker_id])
 
-            # Enforce BTC-only specialization per worker without touching config.yaml
-            # Specialization profiles per worker
+            # Enforce BTC-only specialization per worker
             btc_assets = ["BTCUSDT"]
             worker_config["assets"] = btc_assets
             spec_profiles = {
-                "w1": {"timeframe": "4h", "risk_profile": "ultra_conservative", "max_daily_trades": 3, "position_hold_steps": [50, 100]},
-                "w2": {"timeframe": "1h", "risk_profile": "moderate", "max_daily_trades": 6, "position_hold_steps": [20, 40]},
-                "w3": {"timeframe": "5m", "risk_profile": "aggressive", "max_daily_trades": 15, "position_hold_steps": [5, 15]},
-                "w4": {"timeframe": "multi", "risk_profile": "adaptive", "max_daily_trades": 10, "position_hold_steps": "dynamic"},
+                "w1": {
+                    "timeframe": "4h",
+                    "risk_profile": "ultra_conservative",
+                    "max_daily_trades": 3,
+                    "position_hold_steps": [50, 100]
+                },
+                "w2": {
+                    "timeframe": "1h",
+                    "risk_profile": "moderate",
+                    "max_daily_trades": 6,
+                    "position_hold_steps": [20, 40]
+                },
+                "w3": {
+                    "timeframe": "5m",
+                    "risk_profile": "aggressive",
+                    "max_daily_trades": 15,
+                    "position_hold_steps": [5, 15]
+                },
+                "w4": {
+                    "timeframe": "multi",
+                    "risk_profile": "adaptive",
+                    "max_daily_trades": 10,
+                    "position_hold_steps": "dynamic"
+                },
             }
-            worker_config.setdefault("specialization", {}).update(spec_profiles.get(worker_id, {}))
+            spec = spec_profiles.get(worker_id, {})
+            worker_config.setdefault("specialization", {}).update(spec)
 
             # Create data loader for this specific worker
             data_loader = ChunkedDataLoader(
@@ -686,40 +723,63 @@ def main(
             env_worker_config = copy.deepcopy(worker_config)
             env_worker_config["worker_id"] = i
 
-            env_log_dir = os.path.join(config["paths"]["logs_dir"], f"{worker_id}_env")
+            env_log_dir = os.path.join(
+                config["paths"]["logs_dir"], f"{worker_id}_env"
+            )
             os.makedirs(env_log_dir, exist_ok=True)
 
             env_kwargs = {
                 "data": data,
                 "timeframes": config["data"]["timeframes"],
-                # Use observation.window_sizes as expected by environment
-                "window_sizes": config["environment"]["observation"]["window_sizes"],
-                "features_config": config["data"]["features_config"]["timeframes"],
+                "window_sizes": (
+                    config["environment"]["observation"]["window_sizes"]
+                ),
+                "features_config": (
+                    config["data"]["features_config"]["timeframes"]
+                ),
                 "max_steps": config["environment"]["max_steps"],
-                "initial_balance": config["portfolio"]["initial_balance"],
+                "initial_balance": (
+                    config["portfolio"]["initial_balance"]
+                ),
                 "commission": config["environment"]["commission"],
                 "reward_scaling": config["environment"]["reward_scaling"],
-                "enable_logging": True,  # Enable logging for better tracking
+                "enable_logging": True,
                 "log_dir": env_log_dir,
                 "worker_config": env_worker_config,
                 "config": config,
-                "exploration_tutor": config.get("reward_shaping", {}).get(
-                    "exploration_tutor", {}
+                "exploration_tutor": (
+                    config.get("reward_shaping", {}).get(
+                        "exploration_tutor", {}
+                    )
                 ),
             }
             # Fix lambda capture issue
-            env_fns.append(lambda kwargs=env_kwargs: MultiAssetChunkedEnv(**kwargs))
-
-            logger.info(
-                f"✅ Configured {worker_id}: {worker_config.get('name', 'N/A')} - {worker_config.get('description', 'N/A')}"
+            env_fns.append(
+                lambda kwargs=env_kwargs: MultiAssetChunkedEnv(**kwargs)
             )
 
-        # Force SubprocVecEnv for true parallelism
-        logger.info("🔄 Using SubprocVecEnv for TRUE PARALLEL execution (4 workers)")
-        env = SubprocVecEnv(env_fns, start_method="spawn")
+            logger.info(
+                f"✅ Configured {worker_id}: "
+                f"{worker_config.get('name', 'N/A')}"
+            )
+
+        # Create vectorized environment based on detection
+        if vec_env_type == "dummy":
+            logger.info(
+                f"🔄 Using DummyVecEnv ({num_envs} worker(s)) - "
+                f"No multiprocessing"
+            )
+            env = DummyVecEnv(env_fns)
+        else:
+            logger.info(
+                f"🔄 Using SubprocVecEnv ({num_envs} workers) - "
+                f"True parallelism"
+            )
+            env = SubprocVecEnv(env_fns, start_method="spawn")
 
         logger.info(
-            f"✅ Created parallel environment with {num_envs} workers matching Optuna configuration"
+            f"✅ Created {vec_env_type} environment with "
+            f"{num_envs} worker(s)"
         )
 
         # Environment already created above with forced SubprocVecEnv
