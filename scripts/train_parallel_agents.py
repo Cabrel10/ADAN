@@ -1,31 +1,28 @@
 import argparse
 import os
 import copy
+import time
 from typing import Optional
 import json
-import time
 from datetime import datetime
+import logging
+import signal
 
 import torch
 import torch.nn as nn
 import numpy as np
 import pandas as pd
-import plotly.graph_objects as go
-import plotly.express as px
 from stable_baselines3 import PPO
-from stable_baselines3.common.vec_env import DummyVecEnv, SubprocVecEnv
+from stable_baselines3.common.vec_env import DummyVecEnv
 from stable_baselines3.common.callbacks import CheckpointCallback, BaseCallback
 
 from adan_trading_bot.common.config_loader import ConfigLoader
 from adan_trading_bot.common.custom_logger import setup_logging
-import logging
 from adan_trading_bot.data_processing.data_loader import ChunkedDataLoader
 from adan_trading_bot.environment.multi_asset_chunked_env import (
     MultiAssetChunkedEnv
 )
 from adan_trading_bot.model.model_ensemble import ModelEnsemble
-import signal
-import time
 
 def linear_schedule(start_val, end_val, progress):
     return start_val + (end_val - start_val) * progress
@@ -832,12 +829,29 @@ def main(
             logger.info("✅ Model loaded from checkpoint successfully")
         else:
             # Créer nouveau modèle
+            # GPU optimization: force CUDA if available
+            device = 'cuda' if torch.cuda.is_available() else 'cpu'
+            logger.info(f"🖥️ Using device: {device}")
+            
+            # Augment batch_size and n_steps for GPU efficiency
+            batch_size = config["agent"]["batch_size"]
+            n_steps = config["agent"]["n_steps"]
+            
+            if device == 'cuda':
+                batch_size = max(256, batch_size * 2)
+                n_steps = max(2048, n_steps * 2)
+                logger.info(
+                    f"📈 GPU detected: batch_size={batch_size}, "
+                    f"n_steps={n_steps}"
+                )
+            
             model = PPO(
                 "MultiInputPolicy",
                 env,
+                device=device,
                 learning_rate=config["agent"]["learning_rate"],
-                n_steps=config["agent"]["n_steps"],
-                batch_size=config["agent"]["batch_size"],
+                n_steps=n_steps,
+                batch_size=batch_size,
                 n_epochs=config["agent"]["n_epochs"],
                 gamma=config["agent"]["gamma"],
                 gae_lambda=config["agent"]["gae_lambda"],
@@ -852,6 +866,12 @@ def main(
                 verbose=1,
                 seed=config["agent"]["seed"],
             )
+            
+            # Enable GPU optimization
+            if device == 'cuda':
+                torch.backends.cudnn.benchmark = True
+                logger.info("✅ cuDNN benchmark enabled for GPU")
+            
             logger.info("✅ New model created successfully")
 
         logger.info("🚀 Starting ADAN model training on FULL train dataset...")
