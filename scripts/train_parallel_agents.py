@@ -751,269 +751,186 @@ def main(
         env = DummyVecEnv(env_fns)
         logger.info(f"✅ Created DummyVecEnv with {num_envs} workers")
 
-        # --- Model Instantiation ---
-        policy_kwargs = copy.deepcopy(
-            config["agent"]["features_extractor_kwargs"]["policy_kwargs"]
-        )
-
-        # Convert activation function string to class
-        activation_fn_map = {
-            "ReLU": nn.ReLU,
-            "Tanh": nn.Tanh,
-            "LeakyReLU": nn.LeakyReLU,
-        }
-        if "activation_fn" in policy_kwargs:
-            activation_fn_str = policy_kwargs["activation_fn"]
-            act_fn_name = activation_fn_str.split(".")[-1]
-            activation_fn = activation_fn_map.get(act_fn_name)
-            if activation_fn:
-                policy_kwargs["activation_fn"] = activation_fn
-            else:
-                policy_kwargs["activation_fn"] = nn.ReLU
-
-        # --- Callbacks with Metrics Monitoring ---
-        callbacks = []
-
-        # Checkpoint callback pour sauvegardes régulières
-        checkpoint_callback = CheckpointCallback(
-            save_freq=config["training"]["checkpointing"]["save_freq"],
-            save_path=checkpoint_dir,
-            name_prefix="adan_model_checkpoint",
-        )
-        callbacks.append(checkpoint_callback)
-
-        # Enhanced metrics monitor for capital tier tracking
-        metrics_monitor = MetricsMonitor(
-            config=config,
-            num_workers=num_envs,
-            log_interval=max(
-                1000, config["training"]["checkpointing"]["save_freq"] // 10
-            ),
-        )
-        callbacks.append(metrics_monitor)
-
-        if fine_tune:
-            start_cfg = {'position_size_pct': 0.65, 'stop_loss_pct': 0.129, 'take_profit_pct': 0.104}
-            target_cfg = {'position_size_pct': 0.15, 'stop_loss_pct': 0.05, 'take_profit_pct': 0.08}
+        # ============================================================================
+        # MULTI-AGENT TRAINING: Train 4 INDEPENDENT models
+        # ============================================================================
+        logger.info("="*80)
+        logger.info("🔥 MULTI-AGENT ARCHITECTURE ACTIVATED")
+        logger.info("Training 4 INDEPENDENT PPO models (w1, w2, w3, w4)")
+        logger.info("Each worker learns separately with unique hyperparameters")
+        logger.info("="*80)
+        
+        trained_models = {}
+        worker_ids = ["w1", "w2", "w3", "w4"]
+        
+        for worker_idx, worker_id in enumerate(worker_ids):
+            logger.info("\n" + "="*80)
+            logger.info(f"🤖 TRAINING WORKER: {worker_id} ({worker_idx+1}/4)")
+            logger.info("="*80)
             
-            adaptive_risk_callback = AdaptiveRiskCallback(
-                total_fine_tune_steps=total_timesteps,
-                start_cfg=start_cfg,
-                target_cfg=target_cfg
+            # Get worker-specific config
+            worker_config = config["workers"][worker_id]
+            agent_config = worker_config.get("agent_config", {})
+            
+            logger.info(f"📋 Worker Config:")
+            logger.info(f"   Learning Rate: {agent_config.get('learning_rate')}")
+            logger.info(f"   N Steps: {agent_config.get('n_steps')}")
+            logger.info(f"   Gamma: {agent_config.get('gamma')}")
+            logger.info(f"   Risk Multiplier: {worker_config.get('risk_multiplier')}")
+            
+            # Create worker-specific environment with SubprocVecEnv
+            from stable_baselines3.common.vec_env import SubprocVecEnv
+            
+            def make_worker_env(env_idx):
+                """Create environment for this worker"""
+                def _init():
+                    wc = copy.deepcopy(worker_config)
+                    data_loader = ChunkedDataLoader(
+                        config=config, worker_config=wc, worker_id=env_idx
+                    )
+                    data = data_loader.load_chunk(0)
+                    
+                    env_worker_config = copy.deepcopy(wc)
+                    env_worker_config["worker_id"] = env_idx
+                    
+                    env_log_dir = os.path.join(
+                        config["paths"]["logs_dir"], f"{worker_id}_env_{env_idx}"
+                    )
+                    os.makedirs(env_log_dir, exist_ok=True)
+                    
+                    return MultiAssetChunkedEnv(
+                        data=data,
+                        timeframes=config["data"]["timeframes"],
+                        window_sizes=config["environment"]["observation"]["window_sizes"],
+                        features_config=config["data"]["features_config"]["timeframes"],
+                        max_steps=config["environment"]["max_steps"],
+                        initial_balance=config["portfolio"]["initial_balance"],
+                        commission=config["environment"]["commission"],
+                        reward_scaling=config["environment"]["reward_scaling"],
+                        enable_logging=True,
+                        log_dir=env_log_dir,
+                        worker_config=env_worker_config,
+                        config=config,
+                        exploration_tutor=config.get("reward_shaping", {}).get("exploration_tutor", {})
+                    )
+                return _init
+            
+            # Create SubprocVecEnv with single environment for this worker
+            # (Can be expanded to multiple if needed, but 1 is cleaner for independent training)
+            worker_env = SubprocVecEnv([make_worker_env(worker_idx)])
+            logger.info(f"✅ Created SubprocVecEnv for {worker_id}")
+            
+            # Policy kwargs
+            policy_kwargs = copy.deepcopy(
+                config["agent"]["features_extractor_kwargs"]["policy_kwargs"]
             )
-            callbacks.append(adaptive_risk_callback)
-            logger.info("✅ Adaptive risk callback enabled for fine-tuning.")
-
-        logger.info("✅ Added MetricsMonitor for capital tier progression tracking")
-
-        # --- Training ---
-        model_path = None
-        if resume:
-            # Chercher le dernier checkpoint
-            checkpoint_files = [
-                f for f in os.listdir(checkpoint_dir) if f.endswith(".zip")
-            ]
-            if checkpoint_files:
-                # Trier par date de modification
-                checkpoint_files.sort(
-                    key=lambda x: os.path.getmtime(os.path.join(checkpoint_dir, x)),
-                    reverse=True,
-                )
-                model_path = os.path.join(checkpoint_dir, checkpoint_files[0])
-                logger.info(f"📂 Resuming from checkpoint: {model_path}")
-            else:
-                logger.warning(
-                    "⚠️ --resume specified but no checkpoint found, starting from scratch"
-                )
-
-        if model_path and os.path.exists(model_path):
-            # Charger depuis checkpoint
-            model = PPO.load(
-                model_path,
-                env=env,
-                tensorboard_log=os.path.join(
-                    config["paths"]["logs_dir"], "tensorboard"
-                ),
+            activation_fn_map = {
+                "ReLU": nn.ReLU,
+                "Tanh": nn.Tanh,
+                "LeakyReLU": nn.LeakyReLU,
+            }
+            if "activation_fn" in policy_kwargs:
+                activation_fn_str = policy_kwargs["activation_fn"]
+                act_fn_name = activation_fn_str.split(".")[-1]
+                activation_fn = activation_fn_map.get(act_fn_name)
+                if activation_fn:
+                    policy_kwargs["activation_fn"] = activation_fn
+                else:
+                    policy_kwargs["activation_fn"] = nn.ReLU
+            
+            # Create worker-specific checkpoint directory
+            worker_checkpoint_dir = os.path.join(checkpoint_dir, worker_id)
+            os.makedirs(worker_checkpoint_dir, exist_ok=True)
+            
+            # Callbacks for this worker
+            worker_callbacks = []
+            worker_checkpoint_callback = CheckpointCallback(
+                save_freq=config["training"]["checkpointing"]["save_freq"],
+                save_path=worker_checkpoint_dir,
+                name_prefix=f"{worker_id}_model",
             )
-            logger.info("✅ Model loaded from checkpoint successfully")
-        else:
-            # Créer nouveau modèle
-            # GPU optimization: force CUDA if available
+            worker_callbacks.append(worker_checkpoint_callback)
+            
+            # Metrics monitor for this worker
+            worker_metrics_monitor = MetricsMonitor(
+                config=config,
+                num_workers=1,  # Only 1 env per worker now
+                log_interval=max(1000, config["training"]["checkpointing"]["save_freq"] // 10),
+            )
+            worker_callbacks.append(worker_metrics_monitor)
+            
+            # GPU setup
             device = 'cuda' if torch.cuda.is_available() else 'cpu'
-            logger.info(f"🖥️ Using device: {device}")
             
-            # Augment batch_size and n_steps for GPU efficiency
-            batch_size = config["agent"]["batch_size"]
-            n_steps = config["agent"]["n_steps"]
+            # Use worker-specific agent_config or fallback to global
+            learning_rate = agent_config.get("learning_rate", config["agent"]["learning_rate"])
+            n_steps = agent_config.get("n_steps", config["agent"]["n_steps"])
+            batch_size = agent_config.get("batch_size", config["agent"]["batch_size"])
+            n_epochs = agent_config.get("n_epochs", config["agent"]["n_epochs"])
+            gamma = agent_config.get("gamma", config["agent"]["gamma"])
+            gae_lambda = agent_config.get("gae_lambda", config["agent"]["gae_lambda"])
+            clip_range = agent_config.get("clip_range", config["agent"]["clip_range"])
+            ent_coef = agent_config.get("ent_coef", config["agent"]["ent_coef"])
             
-            if device == 'cuda':
-                batch_size = max(256, batch_size * 2)
-                n_steps = max(2048, n_steps * 2)
-                logger.info(
-                    f"📈 GPU detected: batch_size={batch_size}, "
-                    f"n_steps={n_steps}"
-                )
-            
-            model = PPO(
+            # Create independent PPO model for this worker
+            worker_model = PPO(
                 "MultiInputPolicy",
-                env,
+                worker_env,
                 device=device,
-                learning_rate=config["agent"]["learning_rate"],
+                learning_rate=learning_rate,
                 n_steps=n_steps,
                 batch_size=batch_size,
-                n_epochs=config["agent"]["n_epochs"],
-                gamma=config["agent"]["gamma"],
-                gae_lambda=config["agent"]["gae_lambda"],
-                clip_range=config["agent"]["clip_range"],
-                ent_coef=config["agent"]["ent_coef"],
+                n_epochs=n_epochs,
+                gamma=gamma,
+                gae_lambda=gae_lambda,
+                clip_range=clip_range,
+                ent_coef=ent_coef,
                 vf_coef=config["agent"]["vf_coef"],
                 max_grad_norm=config["agent"]["max_grad_norm"],
-                tensorboard_log=os.path.join(
-                    config["paths"]["logs_dir"], "tensorboard"
-                ),
+                tensorboard_log=os.path.join(config["paths"]["logs_dir"], f"tensorboard_{worker_id}"),
                 policy_kwargs=policy_kwargs,
                 verbose=1,
-                seed=config["agent"]["seed"],
+                seed=config["agent"]["seed"] + worker_idx,  # Different seed per worker
             )
             
-            # Enable GPU optimization
-            if device == 'cuda':
-                torch.backends.cudnn.benchmark = True
-                logger.info("✅ cuDNN benchmark enabled for GPU")
+            logger.info(f"✅ Created independent PPO model for {worker_id}")
+            logger.info(f"🚀 Starting training for {worker_id}...")
+            logger.info(f"📊 Timesteps: {total_timesteps:,}")
             
-            logger.info("✅ New model created successfully")
-
-        logger.info("🚀 Starting ADAN model training on FULL train dataset...")
-        logger.info(f"📊 Total timesteps: {total_timesteps:,}")
-        logger.info(f"💾 Checkpoints will be saved to: {checkpoint_dir}")
-
-        # Entraînement avec timeout handler si spécifié
-        if timeout:
-            with TimeoutHandler(timeout) as timeout_handler:
-                try:
-                    model.learn(
-                        total_timesteps=total_timesteps,
-                        callback=callbacks if callbacks else None,
-                        progress_bar=progress_bar,
-                        reset_num_timesteps=not resume,
-                    )
-                except TimeoutError:
-                    logger.warning(f"⏰ Training timed out after {timeout}s")
-        else:
-            model.learn(
+            # Train this worker
+            worker_model.learn(
                 total_timesteps=total_timesteps,
-                callback=callbacks if callbacks else None,
+                callback=worker_callbacks,
                 progress_bar=progress_bar,
-                reset_num_timesteps=not resume,
+                reset_num_timesteps=True,
             )
-
-        # --- Log Verification Samples ---
-        logger.info("--- ADAPTIVE RISK LOG SAMPLES ---")
-        if fine_tune and 'adaptive_risk_callback' in locals():
-            for sample in adaptive_risk_callback.risk_log_samples:
-                logger.info(sample)
-        logger.info("---------------------------------")
-
-        # --- Save final models ---
-        logger.info("💾 Saving final models...")
-
-        # Modèle principal PyTorch
-        final_model_path = os.path.join(final_export_dir, "adan_final_model.zip")
-        model.save(final_model_path)
-        logger.info(f"✅ PyTorch model saved: {final_model_path}")
-
-        # Export ONNX pour portabilité et fine-tuning
-        try:
-            onnx_model_path = os.path.join(final_export_dir, "adan_final_model.onnx")
-
-            # Obtenir observation de sample pour export
-            sample_obs = env.observation_space.sample()
-            if hasattr(sample_obs, "shape"):
-                sample_obs = np.expand_dims(sample_obs, axis=0)  # Add batch dimension
-
-            # Export vers ONNX (format portable)
-            logger.info("🔄 Exporting to ONNX format for portability...")
-
-            # Note: L'export ONNX complet nécessiterait une conversion manuelle
-            # Pour l'instant, on sauve les poids dans un format accessible
-            torch.save(
-                {
-                    "model_state_dict": model.policy.state_dict(),
-                    "hyperparameters": {
-                        "learning_rate": config["agent"]["learning_rate"],
-                        "n_steps": config["agent"]["n_steps"],
-                        "batch_size": config["agent"]["batch_size"],
-                        "n_epochs": config["agent"]["n_epochs"],
-                        "gamma": config["agent"]["gamma"],
-                        "ent_coef": config["agent"]["ent_coef"],
-                    },
-                    "fusion_weights": ModelEnsemble().get_fusion_weights(),
-                    "training_config": config,
-                },
-                os.path.join(final_export_dir, "adan_model_for_finetuning.pth"),
-            )
-
-            logger.info(
-                f"✅ Model weights saved for fine-tuning: adan_model_for_finetuning.pth"
-            )
-
-        except Exception as e:
-            logger.warning(f"⚠️ Could not export to ONNX: {e}")
-
-        # --- Generate Performance Reports ---
-        logger.info("📈 Training completed successfully!")
-
-        # Generate portfolio progression curves
-        charts_dir = os.path.join(checkpoint_dir, "progression_charts")
-        metrics_monitor.generate_portfolio_curves(charts_dir)
-
-        # Get final summary with tier progression
-        final_summary = metrics_monitor.get_final_summary()
-
-        # Save training summary
-        summary_path = os.path.join(final_export_dir, "training_summary.json")
-        with open(summary_path, "w") as f:
-            json.dump(final_summary, f, indent=2)
-
-        logger.info(f"📊 FINAL TRAINING SUMMARY:")
-        logger.info(
-            f"⏱️  Duration: {final_summary['training_duration_minutes']:.1f} minutes"
-        )
-        logger.info(f"📈 Total Steps: {final_summary['total_steps']:,}")
-
-        # Report tier progression for each worker
-        enterprise_count = 0
-        for worker_name, worker_data in final_summary["workers"].items():
-            tier_info = worker_data["tier_progression"]
-            logger.info(f"")
-            logger.info(f"🏆 {worker_name.upper()} PERFORMANCE:")
-            logger.info(
-                f"   💰 Balance: ${worker_data['initial_balance']:.2f} → ${worker_data['final_balance']:.2f}"
-            )
-            logger.info(f"   📈 Return: {worker_data['total_return_pct']:+.2f}%")
-            logger.info(f"   🎯 Final Tier: {tier_info['current_tier']}")
-            logger.info(f"   🚀 Tier Progressions: {tier_info['total_progressions']}")
-            logger.info(
-                f"   🏢 Reached Enterprise: {'✅ YES' if tier_info['reached_enterprise'] else '❌ NO'}"
-            )
-            logger.info(f"   📊 Sharpe: {worker_data['final_sharpe']:.4f}")
-            logger.info(f"   📉 Max DD: {worker_data['max_drawdown']:.2f}%")
-            logger.info(f"   🔄 Trades: {worker_data['total_trades']}")
-
-            if tier_info["reached_enterprise"]:
-                enterprise_count += 1
-
-        # Overall success metrics
-        logger.info(f"")
-        logger.info(f"🎯 OVERALL SUCCESS METRICS:")
-        logger.info(f"   🏢 Workers reaching Enterprise tier: {enterprise_count}/4")
-        logger.info(f"   ✅ Training Success Rate: {(enterprise_count / 4) * 100:.1f}%")
-        logger.info(f"   📁 Models location: {final_export_dir}")
-        logger.info(f"   📊 Summary saved: {summary_path}")
-        logger.info(f"   📈 Charts generated: {charts_dir}")
-        logger.info(f"🔧 Models ready for fine-tuning and deployment")
-
-        env.close()
+            
+            # Save final model for this worker
+            worker_final_path = os.path.join(final_export_dir, f"{worker_id}_final.zip")
+            worker_model.save(worker_final_path)
+            logger.info(f"✅ {worker_id} model saved: {worker_final_path}")
+            
+            trained_models[worker_id] = worker_final_path
+            
+            # Cleanup
+            worker_env.close()
+            logger.info(f"🎯 {worker_id} training completed!\n")
+        
+        logger.info("\n" + "="*80)
+        logger.info("🎉 ALL 4 WORKERS TRAINED SUCCESSFULLY")
+        logger.info("="*80)
+        for worker_id, model_path in trained_models.items():
+            logger.info(f"  ✅ {worker_id}: {model_path}")
+        logger.info("="*80)
+        # --- Training Summary ---
+        logger.info("📈 Multi-Agent Training completed successfully!")
+        logger.info(f"📁 Models location: {final_export_dir}")
+        logger.info("🔧 Models ready for ensemble inference")
+        
+        # Close environment if it was created (deprecated code path)
+        if 'env' in locals():
+            env.close()
+        
         return True
 
     except Exception as e:
