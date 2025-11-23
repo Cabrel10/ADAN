@@ -16,6 +16,11 @@ from stable_baselines3 import PPO
 from stable_baselines3.common.vec_env import DummyVecEnv
 from stable_baselines3.common.callbacks import CheckpointCallback, BaseCallback
 
+try:
+    import plotly.graph_objects as go
+except ImportError:
+    go = None
+
 from adan_trading_bot.common.config_loader import ConfigLoader
 from adan_trading_bot.common.custom_logger import setup_logging
 from adan_trading_bot.data_processing.data_loader import ChunkedDataLoader
@@ -492,6 +497,10 @@ class MetricsMonitor(BaseCallback):
 
     def generate_portfolio_curves(self, output_dir):
         """Generate portfolio progression curves for each worker."""
+        if go is None:
+            logging.warning("Plotly not available, skipping curves")
+            return
+
         os.makedirs(output_dir, exist_ok=True)
 
         for worker_id in range(self.num_workers):

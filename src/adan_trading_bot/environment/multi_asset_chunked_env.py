@@ -2766,9 +2766,8 @@ class MultiAssetChunkedEnv(gym.Env):
 
             # Get frequency configuration for trade execution
             frequency_config = self.config.get("trading_rules", {}).get("frequency", {})
-            action_threshold = self.worker_config.get(
-                "min_confidence", frequency_config.get("action_threshold", 0.35)
-            )
+            # FIX: Use action_threshold directly, NOT min_confidence
+            action_threshold = frequency_config.get("action_threshold", 0.001)
 
             # Calcul des paramètres de risque dynamiques via le DBE
             dbe_modulation = self.dbe.compute_dynamic_modulation(

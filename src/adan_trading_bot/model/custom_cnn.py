@@ -11,6 +11,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch import Tensor
+import gymnasium as gym
 
 from stable_baselines3.common.torch_layers import BaseFeaturesExtractor
 
@@ -43,18 +44,27 @@ class MultiScaleResidualBlock(nn.Module):
         self.scales = nn.ModuleList()
 
         # Configuration des branches multi-échelles
-        for scale_cfg in config.get('multi_scale', []):
+        # Configuration des branches multi-échelles
+        num_scales = len(config.get('multi_scale', []))
+        channels_per_scale = out_channels // num_scales
+        
+        for i, scale_cfg in enumerate(config.get('multi_scale', [])):
+            # Adjust channels for the last scale to ensure sum equals out_channels
+            current_out_channels = channels_per_scale
+            if i == num_scales - 1:
+                current_out_channels = out_channels - (channels_per_scale * (num_scales - 1))
+                
             self.scales.append(
                 nn.Sequential(
                     nn.Conv2d(
                         in_channels,
-                        out_channels // len(config['multi_scale']),
+                        current_out_channels,
                         kernel_size=scale_cfg['kernel_size'],
                         padding=scale_cfg['padding'],
                         dilation=scale_cfg.get('dilation', 1),
                         bias=False
                     ),
-                    nn.BatchNorm2d(out_channels // len(config['multi_scale'])),
+                    nn.BatchNorm2d(current_out_channels),
                     nn.LeakyReLU(negative_slope=config.get('leaky_relu_negative_slope', 0.01), inplace=True),
                     nn.Dropout2d(p=config.get('dropout', 0.1))
                 )
@@ -147,7 +157,8 @@ class CustomCNN(BaseFeaturesExtractor):
         features_dim: int = 256,
         cnn_configs: Optional[Dict] = None,
         diagnostics: Optional[Dict] = None,
-        memory_config: Optional[Dict] = None
+        memory_config: Optional[Dict] = None,
+        **kwargs
     ):
         super().__init__(observation_space, features_dim=features_dim)
 
@@ -198,7 +209,24 @@ class CustomCNN(BaseFeaturesExtractor):
         self.attention_maps = []
 
         # Dimensions d'entrée (C, H, W) pour l'image
-        in_channels = observation_space.shape[0]
+        if isinstance(observation_space, gym.spaces.Dict):
+            # Handle Dict space by summing channels of all subspaces
+            in_channels = 0
+            for key, subspace in observation_space.spaces.items():
+                if len(subspace.shape) == 3:
+                    in_channels += subspace.shape[0]
+                elif len(subspace.shape) == 2:
+                    # Treat 2D (H, W) as 1 channel (1, H, W)
+                    in_channels += 1
+                else:
+                    self.logger.warning(f"Skipping non-image subspace {key} with shape {subspace.shape}")
+        else:
+            if len(observation_space.shape) == 3:
+                in_channels = observation_space.shape[0]
+            elif len(observation_space.shape) == 2:
+                in_channels = 1
+            else:
+                in_channels = observation_space.shape[0] # Fallback
 
         # Bloc A: Convolutions séparées par canal
         self.block_a = nn.Sequential(
@@ -237,6 +265,12 @@ class CustomCNN(BaseFeaturesExtractor):
             ])
 
         self.head = nn.Sequential(*head_layers)
+
+        # Update features_dim to match actual output
+        actual_features_dim = head_units[-1]
+        if features_dim != actual_features_dim:
+            self.logger.warning(f"Overriding features_dim {features_dim} with actual {actual_features_dim}")
+            self._features_dim = actual_features_dim
 
         # Initialisation des poids
         self._init_weights()
@@ -386,17 +420,41 @@ class CustomCNN(BaseFeaturesExtractor):
         Passe avant du réseau avec optimisations mémoire.
 
         Args:
-            observations: Tenseur d'entrée de forme (batch_size, C, H, W)
+            observations: Tenseur d'entrée de forme (batch_size, C, H, W) ou Dict de Tenseurs
 
         Returns:
             Tensor: Caractéristiques extraites de forme (batch_size, features_dim)
         """
+        # Handle Dict observations
+        if isinstance(observations, dict):
+            # Concatenate all tensors along channel dimension (dim 1)
+            # Assuming all values are tensors of shape (B, C, H, W) or (B, H, W)
+            tensors = []
+            for key in sorted(observations.keys()): # Sort keys for deterministic order
+                obs = observations[key]
+                # If 2D (B, Features), skip it as it was skipped in init
+                if len(obs.shape) == 2:
+                    continue
+                # If 3D (B, H, W), add channel dim -> (B, 1, H, W)
+                if len(obs.shape) == 3:
+                    obs = obs.unsqueeze(1)
+                tensors.append(obs)
+            
+            if not tensors:
+                raise ValueError("No valid image tensors found in Dict observation")
+                
+            x = torch.cat(tensors, dim=1)
+        else:
+            x = observations
+            if len(x.shape) == 3:
+                x = x.unsqueeze(1)
+
         # Use mixed precision if enabled
         if self._mixed_precision and torch.cuda.is_available():
             with torch.cuda.amp.autocast():
-                return self._forward_impl(observations)
+                return self._forward_impl(x)
         else:
-            return self._forward_impl(observations)
+            return self._forward_impl(x)
 
     def _forward_impl(self, observations: Tensor) -> Tensor:
         """Internal forward implementation."""

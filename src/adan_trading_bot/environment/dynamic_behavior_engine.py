@@ -1,13 +1,36 @@
 import logging
 import time
+from datetime import datetime, timezone
 from functools import lru_cache
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, Union
+from dataclasses import dataclass
 
 import numpy as np
 import yaml
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass
+class DBESnapshot:
+    """Snapshot des décisions du DBE pour logging et historique."""
+    step: int
+    market_regime: str
+    risk_level: float
+    sl_pct: float
+    tp_pct: float
+    position_size_pct: float
+    reward_boost: float = 1.0
+    penalty_inaction: float = 0.0
+    metrics: Dict[str, Any] = None
+    timestamp: datetime = None
+
+    def __post_init__(self):
+        if self.timestamp is None:
+            self.timestamp = datetime.now(timezone.utc)
+        if self.metrics is None:
+            self.metrics = {}
 
 class DynamicBehaviorEngine:
     def __init__(self, config: Dict[str, Any] = None, worker_id: int = 0, **kwargs):
@@ -1689,7 +1712,11 @@ class DynamicBehaviorEngine:
                 penalty_inaction=risk_params.get("penalty_inaction", 0.0),
                 metrics=self.state.get("performance_metrics", {}).copy(),
             )
-            self._log_decision(snapshot, risk_params)
+            try:
+                self._log_decision(snapshot, risk_params)
+            except (AttributeError, TypeError):
+                # Fallback: just log to decision_history
+                self.decision_history.append(snapshot)
 
             return {
                 "feasible": True,

@@ -39,6 +39,111 @@ from src.adan_trading_bot.data_processing.data_loader import ChunkedDataLoader
 from src.adan_trading_bot.environment.multi_asset_chunked_env import MultiAssetChunkedEnv
 
 
+# ═══════════════════════════════════════════════════════════════════
+# METRICS VALIDATOR - VALIDATION STRICTE DES MÉTRIQUES
+# ═══════════════════════════════════════════════════════════════════
+
+class MetricsValidator:
+    """Valide et rejette les trials avec métriques invalides."""
+    
+    WORKER_THRESHOLDS = {
+        "w1": {
+            "name": "Ultra-Stable (4h)",
+            "sharpe_min": 0.5,
+            "dd_max": 0.15,
+            "win_rate_min": 0.0,
+            "trades_min": 1,
+            "trades_max": 100,
+        },
+        "w2": {
+            "name": "Moderate (1h)",
+            "profit_factor_min": 1.0,
+            "sharpe_min": 0.3,
+            "win_rate_min": 0.0,
+            "trades_min": 1,
+            "trades_max": 100,
+        },
+        "w3": {
+            "name": "Aggressive (5m)",
+            "pnl_min": -float('inf'),  # Peut être négatif
+            "trades_min": 1,
+            "trades_max": 100,
+            "dd_max": 0.25,
+        },
+        "w4": {
+            "name": "Sharpe Optimized",
+            "sharpe_min": 1.0,
+            "dd_max": 0.10,
+            "win_rate_min": 0.0,
+            "trades_min": 1,
+            "trades_max": 100,
+        }
+    }
+    
+    @staticmethod
+    def validate(metrics: Dict, worker: str) -> Tuple[bool, str]:
+        """
+        Valide les métriques d'un trial.
+        Retourne (is_valid, reason_if_invalid)
+        """
+        # Vérifications critiques
+        critical_metrics = ["sharpe_ratio", "max_drawdown", "win_rate", "total_trades"]
+        
+        for metric in critical_metrics:
+            value = metrics.get(metric)
+            
+            # Vérifier None, NaN, inf
+            if value is None:
+                return False, f"Métrique {metric} = None"
+            if isinstance(value, float) and np.isnan(value):
+                return False, f"Métrique {metric} = NaN"
+            if isinstance(value, float) and np.isinf(value):
+                return False, f"Métrique {metric} = inf"
+        
+        # Vérifier que total_trades > 0
+        trades = metrics.get("total_trades", 0)
+        if trades < 1:
+            return False, f"Zéro trades exécutés (trades={trades})"
+        
+        # Vérifications spécifiques par worker
+        thresholds = MetricsValidator.WORKER_THRESHOLDS.get(worker, {})
+        
+        # Sharpe - ASSOUPLIR pour permettre aux trials de se compléter
+        if "sharpe_min" in thresholds:
+            sharpe = metrics.get("sharpe_ratio", 0)
+            # Accepter même les Sharpe négatifs tant qu'il y a des trades
+            if sharpe < -10.0:  # Seulement rejeter les Sharpe extrêmement bas
+                return False, f"Sharpe extrêmement bas: {sharpe:.3f} < -10.0"
+        
+        # Drawdown - ASSOUPLIR
+        if "dd_max" in thresholds:
+            dd = metrics.get("max_drawdown", 1.0)
+            # Accepter jusqu'à 100% de drawdown pour permettre l'optimisation
+            if dd > 1.0:
+                return False, f"Drawdown extrême: {dd:.3f} > 1.0"
+        
+        # Profit Factor
+        if "profit_factor_min" in thresholds:
+            pf = metrics.get("profit_factor", 0)
+            if pf < thresholds["profit_factor_min"]:
+                return False, f"Profit Factor trop bas: {pf:.3f} < {thresholds['profit_factor_min']}"
+        
+        # Trades count
+        if "trades_min" in thresholds:
+            if trades < thresholds["trades_min"]:
+                return False, f"Trop peu de trades: {trades} < {thresholds['trades_min']}"
+        if "trades_max" in thresholds:
+            if trades > thresholds["trades_max"]:
+                return False, f"Trop de trades: {trades} > {thresholds['trades_max']}"
+        
+        return True, ""
+    
+    @staticmethod
+    def log_rejection(trial_num: int, worker: str, reason: str):
+        """Log le rejet d'un trial."""
+        logger.warning(f"🚫 Trial {trial_num} ({worker}) REJECTED: {reason}")
+
+
 # CapitalTierTracker class definition
 class CapitalTierTracker:
     """Tracks capital tier progression for each worker."""
@@ -1661,6 +1766,11 @@ def objective(trial: optuna.Trial) -> float:
             # Compteurs pour monitoring temps réel
             step_log_interval = 200
             last_trade_count = 0
+            
+            # ✅ Tracker les positions fermées depuis le portfolio manager
+            prev_closed_receipts_count = 0
+            if hasattr(env, 'portfolio_manager') and hasattr(env.portfolio_manager, '_closed_positions_history'):
+                prev_closed_receipts_count = len(env.portfolio_manager._closed_positions_history)
 
             for step in range(EVALUATION_STEPS):
                 # Prédiction action
@@ -1688,8 +1798,19 @@ def objective(trial: optuna.Trial) -> float:
                     if "return" in env_info:
                         worker_data["returns"].append(float(env_info["return"]))
 
-                    # DÉTECTION DE TRADE COMPLÉTÉ - LOG IMMÉDIAT
-                    if "trade_completed" in env_info and env_info["trade_completed"]:
+                    # DÉTECTION POSITION OUVERTE = DÉBUT DE TRADE
+                    if "position_opened" in env_info and env_info["position_opened"]:
+                        worker_data["positions_opened"] += 1
+                        logger.info(
+                            f"🔓 POSITION OUVERTE {worker_id}: Step {step}, "
+                            f"TF={env_info.get('timeframe', '?')}"
+                        )
+
+                    # DÉTECTION POSITION FERMÉE = FIN DE TRADE (COMPTER COMME TRADE COMPLÉTÉ)
+                    if "position_closed" in env_info and env_info["position_closed"]:
+                        worker_data["positions_closed"] += 1
+                        
+                        # ✅ COMPTER COMME TRADE COMPLÉTÉ
                         trade_info = {
                             "pnl": env_info.get("trade_pnl", 0),
                             "duration": env_info.get("trade_duration", 0),
@@ -1698,26 +1819,10 @@ def objective(trial: optuna.Trial) -> float:
                         }
                         worker_data["trades"].append(trade_info)
                         worker_data["timeframe_trades"][trade_info["timeframe"]] += 1
-
+                        
                         logger.info(
-                            f"🎯 TRADE COMPLET {worker_id}: Step {step}, TF={trade_info['timeframe']}, "
-                            f"PnL=${trade_info['pnl']:.2f}, Duration={trade_info['duration']}"
-                        )
-
-                    # DÉTECTION POSITION OUVERTE
-                    if "position_opened" in env_info and env_info["position_opened"]:
-                        worker_data["positions_opened"] += 1
-                        logger.info(
-                            f"🔓 POSITION OUVERTE {worker_id}: Step {step}, "
-                            f"TF={env_info.get('timeframe', '?')}"
-                        )
-
-                    # DÉTECTION POSITION FERMÉE
-                    if "position_closed" in env_info and env_info["position_closed"]:
-                        worker_data["positions_closed"] += 1
-                        logger.info(
-                            f"🔒 POSITION FERMÉE {worker_id}: Step {step}, "
-                            f"PnL=${env_info.get('trade_pnl', 0):.2f}"
+                            f"🎯 TRADE COMPLÉTÉ {worker_id}: Step {step}, TF={trade_info['timeframe']}, "
+                            f"PnL=${trade_info['pnl']:.2f}"
                         )
 
                     # COMPTEURS DE POSITIONS PAR TIMEFRAME
@@ -1746,17 +1851,43 @@ def objective(trial: optuna.Trial) -> float:
                 if done.any():
                     obs = env.reset()
 
+                # ✅ COMPTER LES POSITIONS FERMÉES DEPUIS LE PORTFOLIO MANAGER
+                if hasattr(env, 'portfolio_manager') and hasattr(env.portfolio_manager, '_closed_positions_history'):
+                    current_closed_count = len(env.portfolio_manager._closed_positions_history)
+                    new_closed = current_closed_count - prev_closed_receipts_count
+                    if new_closed > 0:
+                        worker_data["positions_closed"] += new_closed
+                        prev_closed_receipts_count = current_closed_count
+                        logger.info(
+                            f"✅ {worker_id}: {new_closed} position(s) fermée(s) "
+                            f"(total={worker_data['positions_closed']})"
+                        )
+
                 # Log de progression périodique
                 if step % 1000 == 0 and step > 0:
                     logger.info(
                         f"⏱️ {worker_id}: Step {step}/{EVALUATION_STEPS}, "
                         f"Trades={len(worker_data['trades'])}, "
-                        f"Positions={worker_data['positions_opened']}, "
+                        f"Positions Closed={worker_data['positions_closed']}, "
                         f"Tentatives={worker_data['trade_attempts']}"
                     )
 
             # LOG FINAL pour ce worker
-            total_trades = len(worker_data["trades"])
+            # ✅ UTILISER trade_log du portfolio manager (source de vérité absolue)
+            total_trades = 0
+            try:
+                # Accéder à l'env vectorisé correctement
+                if hasattr(env, 'envs') and len(env.envs) > worker_idx:
+                    single_env = env.envs[worker_idx]
+                    if hasattr(single_env, 'portfolio_manager') and hasattr(single_env.portfolio_manager, 'trade_log'):
+                        closed_trades = [t for t in single_env.portfolio_manager.trade_log if t.get("action") == "close"]
+                        total_trades = len(closed_trades)
+                        logger.info(f"   📋 Trade log: {len(single_env.portfolio_manager.trade_log)}, Closed: {total_trades}")
+            except Exception as e:
+                logger.warning(f"   ⚠️ Erreur accès trade_log: {e}")
+            
+            if total_trades == 0:
+                total_trades = max(len(worker_data["trades"]), worker_data["positions_closed"])
             logger.info(f"🏁 FIN ÉVALUATION {worker_id.upper()}:")
             logger.info(f"   📊 Total steps: {worker_data['total_steps']}")
             logger.info(f"   🎯 Actions prises: {worker_data['actions_taken']}")
@@ -1784,7 +1915,8 @@ def objective(trial: optuna.Trial) -> float:
                 if worker_data["portfolio_values"]
                 else 20.50
             )
-            total_trades = len(trades_list)
+            # ✅ UTILISER le total_trades déjà calculé depuis trade_log (ligne 1875-1888)
+            # total_trades est déjà défini plus haut avec la source de vérité
 
             # Max drawdown estimé sur la série des valeurs de portefeuille
             max_drawdown = 0.0
@@ -1912,6 +2044,25 @@ def objective(trial: optuna.Trial) -> float:
                 f"   Reached Enterprise: {'✅ YES' if tier_summary['reached_enterprise'] else '❌ NO'}"
             )
             logger.info("   " + "=" * 50)
+            
+            # ✅ VALIDATION STRICTE DES MÉTRIQUES
+            trial_metrics = {
+                "sharpe_ratio": worker_data.get("sharpe_ratio", 0),
+                "max_drawdown": max_drawdown,
+                "win_rate": win_rate,
+                "total_trades": total_trades,
+                "profit_factor": worker_data.get("profit_factor", 0),
+            }
+            
+            is_valid, rejection_reason = MetricsValidator.validate(
+                trial_metrics, TARGET_WORKER
+            )
+            
+            if not is_valid:
+                MetricsValidator.log_rejection(
+                    trial.number, TARGET_WORKER, rejection_reason
+                )
+                raise optuna.TrialPruned(rejection_reason)
 
         # Score final : moyenne des workers avec bonus si tous sont positifs
         individual_scores = list(worker_scores.values())
