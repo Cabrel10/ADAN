@@ -4,34 +4,34 @@
   "mode": "paper",
   "pid": 186551,
   "exchange_connected": true,
-  "latency_ms": 16543,
-  "last_update": "13:35:17",
+  "latency_ms": 6809,
+  "last_update": "13:50:08",
   "position": {
     "side": "LONG",
     "qty": 0.00551,
     "entry_price": 88740.67,
-    "unrealized_pnl": -6.65
+    "unrealized_pnl": -9.16
   },
   "recent_trades": [],
   "price_series": [
-    87532.91
+    87077.95
   ],
   "account": {
     "balance": 29.0,
     "initial_balance": 29.0,
     "equity": 29.0,
-    "pnl_absolute": -6.65,
-    "pnl_percent": -1.36,
-    "real_equity": 95042.11,
+    "pnl_absolute": -9.16,
+    "pnl_percent": -1.87,
+    "real_equity": 95039.61,
     "usdt_balance": 94559.8056556,
     "btc_balance": 0.00551,
     "usdt_virtual": 29.0
   },
   "system": {
     "pid": 186551,
-    "latency_ms": 16543,
+    "latency_ms": 6809,
     "mode": "paper",
     "exchange": "binance-testnet"
   },
-  "timestamp": 1764077717.6562307
+  "timestamp": 1764078608.4805217
 }

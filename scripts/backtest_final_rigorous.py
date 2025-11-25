@@ -11,6 +11,7 @@ import sys
 import logging
 import pandas as pd
 import numpy as np
+import pickle
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -25,8 +26,24 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 from stable_baselines3 import PPO
-from adan_trading_bot.environment.multi_asset_chunked_env import MultiAssetChunkedEnv
+from adan_trading_bot.environment.multi_asset_chunked_env import (
+    MultiAssetChunkedEnv
+)
 from adan_trading_bot.common.config_loader import ConfigLoader
+
+
+def save_production_scalers(state_builder):
+    """Sauvegarde les scalers pour la production"""
+    prod_scalers_dir = Path("prod_scalers")
+    prod_scalers_dir.mkdir(exist_ok=True)
+
+    for timeframe, scaler in state_builder.scalers.items():
+        scaler_path = prod_scalers_dir / f"scaler_{timeframe}.pkl"
+        with open(scaler_path, 'wb') as f:
+            pickle.dump(scaler, f)
+        logger.info(f"✅ Saved production scaler: {scaler_path}")
+
+    logger.info(f"✅ Production scalers saved to {prod_scalers_dir}/")
 
 
 class RigorousBacktester:
@@ -438,7 +455,13 @@ def main():
         is_valid = backtest.validate_results()
         
         # Phase 4: Rapport final
-        decision = backtest.generate_report()
+        backtest.generate_report()
+        
+        # Phase 5: Sauvegarder les scalers pour la production
+        logger.info("\n" + "=" * 80)
+        logger.info("SAUVEGARDE DES SCALERS POUR PRODUCTION")
+        logger.info("=" * 80)
+        save_production_scalers(backtest.env.state_builder)
         
         logger.info("\n" + "=" * 80)
         logger.info("BACKTEST TERMINÉ")

@@ -440,42 +440,39 @@ class StateBuilder:
         Cela évite le 'distribution shift' causé par le refit des scalers sur
         des données live qui ont une distribution différente du training.
         """
-        import joblib
-        import os
-        
-        scalers_path = './models/training_scalers.pkl'
+        import pickle
+        from pathlib import Path
         
         if not hasattr(self, 'scalers'):
             self.scalers = {}
         
-        if os.path.exists(scalers_path):
+        # Essayer d'abord prod_scalers/ (nouveau format)
+        prod_scalers_dir = Path("prod_scalers")
+        if prod_scalers_dir.exists():
             try:
-                training_scalers = joblib.load(scalers_path)
-                self.scalers = training_scalers
-                logger.info("=" * 60)
-                logger.info("🎯 TRAINING SCALERS LOADED - Distribution Preserved")
-                logger.info("=" * 60)
+                loaded_count = 0
+                for timeframe in ['5m', '1h', '4h']:
+                    scaler_path = prod_scalers_dir / f"scaler_{timeframe}.pkl"
+                    if scaler_path.exists():
+                        with open(scaler_path, 'rb') as f:
+                            self.scalers[timeframe] = pickle.load(f)
+                        logger.info(f"✅ Loaded production scaler: {timeframe}")
+                        loaded_count += 1
                 
-                for tf, scaler in self.scalers.items():
-                    if scaler is not None:
-                        logger.info(f"   ✅ {tf}: {type(scaler).__name__} (from training)")
-                    else:
-                        logger.warning(f"   ❌ {tf}: Scaler is None")
-                
-                logger.info("=" * 60)
-                
-                # Set flag pour que fit_scalers sache
-                self.scalers_loaded_from_training = True
-                        
+                if loaded_count > 0:
+                    logger.info("=" * 60)
+                    logger.info("🎯 PRODUCTION SCALERS LOADED - Distribution Preserved")
+                    logger.info("=" * 60)
+                    self.scalers_loaded_from_training = True
+                    return
             except Exception as e:
-                logger.error(f"❌ Error loading training scalers: {e}")
-                logger.error("   Falling back to fit-on-live behavior")
-                self.scalers = {}
-        else:
-            logger.warning(f"⚠️  Training scalers not found at {scalers_path}")
-            logger.warning("   Will fit scalers on live data (may cause distribution shift)")
-            self.scalers = {}
-            self.scalers_loaded_from_training = False
+                logger.error(f"❌ Error loading production scalers: {e}")
+        
+        # Fallback: chercher les scalers du backtest
+        logger.warning(f"⚠️ Production scalers not found in {prod_scalers_dir}")
+        logger.warning("   Will fit scalers on live data (may cause distribution shift)")
+        self.scalers = {}
+        self.scalers_loaded_from_training = False
 
     def _init_scalers(self):
         """
