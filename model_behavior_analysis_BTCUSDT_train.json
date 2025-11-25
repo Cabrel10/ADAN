@@ -1,0 +1,9 @@
+{
+  "timestamp": "2025-11-25T13:38:14.400279",
+  "model_path": "checkpoints_final/adan_model_checkpoint_640000_steps.zip",
+  "total_actions_analyzed": 375,
+  "bias_metrics": {
+    "buy_bias": 100.0,
+    "sell_bias": 0.0,
+    "hold_bias": 0.0,
+    "action_variance": 

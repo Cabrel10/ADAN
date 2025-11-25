@@ -871,51 +871,46 @@ feature_engineering:
     timeframes:
       1h:
         momentum:
-        - rsi_14
-        - stoch_k_14_3_3
-        - stoch_d_14_3_3
+        - rsi_21
+        - fib_ratio
         trend:
-        - macd_hist_12_26_9
+        - macd_21_42_9
         - adx_14
-        - ema_26
-        - ema_50
+        - ema_50_ratio
+        - ichimoku_base
+        - price_ema_ratio_50
         volatility:
-        - bb_upper
-        - bb_middle
-        - bb_lower
+        - bb_width_20_2
         volume:
-        - volume
+        - obv_ratio_20
       4h:
         momentum:
-        - rsi_14
-        - stoch_k_14_3_3
-        - stoch_d_14_3_3
+        - rsi_28
+        - market_structure
         trend:
-        - macd_hist_12_26_9
-        - adx_14
-        - ema_50
-        - ema_200
-        - sma_200
+        - macd_26_52_18
+        - supertrend_10_3
+        - ema_100_ratio
+        - pivot_level
         volatility:
-        - atr_14
+        - donchian_width_20
+        - volatility_ratio_14_50
         volume:
-        - obv
+        - volume_sma_20_ratio
       5m:
         momentum:
         - rsi_14
         - stoch_k_14_3_3
-        - stoch_d_14_3_3
+        - price_action
         trend:
-        - macd_hist_12_26_9
-        - ema_5
-        - ema_12
+        - macd_12_26_9
+        - ema_20_ratio
+        - vwap_ratio
         volatility:
+        - bb_percent_b_20_2
         - atr_14
-        - bb_upper
-        - bb_middle
-        - bb_lower
         volume:
-        - volume
+        - volume_ratio_20
   performance:
     cache_indicators: true
     chunk_size: 1000

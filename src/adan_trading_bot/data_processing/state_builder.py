@@ -242,8 +242,14 @@ class StateBuilder:
         self._scaler_cache_misses = 0
         self._max_scaler_cache_size = 100  # Maximum number of scalers to cache
 
-        # Initialisation des scalers
-        self._init_scalers()
+        # 🔧 FIX CRITIQUE: Charger les scalers d'entraînement AVANT l'initialisation
+        self._load_training_scalers()
+        
+        # Initialisation des scalers (seulement si pas déjà chargés)
+        if not self.scalers or not any(self.scalers.values()):
+            self._init_scalers()
+        else:
+            logger.info("✅ Using loaded training scalers - skipping _init_scalers")
 
         # Calcul de la taille totale de l'observation après flatten
         market_obs_size = sum(self.window_sizes[tf] * self.max_features for tf in self.timeframes)
@@ -427,6 +433,50 @@ class StateBuilder:
             }
         return self._performance_metrics
 
+    def _load_training_scalers(self):
+        """
+        🔧 FIX CRITIQUE: Charge les scalers sauvegardés pendant l'entraînement.
+        
+        Cela évite le 'distribution shift' causé par le refit des scalers sur
+        des données live qui ont une distribution différente du training.
+        """
+        import joblib
+        import os
+        
+        scalers_path = './models/training_scalers.pkl'
+        
+        if not hasattr(self, 'scalers'):
+            self.scalers = {}
+        
+        if os.path.exists(scalers_path):
+            try:
+                training_scalers = joblib.load(scalers_path)
+                self.scalers = training_scalers
+                logger.info("=" * 60)
+                logger.info("🎯 TRAINING SCALERS LOADED - Distribution Preserved")
+                logger.info("=" * 60)
+                
+                for tf, scaler in self.scalers.items():
+                    if scaler is not None:
+                        logger.info(f"   ✅ {tf}: {type(scaler).__name__} (from training)")
+                    else:
+                        logger.warning(f"   ❌ {tf}: Scaler is None")
+                
+                logger.info("=" * 60)
+                
+                # Set flag pour que fit_scalers sache
+                self.scalers_loaded_from_training = True
+                        
+            except Exception as e:
+                logger.error(f"❌ Error loading training scalers: {e}")
+                logger.error("   Falling back to fit-on-live behavior")
+                self.scalers = {}
+        else:
+            logger.warning(f"⚠️  Training scalers not found at {scalers_path}")
+            logger.warning("   Will fit scalers on live data (may cause distribution shift)")
+            self.scalers = {}
+            self.scalers_loaded_from_training = False
+
     def _init_scalers(self):
         """
         Initialize scalers for each timeframe with advanced normalization.
@@ -500,6 +550,12 @@ class StateBuilder:
             data: Dictionary mapping timeframes to DataFrames
         """
         if not self.normalize:
+            return
+
+        # 🔧 FIX: Ne PAS refitter si les scalers d'entraînement sont déjà chargés
+        if getattr(self, 'scalers_loaded_from_training', False):
+            logger.info("✅ Training scalers already loaded - SKIPPING fit_scalers()")
+            logger.info("   Using pre-fitted scalers from training to preserve distribution")
             return
 
         logger.info("Fitting scalers on provided data...")

@@ -81,11 +81,25 @@ class EnsembleManager:
         # Each model predicts
         for worker_id, model in self.models.items():
             action, _states = model.predict(observation, deterministic=deterministic)
-            predictions[worker_id] = action[0] if action.ndim > 0 else action
+            
+            # Reduce vector to scalar: Extract BTC Signal (Index 0)
+            # The environment uses a 15D vector (5 assets * 3 params).
+            # Index 0 = Asset 0 (BTC) Main Decision.
+            raw_action = action[0] if action.ndim > 0 else action
+            
+            if isinstance(raw_action, np.ndarray) and raw_action.size == 15:
+                # Correctly extract the primary signal for the first asset
+                predictions[worker_id] = float(raw_action[0])
+            elif isinstance(raw_action, np.ndarray) and raw_action.size > 1:
+                # Fallback for other vector sizes (unexpected but safe)
+                predictions[worker_id] = float(raw_action[0])
+            else:
+                predictions[worker_id] = float(raw_action)
         
         # Aggregate votes based on strategy
         if self.strategy == "median":
-            final_action = np.median(list(predictions.values()))
+            vals = list(predictions.values())
+            final_action = np.median(vals)
         
         elif self.strategy == "mean":
             final_action = np.mean(list(predictions.values()))
