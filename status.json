@@ -2,36 +2,36 @@
   "symbol": "BTC/USDT",
   "exchange": "binance-testnet",
   "mode": "paper",
-  "pid": 186551,
+  "pid": 282056,
   "exchange_connected": true,
-  "latency_ms": 5785,
-  "last_update": "14:15:07",
+  "latency_ms": 4851,
+  "last_update": "14:35:06",
   "position": {
     "side": "LONG",
     "qty": 0.00551,
     "entry_price": 88740.67,
-    "unrealized_pnl": -9.69
+    "unrealized_pnl": -8.79
   },
   "recent_trades": [],
   "price_series": [
-    86982.5
+    87144.83
   ],
   "account": {
     "balance": 29.0,
     "initial_balance": 29.0,
     "equity": 29.0,
-    "pnl_absolute": -9.69,
-    "pnl_percent": -1.98,
-    "real_equity": 95039.08,
+    "pnl_absolute": -8.79,
+    "pnl_percent": -1.8,
+    "real_equity": 95039.97,
     "usdt_balance": 94559.8056556,
     "btc_balance": 0.00551,
     "usdt_virtual": 29.0
   },
   "system": {
-    "pid": 186551,
-    "latency_ms": 5785,
+    "pid": 282056,
+    "latency_ms": 4851,
     "mode": "paper",
     "exchange": "binance-testnet"
   },
-  "timestamp": 1764080107.3561134
+  "timestamp": 1764081306.9325125
 }

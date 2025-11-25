@@ -442,12 +442,27 @@ class StateBuilder:
         """
         import pickle
         from pathlib import Path
+        import os
         
         if not hasattr(self, 'scalers'):
             self.scalers = {}
         
         # Essayer d'abord prod_scalers/ (nouveau format)
-        prod_scalers_dir = Path("prod_scalers")
+        # Chercher depuis le répertoire courant ET depuis le parent
+        possible_paths = [
+            Path("prod_scalers"),
+            Path(__file__).parent.parent.parent / "prod_scalers",
+            Path(os.getcwd()) / "prod_scalers"
+        ]
+        
+        prod_scalers_dir = None
+        for path in possible_paths:
+            if path.exists():
+                prod_scalers_dir = path
+                break
+        
+        if prod_scalers_dir is None:
+            prod_scalers_dir = Path("prod_scalers")
         if prod_scalers_dir.exists():
             try:
                 loaded_count = 0
