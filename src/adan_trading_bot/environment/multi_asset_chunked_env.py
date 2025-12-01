@@ -426,7 +426,8 @@ class MultiAssetChunkedEnv(gym.Env):
         self.logger.debug(f"[DEBUG_CONFIG] Worker {self.worker_id} force_trade_steps_by_tf: {self.force_trade_steps_by_tf}")
 
         # Daily caps for forced trades (worker-specific, then global fallback)
-        self.daily_max_forced_trades = self.worker_config.get("daily_max_forced_trades", 10) # Default to 10
+        self.daily_max_forced_trades = self.worker_config.get("daily_max_forced_trades", 
+                                       self.worker_config.get("trading_rules", {}).get("daily_max_forced_trades", 10)) # Default to 10
         self.daily_forced_trades_count = 0 # Counter for current day
 
         # --- CORRECTION ---
@@ -1905,39 +1906,40 @@ class MultiAssetChunkedEnv(gym.Env):
         """Calculates and sets the starting step within a new chunk to account for indicator warmup."""
         try:
             # Use a more conservative warmup period to avoid index out of bounds
-            warmup = 200
-            min_len = None
+            warmup = getattr(self, "warmup_period", 200)  # Default to 200 if not set
 
+            # CRITICAL FIX: Calculate safe start step based on SMALLEST timeframe
+            # Prevents out-of-bounds reads for short timeframes (e.g. 4h with 111 rows)
+            min_chunk_length = float('inf')
             if isinstance(self.current_data, dict) and self.current_data:
-                lengths = []
-                for asset_dict in self.current_data.values():
-                    if not isinstance(asset_dict, dict):
+                for asset_data in self.current_data.values():
+                    if not isinstance(asset_data, dict):
                         continue
                     for tf in getattr(self, "timeframes", []):
-                        df = asset_dict.get(tf)
+                        df = asset_data.get(tf)
                         if isinstance(df, pd.DataFrame):
-                            lengths.append(len(df))
-                if lengths:
-                    min_len = min(lengths)
-
-            if min_len is not None and min_len > 50:
-                # Be more conservative: ensure we leave at least 50 steps of buffer
-                # and never go beyond 80% of the chunk size
-                max_safe_step = min(min_len - 50, int(min_len * 0.8))
-                self.step_in_chunk = max(1, min(warmup, max_safe_step))
-
-                logger.info(
-                    f"Repositioning to step {self.step_in_chunk} in new chunk "
-                    f"(warmup={warmup}, min_len={min_len}, max_safe={max_safe_step})"
-                )
-            else:
-                # For very small chunks, start near the beginning
-                self.step_in_chunk = (
-                    min(10, min_len - 5) if min_len and min_len > 10 else 1
-                )
-                logger.warning(
-                    f"Small chunk detected (min_len={min_len}), starting at step {self.step_in_chunk}"
-                )
+                            min_chunk_length = min(min_chunk_length, len(df))
+            
+            # Convert to int and ensure valid
+            if min_chunk_length == float('inf') or min_chunk_length < 10:
+                min_chunk_length = 10  # Fallback minimum
+                logger.warning(f"Very small or missing chunk, using fallback min_len={min_chunk_length}")
+            
+            #  Safety margin: Use only 20% of chunk length to be VERY conservative
+            # For 111-row chunk, this gives us step ~22, well within safe bounds
+            safe_max_start = max(1, int(min_chunk_length * 0.2))
+            
+            # Use minimum of warmup_period and safe max
+            # This ensures we never start beyond available data and stay very conservative
+            self.step_in_chunk = min(warmup, safe_max_start)
+            
+            # Additional safety: ensure we don't start at 0 
+            self.step_in_chunk = max(1, self.step_in_chunk)
+            
+            logger.info(
+                f"Repositioning to step {self.step_in_chunk} in new chunk "
+                f"(warmup={warmup}, min_len={int(min_chunk_length)}, max_safe={safe_max_start})"
+            )
 
         except Exception as e:
             logger.warning(f"Failed to set warmup step_in_chunk: {e}")
@@ -2052,18 +2054,38 @@ class MultiAssetChunkedEnv(gym.Env):
             return {"5m": False, "1h": False, "4h": False}
 
     def reset(self, *, seed=None, options=None):
-        """Reset the environment to start a new episode.
-
-        Args:
-            seed: Optional seed for the random number generator
-            options: Additional options for reset
-
-        Returns:
-            tuple: (observation, info) containing the initial observation and info
         """
-        # DIAGNOSTIC: Tracer les appels à reset
+        Resets the environment to an initial state.
+        Loads a new random chunk and repositions within it.
+        """
+        # CRITICAL FIX: Close all open positions before reset to ensure:
+        # 1. PnL is realized (not left as unrealized)
+        # 2. Trade counts are correct
+        # 3. Metrics are accurate
+        if hasattr(self, 'portfolio_manager') and self.portfolio_manager is not None:
+            try:
+                # Get current positions before closing
+                if hasattr(self.portfolio_manager, 'positions') and self.portfolio_manager.positions:
+                    logger.info(f"[EPISODE_END] Closing {len(self.portfolio_manager.positions)} open position(s) before reset")
+                    
+                    # Close each position
+                    current_prices = self._get_current_prices() if hasattr(self, '_get_current_prices') else {}
+                    for asset in list(self.portfolio_manager.positions.keys()):
+                        if asset in current_prices and current_prices[asset]:
+                            try:
+                                self.portfolio_manager.close_position(
+                                    asset=asset,
+                                    price=current_prices[asset],
+                                    reason="EPISODE_END"
+                                )
+                                logger.info(f"[EPISODE_END] Closed position for {asset}")
+                            except Exception as e:
+                                logger.warning(f"Failed to close position for {asset}: {e}")
+            except Exception as e:
+                logger.warning(f"Error closing positions before reset: {e}")
+        
         self.logger.critical(
-            f"🔄 RESET appelé pour ENV_ID={getattr(self, 'env_instance_id', 'UNKNOWN')}, Worker={getattr(self, 'worker_id', 'UNKNOWN')}, DBE_ID={id(self.dbe) if hasattr(self, 'dbe') else 'NONE'}"
+            f"🔄 RESET appelé pour ENV_ID={getattr(self, 'env_instance_id', 'UNKNOWN')}, Worker={getattr(self, 'worker_id', 'N/A')}, DBE_ID={id(getattr(self, 'dbe', None)) if hasattr(self, 'dbe') else 'NONE'}"
         )
         super().reset(seed=seed)
 
@@ -5172,15 +5194,15 @@ class MultiAssetChunkedEnv(gym.Env):
                 desired_position_size=1.0,
             ) if hasattr(self, "dbe") else {"feasible": False, "reason": "DBE unavailable"}
 
+            self.logger.debug(f"DEBUG_OPTUNA: DBE params: {dbe_params}")
+
             if not dbe_params.get("feasible", False):
                 self.logger.error(f"❌ [FORCE_TRADE] Aborted for {asset_to_trade} on {timeframe}. Reason: {dbe_params.get('reason', 'DBE calculation failed')}")
                 return realized_pnl
 
             pos_usdt = float(dbe_params.get("position_size_usdt", 0.0))
+            self.logger.debug(f"DEBUG_OPTUNA: Calculated pos_usdt: {pos_usdt}")
 
-            # Increment daily forced trade count if trade is successfully opened
-            self.daily_forced_trades_count += 1
-            self.logger.info(f"[FORCE_TRADE_COUNT] Worker {self.worker_id}: Daily forced trades: {self.daily_forced_trades_count}/{self.daily_max_forced_trades}")
             min_order_value = self.config.get("trading_rules", {}).get("min_order_value_usdt", 11.0)
 
             # Clamp to minimum order value if DBE suggests below threshold and equity allows
@@ -5232,7 +5254,9 @@ class MultiAssetChunkedEnv(gym.Env):
 
             # Enforce frequency limits for forced trades as well
             try:
-                if not self.can_open_trade(timeframe):
+                can_trade_result = self.can_open_trade(timeframe)
+                self.logger.debug(f"DEBUG_OPTUNA: can_open_trade({timeframe}) returned {can_trade_result}")
+                if not can_trade_result:
                     self.smart_logger.info(
                         f"[FORCE_TRADE_GATE] Blocked by limits for TF={timeframe} (daily_total={self.positions_count.get('daily_total', 0)}, tf_count={self.positions_count.get(timeframe, 0)})",
                         rotate=True,
@@ -5243,6 +5267,7 @@ class MultiAssetChunkedEnv(gym.Env):
                 # Fail-safe: if gating raises, do not force open
                 return realized_pnl
 
+            self.logger.debug(f"DEBUG_OPTUNA: Calling open_position for {asset_to_trade}")
             receipt = self.portfolio.open_position(
                 asset=asset_to_trade.upper(),
                 price=price,
@@ -5255,6 +5280,8 @@ class MultiAssetChunkedEnv(gym.Env):
                 current_step=self.current_step,
                 risk_horizon=0.0,
             )
+            self.logger.debug(f"DEBUG_OPTUNA: open_position receipt: {receipt}")
+            
             # Robust success detection: receipt OK OR open positions increased OR matching freshly opened position
             success = False
             if isinstance(receipt, dict) and str(receipt.get("status", "")).upper() in {"OPEN", "OPENED", "SUCCESS"}:
@@ -5280,12 +5307,33 @@ class MultiAssetChunkedEnv(gym.Env):
                             break
 
             if success:
+                # Increment daily forced trade count if trade is successfully opened
+                self.daily_forced_trades_count += 1
+                self.logger.info(f"[FORCE_TRADE_COUNT] Worker {self.worker_id}: Daily forced trades: {self.daily_forced_trades_count}/{self.daily_max_forced_trades}")
+                
                 self.logger.warning(
                     f"✅ [FORCE_TRADE] Success for {asset_to_trade} on {timeframe} for Worker {self.worker_id}."
                 )
+                
+                # Synchronize ALL counters (timeframe + global)
                 self.positions_count[timeframe] = self.positions_count.get(timeframe, 0) + 1
+                self.positions_count['daily_total'] = self.positions_count.get('daily_total', 0) + 1  # FIX: Increment global counter
                 self.last_trade_steps_by_tf[timeframe] = self.current_step
                 self.last_trade_step = self.current_step
+                
+                # Also notify freq_controller if RealisticTradingEnv is being used
+                if hasattr(self, 'freq_controller') and self.freq_controller:
+                    try:
+                        self.freq_controller.record_trade(
+                            asset=asset_to_trade,
+                            current_step=self.current_step,
+                            timeframe=timeframe,
+                            is_forced=True
+                        )
+                        self.logger.debug(f"[FORCE_TRADE_SYNC] Notified freq_controller for {asset_to_trade}")
+                    except Exception as e:
+                        self.logger.warning(f"[FORCE_TRADE_SYNC] Failed to notify freq_controller: {e}")
+                
                 return realized_pnl
             else:
                 _err = (receipt.get("message", "No receipt") if isinstance(receipt, dict) else "No receipt")
@@ -5326,6 +5374,8 @@ class MultiAssetChunkedEnv(gym.Env):
                 "Portfolio manager non initialisé, impossible d'exécuter le trade."
             )
             return 0.0, 0, 0
+            
+        # self.logger.info(f"DEBUG: Entering _execute_trades. Timeframes: {self.timeframes}")
 
         # Sélection cyclique de la timeframe basée sur le step pour forcer diversification
         # Chaque worker utilise un offset différent pour varier
@@ -5683,17 +5733,26 @@ class MultiAssetChunkedEnv(gym.Env):
 
                             trade_executed_this_step = True
                             # Update frequency counters per timeframe using current_timeframe_for_trade
+                            # CRITICAL FIX: Only increment counts for NATURAL trades to avoid deadlock
+                            if not force_trade:
+                                tf = getattr(self, "current_timeframe_for_trade", "5m")
+                                try:
+                                    if tf in self.positions_count:
+                                        self.positions_count[tf] = (
+                                            int(self.positions_count.get(tf, 0)) + 1
+                                        )
+                                    # Always update daily total
+                                    self.positions_count["daily_total"] = (
+                                        int(self.positions_count.get("daily_total", 0)) + 1
+                                    )
+                                except Exception as freq_e:
+                                    self.logger.debug(
+                                        f"[FREQUENCY] Failed to update frequency counters: {freq_e}"
+                                    )
+                            
+                            # Update last trade timestamp for tf (for both natural and force trades)
                             tf = getattr(self, "current_timeframe_for_trade", "5m")
                             try:
-                                if tf in self.positions_count:
-                                    self.positions_count[tf] = (
-                                        int(self.positions_count.get(tf, 0)) + 1
-                                    )
-                                # Always update daily total
-                                self.positions_count["daily_total"] = (
-                                    int(self.positions_count.get("daily_total", 0)) + 1
-                                )
-                                # Update last trade timestamp for tf
                                 if isinstance(
                                     current_timestamp, (pd.Timestamp, datetime)
                                 ):
@@ -5792,7 +5851,9 @@ class MultiAssetChunkedEnv(gym.Env):
     def _should_force_trade(self, timeframe: str) -> bool:
         """Détermine si un trade doit être forcé pour la timeframe donnée."""
         if not self.can_open_trade(timeframe):
+            self.logger.warning(f"DEBUG_OPTUNA: can_open_trade({timeframe}) returned False")
             return False
+        # self.logger.warning(f"DEBUG_OPTUNA: can_open_trade({timeframe}) returned True")
 
         force_cfg = (
             self.config.get("trading_rules", {})
@@ -5834,7 +5895,10 @@ class MultiAssetChunkedEnv(gym.Env):
         except Exception:
             pass
         # Default behavior when no cooldown configured: inactivity/near-end rules
-        return steps_since >= force_after or (near_chunk_end and steps_since > max(20, force_after // 2))
+        result = steps_since >= force_after or (near_chunk_end and steps_since > max(20, force_after // 2))
+        if not result and steps_since > force_after:
+             self.logger.warning(f"DEBUG_OPTUNA: _should_force_trade({timeframe}) -> {result} (steps_since={steps_since}, force_after={force_after}, next_allowed={next_allowed})")
+        return result
 
     def _log_agent_thought(
         self,
@@ -5977,6 +6041,7 @@ class MultiAssetChunkedEnv(gym.Env):
         tf_max = worker_freq_config.get("daily_max_by_tf", {}).get(tf, global_freq_config.get("max_positions", {}).get(tf, float('inf')))
 
         if daily_total >= daily_max:
+            self.logger.warning(f"DEBUG_OPTUNA: can_open_trade blocked by daily_max ({daily_total} >= {daily_max})")
             self.smart_logger.warning(
                 f"[TRADE BLOCKED] Worker {self.worker_id} | TF {tf} | Reason: daily_max_total={daily_max} reached (current: {daily_total})",
                 rotate=True,

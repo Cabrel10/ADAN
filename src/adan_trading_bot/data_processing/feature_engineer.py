@@ -409,7 +409,7 @@ class FeatureEngineer:
             except Exception as e:
                 logger.warning(f"Failed to calculate volume_ratio_20: {e}")
 
-        # 10. VWAP Ratio (Close / VWAP)
+        # 10. V WAP Ratio (Close / VWAP) - CRITICAL FEATURE
         if 'vwap_ratio' not in df.columns:
             try:
                 # VWAP requires DatetimeIndex
@@ -418,17 +418,38 @@ class FeatureEngineer:
                     temp_df['timestamp'] = pd.to_datetime(temp_df['timestamp'])
                     temp_df.set_index('timestamp', inplace=True)
                     vwap = temp_df.ta.vwap()
-                    if vwap is not None:
+                    if vwap is not None and len(vwap) > 0:
                         df['vwap_ratio'] = df['close'] / vwap.values
+                    else:
+                        # Fallback: Simple volume-weighted average
+                        cum_vol_price = (df['volume'] * (df['high'] + df['low'] + df['close']) / 3).cumsum()
+                        cum_vol = df['volume'].cumsum()
+                        vwap_fallback = cum_vol_price / cum_vol.replace(0, 1)
+                        df['vwap_ratio'] = df['close'] / vwap_fallback
+                        logger.info("Using fallback VWAP calculation")
+                else:
+                    # No timestamp - use simple VWAP
+                    cum_vol_price = (df['volume'] * (df['high'] + df['low'] + df['close']) / 3).cumsum()
+                    cum_vol = df['volume'].cumsum()
+                    vwap_fallback = cum_vol_price / cum_vol.replace(0, 1)
+                    df['vwap_ratio'] = df['close'] / vwap_fallback
+                    logger.info("Using simple VWAP (no timestamp)")
             except Exception as e:
-                logger.warning(f"Failed to calculate vwap_ratio: {e}")
+                logger.error(f"CRITICAL: vwap_ratio calculation failed: {e}")
+                # MANDATORY FALLBACK - cannot leave this missing
+                df['vwap_ratio'] = 1.0  # Neutral ratio
+                logger.warning("Using neutral vwap_ratio=1.0 as last resort")
 
-        # 11. Price Action (Close - Open) / Open
+
+        # 11. Price Action (Close - Open) / Open - CRITICAL FEATURE
         if 'price_action' not in df.columns:
             try:
-                df['price_action'] = (df['close'] - df['open']) / df['open']
+                df['price_action'] = (df['close'] - df['open']) / df['open'].replace(0, 1e-9)
             except Exception as e:
-                logger.warning(f"Failed to calculate price_action: {e}")
+                logger.error(f"CRITICAL: price_action calculation failed: {e}")
+                df['price_action'] = 0.0  # Neutral (no movement)
+                logger.warning("Using neutral price_action=0.0 as fallback")
+
 
         # Normalize column names to match StateBuilder expectations
         # 1. Lowercase everything
@@ -532,15 +553,15 @@ class FeatureEngineer:
         TRAIN_COLUMNS = {
             '5m': ['open', 'high', 'low', 'close', 'volume', 'rsi_14', 
                    'macd_12_26_9',
-                   'bb_percent_b_20_2', 'atr_14', 'volume_ratio_20', 
+                   'bb_percent_b_20_2', 'atr_14', 'atr_20', 'atr_50', 'volume_ratio_20', 
                    'ema_20_ratio', 'stoch_k_14_3_3', 'vwap_ratio', 'price_action'],
             '1h': ['open', 'high', 'low', 'close', 'volume', 'rsi_21',
                    'macd_21_42_9',
-                   'bb_width_20_2', 'adx_14', 'obv_ratio_20', 'ema_50_ratio',
+                   'bb_width_20_2', 'adx_14', 'atr_20', 'atr_50', 'obv_ratio_20', 'ema_50_ratio',
                    'ichimoku_base', 'fib_ratio', 'price_ema_ratio_50'],
             '4h': ['open', 'high', 'low', 'close', 'volume', 'rsi_28',
                    'macd_26_52_18',
-                   'supertrend_10_3', 'volume_sma_20_ratio', 'ema_100_ratio',
+                   'supertrend_10_3', 'atr_20', 'atr_50', 'volume_sma_20_ratio', 'ema_100_ratio',
                    'pivot_level', 'donchian_width_20', 'market_structure',
                    'volatility_ratio_14_50']
         }

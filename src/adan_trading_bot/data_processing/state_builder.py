@@ -901,7 +901,8 @@ class StateBuilder:
                         logger.warning(
                             f"Feature '{fl}' not found in {tf} data, adding zeros"
                         )
-                        window_data[fl] = 0.0
+                        window_data = window_data.copy()
+                    window_data.loc[:, fl] = 0.0
 
                 # Select only the required features in the correct order
                 try:

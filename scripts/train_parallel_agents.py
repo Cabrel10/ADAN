@@ -13,7 +13,7 @@ import torch.nn as nn
 import numpy as np
 import pandas as pd
 from stable_baselines3 import PPO
-from stable_baselines3.common.vec_env import DummyVecEnv
+from stable_baselines3.common.vec_env import DummyVecEnv, VecNormalize
 from stable_baselines3.common.callbacks import CheckpointCallback, BaseCallback
 
 try:
@@ -24,10 +24,11 @@ except ImportError:
 from adan_trading_bot.common.config_loader import ConfigLoader
 from adan_trading_bot.common.custom_logger import setup_logging
 from adan_trading_bot.data_processing.data_loader import ChunkedDataLoader
-from adan_trading_bot.environment.multi_asset_chunked_env import (
-    MultiAssetChunkedEnv
+from adan_trading_bot.environment.realistic_trading_env import (
+    RealisticTradingEnv
 )
 from adan_trading_bot.model.model_ensemble import ModelEnsemble
+from adan_trading_bot.utils.seed_manager import SeedManager
 
 def linear_schedule(start_val, end_val, progress):
     return start_val + (end_val - start_val) * progress
@@ -617,6 +618,216 @@ class MetricsMonitor(BaseCallback):
         return summary
 
 
+def train_worker(worker_id: str, worker_idx: int, config: dict, resume: bool, checkpoint_dir: str, final_export_dir: str):
+    """
+    Independent training function for a single worker process.
+    """
+    # Re-setup logging for this process
+    setup_logging(config)
+    logger = logging.getLogger(f"worker_{worker_id}")
+    logger.info(f"🚀 STARTING WORKER PROCESS: {worker_id} (PID: {os.getpid()})")
+    
+    try:
+        # Initialize SeedManager for this process with unique seed offset
+        seed = config.get("general", {}).get("random_seed", 42) + worker_idx
+        SeedManager.initialize(seed)
+        logger.info(f"🎲 Initialized SeedManager with seed={seed}")
+
+        # Get worker-specific config
+        worker_config = config["workers"][worker_id]
+        agent_config = worker_config.get("agent_config", {})
+        
+        logger.info(f"📋 Worker Config for {worker_id}:")
+        logger.info(f"   Learning Rate: {agent_config.get('learning_rate')}")
+        logger.info(f"   N Steps: {agent_config.get('n_steps')}")
+        
+        # Create worker-specific environment
+        def make_worker_env(env_idx):
+            """Create environment for this worker"""
+            def _init():
+                wc = copy.deepcopy(worker_config)
+                data_loader = ChunkedDataLoader(
+                    config=config, worker_config=wc, worker_id=env_idx
+                )
+                data = data_loader.load_chunk(0)
+                
+                env_worker_config = copy.deepcopy(wc)
+                env_worker_config["worker_id"] = env_idx
+                
+                env_log_dir = os.path.join(
+                    config["paths"]["logs_dir"], f"{worker_id}_env_{env_idx}"
+                )
+                os.makedirs(env_log_dir, exist_ok=True)
+                
+                return RealisticTradingEnv(
+                    data=data,
+                    timeframes=config["data"]["timeframes"],
+                    window_sizes=config["environment"]["observation"]["window_sizes"],
+                    features_config=config["data"]["features_config"]["timeframes"],
+                    max_steps=config["environment"]["max_steps"],
+                    initial_balance=config["portfolio"]["initial_balance"],
+                    commission=config["environment"]["commission"],
+                    reward_scaling=config["environment"]["reward_scaling"],
+                    enable_logging=True,
+                    log_dir=env_log_dir,
+                    worker_config=env_worker_config,
+                    config=config,
+                    exploration_tutor=config.get("reward_shaping", {}).get("exploration_tutor", {}),
+                    # Realistic Constraints
+                    live_mode=False,
+                    min_hold_steps=6,  # 30m
+                    cooldown_steps=3,  # 15m
+                    min_notional=10.0,
+                    circuit_breaker_pct=0.15
+                )
+            return _init
+        
+        # Create DummyVecEnv for this worker
+        worker_env = DummyVecEnv([make_worker_env(worker_idx)])
+        
+        # Wrap with VecNormalize
+        gamma = agent_config.get("gamma", config["agent"]["gamma"])
+        worker_env = VecNormalize(
+            worker_env,
+            norm_obs=True,
+            norm_reward=True,
+            clip_obs=10.0,
+            clip_reward=10.0,
+            gamma=gamma,
+            training=True
+        )
+        logger.info(f"✅ Created DummyVecEnv + VecNormalize for {worker_id}")
+        
+        # Load existing VecNormalize stats if resuming
+        vec_normalize_path = os.path.join(checkpoint_dir, "vecnormalize.pkl")
+        if resume and os.path.exists(vec_normalize_path):
+            worker_env = VecNormalize.load(vec_normalize_path, worker_env)
+            logger.info(f"✅ Loaded VecNormalize stats from {vec_normalize_path}")
+
+        # Policy kwargs
+        policy_kwargs = copy.deepcopy(
+            config["agent"]["features_extractor_kwargs"]["policy_kwargs"]
+        )
+        activation_fn_map = {
+            "ReLU": nn.ReLU,
+            "Tanh": nn.Tanh,
+            "LeakyReLU": nn.LeakyReLU,
+        }
+        if "activation_fn" in policy_kwargs:
+            activation_fn_str = policy_kwargs["activation_fn"]
+            act_fn_name = activation_fn_str.split(".")[-1]
+            activation_fn = activation_fn_map.get(act_fn_name)
+            if activation_fn:
+                policy_kwargs["activation_fn"] = activation_fn
+            else:
+                policy_kwargs["activation_fn"] = nn.ReLU
+        
+        # Create worker-specific checkpoint directory
+        worker_checkpoint_dir = os.path.join(checkpoint_dir, worker_id)
+        os.makedirs(worker_checkpoint_dir, exist_ok=True)
+        
+        # Callbacks
+        worker_callbacks = []
+        worker_checkpoint_callback = CheckpointCallback(
+            save_freq=config["training"]["checkpointing"]["save_freq"],
+            save_path=worker_checkpoint_dir,
+            name_prefix=f"{worker_id}_model",
+        )
+        worker_callbacks.append(worker_checkpoint_callback)
+        
+        worker_metrics_monitor = MetricsMonitor(
+            config=config,
+            num_workers=1,
+            log_interval=max(1000, config["training"]["checkpointing"]["save_freq"] // 10),
+        )
+        worker_callbacks.append(worker_metrics_monitor)
+        
+        # Device
+        device = 'cuda' if torch.cuda.is_available() else 'cpu'
+        
+        # Hyperparameters
+        learning_rate = agent_config.get("learning_rate", config["agent"]["learning_rate"])
+        n_steps = agent_config.get("n_steps", config["agent"]["n_steps"])
+        batch_size = agent_config.get("batch_size", config["agent"]["batch_size"])
+        n_epochs = agent_config.get("n_epochs", config["agent"]["n_epochs"])
+        gae_lambda = agent_config.get("gae_lambda", config["agent"]["gae_lambda"])
+        clip_range = agent_config.get("clip_range", config["agent"]["clip_range"])
+        ent_coef = agent_config.get("ent_coef", config["agent"]["ent_coef"])
+        
+        total_timesteps = config["training"]["timesteps_per_instance"]
+        
+        # Create Model
+        worker_model = PPO(
+            "MultiInputPolicy",
+            worker_env,
+            device=device,
+            learning_rate=learning_rate,
+            n_steps=n_steps,
+            batch_size=batch_size,
+            n_epochs=n_epochs,
+            gamma=gamma,
+            gae_lambda=gae_lambda,
+            clip_range=clip_range,
+            ent_coef=ent_coef,
+            vf_coef=config["agent"]["vf_coef"],
+            max_grad_norm=config["agent"]["max_grad_norm"],
+            tensorboard_log=os.path.join(config["paths"]["logs_dir"], f"tensorboard_{worker_id}"),
+            policy_kwargs=policy_kwargs,
+            verbose=1,
+            seed=seed,
+        )
+        
+        logger.info(f"🚀 Training {worker_id} for {total_timesteps} steps...")
+        worker_model.learn(
+            total_timesteps=total_timesteps,
+            callback=worker_callbacks,
+            tb_log_name=f"ppo_{worker_id}"
+        )
+        
+        # Save Final Model
+        worker_final_path = os.path.join(final_export_dir, f"{worker_id}_final.zip")
+        worker_model.save(worker_final_path)
+        logger.info(f"✅ {worker_id} model saved: {worker_final_path}")
+        
+        # Save VecNormalize stats
+        worker_vec_path = os.path.join(final_export_dir, f"{worker_id}_vecnormalize.pkl")
+        worker_env.save(worker_vec_path)
+        logger.info(f"✅ {worker_id} VecNormalize stats saved: {worker_vec_path}")
+        
+        # Save main vecnormalize.pkl from the first worker (as baseline)
+        if worker_idx == 0:
+            main_vec_path = os.path.join(checkpoint_dir, "vecnormalize.pkl")
+            worker_env.save(main_vec_path)
+            logger.info(f"✅ Main VecNormalize stats saved (from {worker_id}): {main_vec_path}")
+            
+            # Save RNG states
+            rng_states = SeedManager.get_rng_states()
+            rng_states_path = os.path.join(checkpoint_dir, "rng_states.json")
+            with open(rng_states_path, 'w') as f:
+                # Convert numpy arrays to lists for JSON serialization
+                serializable_states = {}
+                for key, value in rng_states.items():
+                    if key == 'numpy_random_state':
+                        serializable_states[key] = {
+                            'state_type': str(value[0]),
+                            'keys': value[1].tolist() if hasattr(value[1], 'tolist') else value[1],
+                            'pos': int(value[2]),
+                            'has_gauss': int(value[3]),
+                            'cached_gaussian': float(value[4])
+                        }
+                    elif key == 'torch_random_state' or key == 'torch_cuda_random_state':
+                        continue
+                    else:
+                        serializable_states[key] = value
+                json.dump(serializable_states, f, indent=2)
+            logger.info(f"✅ RNG states saved to {rng_states_path}")
+
+        logger.info(f"🏁 WORKER {worker_id} FINISHED!")
+        
+    except Exception as e:
+        logger.error(f"❌ CRITICAL ERROR IN WORKER {worker_id}: {e}", exc_info=True)
+        raise
+
 def main(
     config_path: str,
     resume: bool,
@@ -629,386 +840,84 @@ def main(
     log_level: str,
     checkpoint_dir: str = None,
 ):
+    import multiprocessing
+    
     logger = logging.getLogger(__name__)
-    # Set log level from command line
+    # Set log level
     numeric_level = getattr(logging, log_level.upper(), None)
     if isinstance(numeric_level, int):
         logging.getLogger("adan_trading_bot").setLevel(numeric_level)
-        logger.info(f"Log level set to {log_level.upper()}")
-
-    """Main training function."""
+    
     try:
-        # --- Configuration ---
+        # Load Config
         config = ConfigLoader.load_config(config_path)
-        logger.info("📋 Utilisation des paramètres de config.yaml")
+        logger.info("📋 Loaded config.yaml")
+        
+        # Override steps if provided
         if steps:
-            total_timesteps = steps
-            logger.info(f"Overriding total_timesteps with command line argument: {total_timesteps}")
-        else:
-            total_timesteps = config["training"]["timesteps_per_instance"]
+            config["training"]["timesteps_per_instance"] = steps
+            logger.info(f"Overriding total_timesteps with: {steps}")
 
-        # Utiliser checkpoint_dir fourni ou celui du config
+        # Checkpoint Dirs
         if checkpoint_dir is None:
             checkpoint_dir = config["paths"]["trained_models_dir"]
-
-        # Créer les répertoires nécessaires
         os.makedirs(checkpoint_dir, exist_ok=True)
         final_export_dir = os.path.join(checkpoint_dir, "final")
         os.makedirs(final_export_dir, exist_ok=True)
 
-        # --- Environment Setup: 4 workers with DummyVecEnv ---
-        # Force 4 workers everywhere (Colab + Local)
-        num_envs = 4
-        logger.info("🔄 Using DummyVecEnv with 4 workers (no pickle issues)")
-
-        # Create individual environments for each worker
-        env_fns = []
+        logger.info("="*80)
+        logger.info("🔥 MULTI-AGENT PARALLEL TRAINING ACTIVATED")
+        logger.info("Training 4 INDEPENDENT PPO models in PARALLEL PROCESSES")
+        logger.info("="*80)
+        
         worker_ids = ["w1", "w2", "w3", "w4"]
-
-        for i in range(num_envs):
-            worker_id = worker_ids[i]
-            worker_config = copy.deepcopy(config["workers"][worker_id])
-
-            # Enforce BTC-only specialization per worker
-            btc_assets = ["BTCUSDT"]
-            worker_config["assets"] = btc_assets
-            spec_profiles = {
-                "w1": {
-                    "timeframe": "4h",
-                    "risk_profile": "ultra_conservative",
-                    "max_daily_trades": 3,
-                    "position_hold_steps": [50, 100]
-                },
-                "w2": {
-                    "timeframe": "1h",
-                    "risk_profile": "moderate",
-                    "max_daily_trades": 6,
-                    "position_hold_steps": [20, 40]
-                },
-                "w3": {
-                    "timeframe": "5m",
-                    "risk_profile": "aggressive",
-                    "max_daily_trades": 15,
-                    "position_hold_steps": [5, 15]
-                },
-                "w4": {
-                    "timeframe": "multi",
-                    "risk_profile": "adaptive",
-                    "max_daily_trades": 10,
-                    "position_hold_steps": "dynamic"
-                },
-            }
-            spec = spec_profiles.get(worker_id, {})
-            worker_config.setdefault("specialization", {}).update(spec)
-
-            # Create data loader for this specific worker
-            data_loader = ChunkedDataLoader(
-                config=config, worker_config=worker_config, worker_id=i
-            )
-            data = data_loader.load_chunk(0)
-
-            env_worker_config = copy.deepcopy(worker_config)
-            env_worker_config["worker_id"] = i
-
-            env_log_dir = os.path.join(
-                config["paths"]["logs_dir"], f"{worker_id}_env"
-            )
-            os.makedirs(env_log_dir, exist_ok=True)
-
-            env_kwargs = {
-                "data": data,
-                "timeframes": config["data"]["timeframes"],
-                "window_sizes": (
-                    config["environment"]["observation"]["window_sizes"]
-                ),
-                "features_config": (
-                    config["data"]["features_config"]["timeframes"]
-                ),
-                "max_steps": config["environment"]["max_steps"],
-                "initial_balance": (
-                    config["portfolio"]["initial_balance"]
-                ),
-                "commission": config["environment"]["commission"],
-                "reward_scaling": config["environment"]["reward_scaling"],
-                "enable_logging": True,
-                "log_dir": env_log_dir,
-                "worker_config": env_worker_config,
-                "config": config,
-                "exploration_tutor": (
-                    config.get("reward_shaping", {}).get(
-                        "exploration_tutor", {}
-                    )
-                ),
-            }
-            # Fix lambda capture issue
-            env_fns.append(
-                lambda kwargs=env_kwargs: MultiAssetChunkedEnv(**kwargs)
-            )
-
-            logger.info(f"✅ Configured {worker_id}")
-
-        # Use DummyVecEnv everywhere (no pickle issues)
-        env = DummyVecEnv(env_fns)
-        logger.info(f"✅ Created DummyVecEnv with {num_envs} workers")
-
-        # ============================================================================
-        # MULTI-AGENT TRAINING: Train 4 INDEPENDENT models
-        # ============================================================================
-        logger.info("="*80)
-        logger.info("🔥 MULTI-AGENT ARCHITECTURE ACTIVATED")
-        logger.info("Training 4 INDEPENDENT PPO models (w1, w2, w3, w4)")
-        logger.info("Each worker learns separately with unique hyperparameters")
-        logger.info("="*80)
+        processes = []
         
-        trained_models = {}
-        worker_ids = ["w1", "w2", "w3", "w4"]
+        # Launch processes
+        for i, worker_id in enumerate(worker_ids):
+            p = multiprocessing.Process(
+                target=train_worker,
+                args=(worker_id, i, config, resume, checkpoint_dir, final_export_dir)
+            )
+            p.start()
+            processes.append(p)
+            logger.info(f"🚀 Started process for {worker_id} (PID: {p.pid})")
+            
+        # Wait for all
+        for p in processes:
+            p.join()
+            
+        logger.info("✅ All workers completed.")
         
-        for worker_idx, worker_id in enumerate(worker_ids):
-            logger.info("\n" + "="*80)
-            logger.info(f"🤖 TRAINING WORKER: {worker_id} ({worker_idx+1}/4)")
-            logger.info("="*80)
-            
-            # Get worker-specific config
-            worker_config = config["workers"][worker_id]
-            agent_config = worker_config.get("agent_config", {})
-            
-            logger.info(f"📋 Worker Config:")
-            logger.info(f"   Learning Rate: {agent_config.get('learning_rate')}")
-            logger.info(f"   N Steps: {agent_config.get('n_steps')}")
-            logger.info(f"   Gamma: {agent_config.get('gamma')}")
-            logger.info(f"   Risk Multiplier: {worker_config.get('risk_multiplier')}")
-            
-            # Create worker-specific environment with SubprocVecEnv
-            from stable_baselines3.common.vec_env import SubprocVecEnv
-            
-            def make_worker_env(env_idx):
-                """Create environment for this worker"""
-                def _init():
-                    wc = copy.deepcopy(worker_config)
-                    data_loader = ChunkedDataLoader(
-                        config=config, worker_config=wc, worker_id=env_idx
-                    )
-                    data = data_loader.load_chunk(0)
-                    
-                    env_worker_config = copy.deepcopy(wc)
-                    env_worker_config["worker_id"] = env_idx
-                    
-                    env_log_dir = os.path.join(
-                        config["paths"]["logs_dir"], f"{worker_id}_env_{env_idx}"
-                    )
-                    os.makedirs(env_log_dir, exist_ok=True)
-                    
-                    return MultiAssetChunkedEnv(
-                        data=data,
-                        timeframes=config["data"]["timeframes"],
-                        window_sizes=config["environment"]["observation"]["window_sizes"],
-                        features_config=config["data"]["features_config"]["timeframes"],
-                        max_steps=config["environment"]["max_steps"],
-                        initial_balance=config["portfolio"]["initial_balance"],
-                        commission=config["environment"]["commission"],
-                        reward_scaling=config["environment"]["reward_scaling"],
-                        enable_logging=True,
-                        log_dir=env_log_dir,
-                        worker_config=env_worker_config,
-                        config=config,
-                        exploration_tutor=config.get("reward_shaping", {}).get("exploration_tutor", {})
-                    )
-                return _init
-            
-            # Create SubprocVecEnv with single environment for this worker
-            # (Can be expanded to multiple if needed, but 1 is cleaner for independent training)
-            worker_env = SubprocVecEnv([make_worker_env(worker_idx)])
-            logger.info(f"✅ Created SubprocVecEnv for {worker_id}")
-            
-            # Policy kwargs
-            policy_kwargs = copy.deepcopy(
-                config["agent"]["features_extractor_kwargs"]["policy_kwargs"]
-            )
-            activation_fn_map = {
-                "ReLU": nn.ReLU,
-                "Tanh": nn.Tanh,
-                "LeakyReLU": nn.LeakyReLU,
-            }
-            if "activation_fn" in policy_kwargs:
-                activation_fn_str = policy_kwargs["activation_fn"]
-                act_fn_name = activation_fn_str.split(".")[-1]
-                activation_fn = activation_fn_map.get(act_fn_name)
-                if activation_fn:
-                    policy_kwargs["activation_fn"] = activation_fn
-                else:
-                    policy_kwargs["activation_fn"] = nn.ReLU
-            
-            # Create worker-specific checkpoint directory
-            worker_checkpoint_dir = os.path.join(checkpoint_dir, worker_id)
-            os.makedirs(worker_checkpoint_dir, exist_ok=True)
-            
-            # Callbacks for this worker
-            worker_callbacks = []
-            worker_checkpoint_callback = CheckpointCallback(
-                save_freq=config["training"]["checkpointing"]["save_freq"],
-                save_path=worker_checkpoint_dir,
-                name_prefix=f"{worker_id}_model",
-            )
-            worker_callbacks.append(worker_checkpoint_callback)
-            
-            # Metrics monitor for this worker
-            worker_metrics_monitor = MetricsMonitor(
-                config=config,
-                num_workers=1,  # Only 1 env per worker now
-                log_interval=max(1000, config["training"]["checkpointing"]["save_freq"] // 10),
-            )
-            worker_callbacks.append(worker_metrics_monitor)
-            
-            # GPU setup
-            device = 'cuda' if torch.cuda.is_available() else 'cpu'
-            
-            # Use worker-specific agent_config or fallback to global
-            learning_rate = agent_config.get("learning_rate", config["agent"]["learning_rate"])
-            n_steps = agent_config.get("n_steps", config["agent"]["n_steps"])
-            batch_size = agent_config.get("batch_size", config["agent"]["batch_size"])
-            n_epochs = agent_config.get("n_epochs", config["agent"]["n_epochs"])
-            gamma = agent_config.get("gamma", config["agent"]["gamma"])
-            gae_lambda = agent_config.get("gae_lambda", config["agent"]["gae_lambda"])
-            clip_range = agent_config.get("clip_range", config["agent"]["clip_range"])
-            ent_coef = agent_config.get("ent_coef", config["agent"]["ent_coef"])
-            
-            # Create independent PPO model for this worker
-            worker_model = PPO(
-                "MultiInputPolicy",
-                worker_env,
-                device=device,
-                learning_rate=learning_rate,
-                n_steps=n_steps,
-                batch_size=batch_size,
-                n_epochs=n_epochs,
-                gamma=gamma,
-                gae_lambda=gae_lambda,
-                clip_range=clip_range,
-                ent_coef=ent_coef,
-                vf_coef=config["agent"]["vf_coef"],
-                max_grad_norm=config["agent"]["max_grad_norm"],
-                tensorboard_log=os.path.join(config["paths"]["logs_dir"], f"tensorboard_{worker_id}"),
-                policy_kwargs=policy_kwargs,
-                verbose=1,
-                seed=config["agent"]["seed"] + worker_idx,  # Different seed per worker
-            )
-            
-            logger.info(f"✅ Created independent PPO model for {worker_id}")
-            logger.info(f"🚀 Starting training for {worker_id}...")
-            logger.info(f"📊 Timesteps: {total_timesteps:,}")
-            
-            # Train this worker
-            worker_model.learn(
-                total_timesteps=total_timesteps,
-                callback=worker_callbacks,
-                progress_bar=progress_bar,
-                reset_num_timesteps=True,
-            )
-            
-            # Save final model for this worker
-            worker_final_path = os.path.join(final_export_dir, f"{worker_id}_final.zip")
-            worker_model.save(worker_final_path)
-            logger.info(f"✅ {worker_id} model saved: {worker_final_path}")
-            
-            trained_models[worker_id] = worker_final_path
-            
-            # Cleanup
-            worker_env.close()
-            logger.info(f"🎯 {worker_id} training completed!\n")
-        
-        logger.info("\n" + "="*80)
-        logger.info("🎉 ALL 4 WORKERS TRAINED SUCCESSFULLY")
-        logger.info("="*80)
-        for worker_id, model_path in trained_models.items():
-            logger.info(f"  ✅ {worker_id}: {model_path}")
-        logger.info("="*80)
-        # --- Training Summary ---
-        logger.info("📈 Multi-Agent Training completed successfully!")
-        logger.info(f"📁 Models location: {final_export_dir}")
-        logger.info("🔧 Models ready for ensemble inference")
-        
-        # Close environment if it was created (deprecated code path)
-        if 'env' in locals():
-            env.close()
-        
-        return True
-
     except Exception as e:
-        logger.error(f"Error during training: {e}", exc_info=True)
-        if "env" in locals():
-            env.close()
-        return False
-
+        logger.error(f"❌ Main process error: {e}", exc_info=True)
+        # Terminate children if main fails
+        for p in processes:
+            if p.is_alive():
+                p.terminate()
+        raise
 
 if __name__ == "__main__":
-    setup_logging()
-    parser = argparse.ArgumentParser(description="Train ADAN trading bot in parallel.")
-    parser.add_argument(
-        "-c",
-        "--config-path",
-        type=str,
-        default="config/config.yaml",
-        help="Path to the YAML config file.",
-    )
-    parser.add_argument(
-        "--checkpoint-dir",
-        type=str,
-        default=None,
-        help="Directory to save/load checkpoints from.",
-    )
-    parser.add_argument(
-        "--resume",
-        action="store_true",
-        help="Resume training from the latest checkpoint.",
-    )
-    parser.add_argument(
-        "--workers", type=int, default=4, help="Number of parallel workers."
-    )
-    parser.add_argument(
-        "--no-subproc",
-        action="store_true",
-        help="Use DummyVecEnv instead of SubprocVecEnv.",
-    )
-    parser.add_argument(
-        "--no-progress-bar", action="store_true", help="Disable the progress bar."
-    )
-    parser.add_argument(
-        "--timeout",
-        type=int,
-        default=None,
-        help="Timeout in seconds for the training run.",
-    )
-    parser.add_argument(
-        "--fine-tune",
-        action="store_true",
-        help="Enable fine-tuning mode with adaptive risk management.",
-    )
-    parser.add_argument(
-        "--steps",
-        type=int,
-        default=None,
-        help="Number of timesteps to train for, overrides config file.",
-    )
-    parser.add_argument(
-        "--log-level",
-        type=str,
-        default="INFO",
-        help="Logging level (e.g., DEBUG, INFO, WARNING)",
-    )
+    parser = argparse.ArgumentParser(description="Train ADAN Agents in Parallel")
+    parser.add_argument("--config", type=str, default="config/config.yaml", help="Path to config")
+    parser.add_argument("--resume", action="store_true", help="Resume training")
+    parser.add_argument("--num-envs", type=int, default=4, help="Number of environments (ignored)")
+    parser.add_argument("--use-subproc", action="store_true", help="Use SubprocVecEnv (ignored)")
+    parser.add_argument("--progress-bar", action="store_true", help="Show progress bar")
+    parser.add_argument("--timeout", type=int, default=None, help="Timeout in seconds")
+    parser.add_argument("--fine-tune", action="store_true", help="Fine-tune mode")
+    parser.add_argument("--steps", type=int, default=None, help="Override total timesteps")
+    parser.add_argument("--log-level", type=str, default="INFO", help="Logging level")
+    parser.add_argument("--checkpoint-dir", type=str, default=None, help="Override checkpoint dir")
 
     args = parser.parse_args()
 
-    # Load the main config to get the number of workers
-    config = ConfigLoader.load_config(args.config_path)
-    # Force 4 workers to match Optuna configuration
-    num_workers = 4  # Always use 4 workers to match Optuna optimization
-
     main(
-        config_path=args.config_path,
+        config_path=args.config,
         resume=args.resume,
-        num_envs=num_workers,
-        use_subproc=not args.no_subproc,
-        progress_bar=not args.no_progress_bar,
+        num_envs=args.num_envs,
+        use_subproc=args.use_subproc,
+        progress_bar=args.progress_bar,
         timeout=args.timeout,
         fine_tune=args.fine_tune,
         steps=args.steps,

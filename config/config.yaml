@@ -322,11 +322,11 @@ data:
         - macd_12_26_9
         - bb_percent_b_20_2
         - atr_14
+        - atr_20
+        - atr_50
         - volume_ratio_20
         - ema_20_ratio
         - stoch_k_14_3_3
-        - vwap_ratio
-        - price_action
         price:
         - open
         - high
@@ -338,8 +338,8 @@ data:
   - BTCUSDT
   - XRPUSDT
   processed_data:
-    test: data/processed/test
-    train: data/processed/train
+    test: data/processed/indicators/test
+    train: data/processed/indicators/train
     validation: data/processed/validation
   timeframes:
   - 5m
@@ -881,6 +881,8 @@ feature_engineering:
         - price_ema_ratio_50
         volatility:
         - bb_width_20_2
+        - atr_20
+        - atr_50
         volume:
         - obv_ratio_20
       4h:
@@ -895,6 +897,8 @@ feature_engineering:
         volatility:
         - donchian_width_20
         - volatility_ratio_14_50
+        - atr_20
+        - atr_50
         volume:
         - volume_sma_20_ratio
       5m:
@@ -909,6 +913,8 @@ feature_engineering:
         volatility:
         - bb_percent_b_20_2
         - atr_14
+        - atr_20
+        - atr_50
         volume:
         - volume_ratio_20
   performance:
@@ -1133,6 +1139,7 @@ reward_shaping:
   multi_traque_bonus: 1.5
   overstay_penalty: -1.0
   pnl_weight: 50.0
+  pnl_normalization: 50.0
   profiles:
     Adaptive:
       duration_penalty_weight: 0.01
@@ -1246,7 +1253,7 @@ trading_rules:
       max_duration_steps: 50
       optimal_duration: 25
   frequency:
-    action_threshold: 0.05
+    action_threshold: 0.01
     bonus_weight: 0.6
     force_trade_steps:
       1h: 20
@@ -1261,8 +1268,8 @@ trading_rules:
       1h: 0
       4h: 0
       5m: 0
-    penalty_weight: 0.3
-    total_daily_max: 24
+    penalty_weight: 0.05
+    total_daily_max: 50
     total_daily_min: 1
   futures_enabled: false
   leverage: 1
@@ -1344,15 +1351,16 @@ workers:
           5m: 33
           1h: 18
           4h: 24
-        freq_penalty_weight: 1.0
-      position_hold_min: 10
+        freq_penalty_weight: 0.05
+      position_hold_min: 2
+      daily_max_forced_trades: 50
       position_hold_max: 70
       max_consecutive_losses: 4
       min_trade_quality_score: 0.8984
       max_trades_per_session:
-        5m: 6
-        1h: 4
-        4h: 2
+        5m: 20
+        1h: 15
+        4h: 10
     risk_per_trade_pct_by_tier:
       Micro: 0.0914
       Small: 0.0823
@@ -1388,7 +1396,7 @@ workers:
         4h:
           grace_period: 1
           max_tracking_steps: 70
-          min_tracking_steps: 10
+          min_tracking_steps: 1
           optimal_duration: 40
     stop_loss_pct_by_tier:
       Micro: 0.0883973356558337
@@ -1451,7 +1459,8 @@ workers:
           5m: 39
           1h: 33
           4h: 22
-        freq_penalty_weight: 1.404506490307887
+        freq_penalty_weight: 0.05
+        daily_max_forced_trades: 50
     risk_per_trade_pct_by_tier:
       Enterprise: 0.6
       High: 0.8
@@ -1547,7 +1556,8 @@ workers:
           5m: 27
           1h: 30
           4h: 9
-        freq_penalty_weight: 1.1309727879060552
+        freq_penalty_weight: 0.05
+        daily_max_forced_trades: 50
     risk_per_trade_pct_by_tier:
       Enterprise: 1.0
       High: 1.2
@@ -1676,5 +1686,5 @@ chunk_carry_over:
   max_allowed_loss_pct: 0.1
   min_steps_left_to_allow_carry: 6
 action:
-  min_action_threshold: 0.05
+  min_action_threshold: 0.01
   action_scale: 1.0
