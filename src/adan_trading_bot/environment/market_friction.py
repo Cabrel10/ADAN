@@ -11,7 +11,7 @@ Per ADAN 2.0 Spec (Requirements 2.2, 2.3, 2.4):
 
 import logging
 import numpy as np
-from typing import Dict, Optional
+from typing import Dict, Tuple, Optional, Any
 from dataclasses import dataclass
 
 logger = logging.getLogger(__name__)
@@ -385,3 +385,72 @@ class BinanceFeeModel:
         """
         fee_rate = self.get_fee_rate(is_maker)
         return order_value_usd * fee_rate
+
+
+class StaleDataSimulator:
+    """
+    Simulates stale data (lag) in observations.
+    
+    Randomly returns previous observations instead of current ones
+    to mimic network latency or websocket delays.
+    """
+    
+    def __init__(
+        self,
+        prob_stale: float = 0.0,  # Probability of stale data (0.0 to 1.0)
+        max_lag_steps: int = 3    # Maximum lag in steps
+    ):
+        """
+        Initialize stale data simulator.
+        
+        Args:
+            prob_stale: Probability of receiving stale data
+            max_lag_steps: Maximum number of steps to lag behind
+        """
+        self.prob_stale = prob_stale
+        self.max_lag_steps = max_lag_steps
+        self.history = []  # Buffer of recent observations
+        
+        logger.info(
+            f"StaleDataSimulator initialized (prob={prob_stale}, max_lag={max_lag_steps})"
+        )
+    
+    def get_observation(
+        self,
+        current_obs: Any,
+        rng: Optional[np.random.Generator] = None
+    ) -> Any:
+        """
+        Get potentially stale observation.
+        
+        Args:
+            current_obs: The actual current observation
+            rng: Random number generator
+            
+        Returns:
+            Current or stale observation
+        """
+        # Update history
+        self.history.append(current_obs)
+        if len(self.history) > self.max_lag_steps + 1:
+            self.history.pop(0)
+            
+        if self.prob_stale <= 0 or len(self.history) < 2:
+            return current_obs
+            
+        if rng is None:
+            rng = np.random.default_rng()
+            
+        # Decide if stale
+        if rng.random() < self.prob_stale:
+            # Choose a lag amount (1 to max_lag, limited by history size)
+            max_available_lag = len(self.history) - 1
+            lag = rng.integers(1, max_available_lag + 1)
+            return self.history[-(lag + 1)]
+            
+        return current_obs
+    
+    def reset(self):
+        """Reset history."""
+        self.history = []
+

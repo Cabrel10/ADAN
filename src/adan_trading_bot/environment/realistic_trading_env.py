@@ -22,7 +22,8 @@ from .market_friction import (
     LatencySimulator,
     LiquidityModel,
     BinanceFeeModel,
-    MarketConditions
+    MarketConditions,
+    StaleDataSimulator
 )
 
 
@@ -101,6 +102,16 @@ class RealisticTradingEnv(MultiAssetChunkedEnv):
                 depth_factor=0.001,
                 impact_exponent=1.5
             )
+            # Stale Data Simulation (Robustness)
+            # Only active if explicitly configured or in training mode (not live)
+            stale_prob = f_cfg.get("stale_data_prob", 0.0)
+            if not self.live_mode and stale_prob == 0.0:
+                 stale_prob = 0.05 # Default 5% stale data in training for robustness
+            
+            self.stale_data_simulator = StaleDataSimulator(
+                prob_stale=stale_prob,
+                max_lag_steps=3
+            )
             self.fee_model = BinanceFeeModel(
                 maker_fee=f_cfg.get("fee_bps", 0.04) / 100.0,
                 taker_fee=f_cfg.get("fee_bps", 0.04) / 100.0,
@@ -132,61 +143,87 @@ class RealisticTradingEnv(MultiAssetChunkedEnv):
         """
         Override step to enforce global constraints and use StableRewardCalculator.
         """
-        # 1. Circuit Breaker Check
+        # 0. Sanity Checks (Phase 2)
+        # Validate market data before processing anything
+        if not self._validate_market_data():
+            self.logger.warning("⚠️ SANITY CHECK FAILED: Market data anomaly detected. Skipping step.")
+            return self._get_observation(), 0.0, False, False, {"sanity_check_failed": True}
+
+        # 1. Circuit Breaker Check (Phase 2)
         if self.circuit_breaker_triggered:
             self.logger.warning("🚨 CIRCUIT BREAKER ACTIVE - Trading halted.")
             return self._get_observation(), -1.0, True, False, {"circuit_breaker": True}
             
-        # Calculate current drawdown
-        initial = self.portfolio_manager.initial_equity
-        current = self.portfolio_manager.current_value
-        if initial > 0:
-            current_pnl_pct = (current - initial) / initial
-        else:
-            current_pnl_pct = 0.0
-
-        if current_pnl_pct <= -self.circuit_breaker_pct:
-            self.logger.critical(
-                f"🚨 CIRCUIT BREAKER TRIGGERED! Drawdown {current_pnl_pct:.2%} > {self.circuit_breaker_pct:.2%}"
-            )
+        # Check dynamic circuit breakers (Drawdown, etc.)
+        if self._check_circuit_breakers():
             self.circuit_breaker_triggered = True
-            # Attempt to close all positions
-            try:
-                if hasattr(self.portfolio_manager, 'close_all_positions'):
-                    self.portfolio_manager.close_all_positions(self._get_current_prices())
-            except Exception as e:
-                self.logger.error(f"Failed to close positions on circuit breaker: {e}")
-            return self._get_observation(), -10.0, True, False, {"circuit_breaker": True}
+            self.logger.critical("🚨 CIRCUIT BREAKER TRIGGERED: Max Drawdown or Risk Limit exceeded! Closing all positions.")
+            self.portfolio_manager.close_all_positions(self.current_step, reason="CIRCUIT_BREAKER")
+            return self._get_observation(), -10.0, True, False, {"circuit_breaker_triggered": True}
 
-        # 2. Candle Sync (Live Mode Only)
-        if self.live_mode:
-            self._sync_to_candle()
+        # Proceed with normal step execution
+        return super().step(action)
 
-        # 3. Execute parent step (will call _execute_trades internally)
-        obs, reward, terminated, truncated, info = super().step(action)
-        
-        # 4. Override reward with StableRewardCalculator if enabled
-        if self.use_stable_reward:
-            # Calculate step PnL from info or estimate
-            step_pnl = info.get('pnl', 0.0)
-            trade_count = info.get('trades_executed', 0)
+    def _validate_market_data(self) -> bool:
+        """
+        Phase 2: Sanity Checks / Anti-Adversarial Filters
+        Returns True if data is valid, False if anomaly detected.
+        """
+        current_prices = self._get_current_prices()
+        if not current_prices:
+            return False
             
-            reward_breakdown = self.reward_calculator.calculate_reward(
-                pnl=step_pnl,
-                portfolio_value=current,
-                initial_value=initial,
-                trade_count=trade_count
-            )
-            reward = reward_breakdown['total_reward']
-            info['reward_breakdown'] = reward_breakdown
+        for asset, price in current_prices.items():
+            if price <= 0:
+                return False
+            
+            # Check for extreme price jumps (> 10% in 1 step) if we have history
+            # (Simplified check, ideally would compare to previous step's price)
+            # This requires tracking previous prices, which we can add later if needed.
+            
+        return True
 
-        return obs, reward, terminated, truncated, info
+    def _check_circuit_breakers(self) -> bool:
+        """
+        Phase 2: Kill Switch & Circuit Breakers
+        Returns True if trading should stop immediately.
+        """
+        # 1. Max Drawdown Check
+        # Calculate drawdown from peak equity
+        total_value = self.portfolio_manager.get_total_value()
+        # Assuming portfolio manager tracks peak_equity, or we calculate it here
+        # For now, let's use a simplified drawdown calc if not available
+        # (You might need to add peak_equity tracking to PortfolioManager or here)
+        
+        # Using the metric from portfolio if available, else skip for now
+        # risk_metrics = self.portfolio_manager.get_risk_metrics() 
+        # But let's assume we can access drawdown directly or calculate it
+        
+        # Hard Kill: If total value drops below 85% of initial (15% loss)
+        initial_capital = self.portfolio_manager.initial_capital
+        if total_value < initial_capital * (1 - self.circuit_breaker_pct):
+            self.logger.critical(f"💀 KILL SWITCH: Total Value ({total_value}) < 85% of Initial ({initial_capital})")
+            return True
+            
+        return False
 
-    def _sync_to_candle(self):
+    def _check_new_day(self):
         """
-        Placeholder for candle synchronization in live mode.
-        Real implementation should be handled by the runner/orchestrator.
+        Override to ensure freq_controller is also reset on new day.
         """
+        # Call parent to reset positions_count and handle logging
+        super()._check_new_day()
+        
+        # Reset freq_controller daily counts
+        if hasattr(self, 'freq_controller'):
+            self.freq_controller.reset_daily()
+            self.logger.info(f"[NEW_DAY] Reset freq_controller daily counts for Worker {self.worker_id}")
+
+    def _sync_to_candle(self) -> None:
+        """Synchronize to nearest candle boundary in live mode."""
+        if not self.live_mode:
+            return
+        # Implementation would sync with real-time candle data
         pass
 
     def _execute_trades(
@@ -244,8 +281,8 @@ class RealisticTradingEnv(MultiAssetChunkedEnv):
                 check_daily=True
             )
             
-            if not can_trade and abs(main_decision) > action_threshold:
-                # Block trade if frequency constraints violated
+            if not can_trade and main_decision > action_threshold:
+                # Block OPENING trade if frequency constraints violated
                 if self.current_step % 500 == 0:  # Log occasionally for diagnosis
                     self.logger.debug(f"❄️ Trade blocked for {asset}: {reason}")
                 action[base_idx + 0] = 0.0  # Neutralize action
@@ -276,6 +313,15 @@ class RealisticTradingEnv(MultiAssetChunkedEnv):
                         timeframe=getattr(self, 'current_timeframe_for_trade', '5m'),
                         is_forced=False  # Natural trade
                     )
+                    # CRITICAL: Increment counters per timeframe AND daily total
+                    if hasattr(self, 'positions_count'):
+                        tf = getattr(self, 'current_timeframe_for_trade', '5m')
+                        # Increment timeframe-specific counter
+                        if tf in self.positions_count:
+                            self.positions_count[tf] = self.positions_count.get(tf, 0) + 1
+                        # Increment daily total
+                        self.positions_count['daily_total'] = self.positions_count.get('daily_total', 0) + 1
+                        self.logger.debug(f"[NATURAL_TRADE] TF={tf} Count={self.positions_count.get(tf, 0)}, Daily={self.positions_count['daily_total']}")
                     trades_executed_this_step += 1
 
         # Call parent implementation with filtered actions

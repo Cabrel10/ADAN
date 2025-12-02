@@ -1834,10 +1834,11 @@ class MultiAssetChunkedEnv(gym.Env):
         self.action_space = spaces.Box(
             low=-1,
             high=1,
-            shape=(15,),
-            dtype=np.float32,  # 5 actifs × 3 = 15 dimensions
+            shape=(25,),  # 5 actifs × 5 dimensions (Action, Size, TF, SL, TP)
+            dtype=np.float32,
         )
         logger.info(f"Espace d'action configuré : {self.action_space}")
+        logger.info(f"Structure par actif : [Action, Size, Timeframe, StopLoss, TakeProfit]")
         logger.info(f"Actifs configurés : {len(self.assets)}/5 actifs ({self.assets})")
         if len(self.assets) < 5:
             logger.info(
@@ -2701,14 +2702,18 @@ class MultiAssetChunkedEnv(gym.Env):
             action = np.clip(np.asarray(action, dtype=np.float32), -1.0, 1.0)
 
             # Validation pour 5 actifs avec support pour actions de taille 14 (compatibilité modèles PPO existants)
+            # et 25 (Autonomie SL/TP)
             if action.shape == (14,):
                 # Padding temporaire : ajouter un zéro pour compatibilité 15 dimensions
                 action = np.pad(action, (0, 1), mode="constant", constant_values=0.0)
                 logger.debug(f"[ACTION_COMPAT] Action paddée de 14 à 15 dimensions")
+            elif action.shape == (25,):
+                # Nouvelle structure autonome (5 actifs * 5 params)
+                pass
             elif action.shape != (15,):
                 raise ValueError(
                     f"Action shape {action.shape} does not match "
-                    f"expected shape (5 actifs × 3 = 15,) ou (14,) pour compatibilité"
+                    f"expected shape (25,) [Autonomy], (15,) [Legacy], or (14,) [Compat]"
                 )
 
             # Early risk check before executing any trades
@@ -2789,7 +2794,20 @@ class MultiAssetChunkedEnv(gym.Env):
             # Get frequency configuration for trade execution
             frequency_config = self.config.get("trading_rules", {}).get("frequency", {})
             # FIX: Use action_threshold directly, NOT min_confidence
-            action_threshold = frequency_config.get("action_threshold", 0.001)
+            # CURRICULUM LEARNING: Start with lower thresholds to help 25D action space learning
+            base_threshold = frequency_config.get("action_threshold", 0.001)
+            
+            # Adaptive threshold: Start at 50% of config value, increase to 100% over 100k steps
+            curriculum_progress = min(1.0, self.current_step / 100000.0)
+            threshold_multiplier = 0.5 + (0.5 * curriculum_progress)
+            action_threshold = base_threshold * threshold_multiplier
+            
+            if self.current_step % 10000 == 0:  # Log every 10k steps
+                self.logger.info(
+                    f"[CURRICULUM] Step {self.current_step}: "
+                    f"Threshold multiplier={threshold_multiplier:.2f}, "
+                    f"Effective threshold={action_threshold:.4f} (base={base_threshold:.4f})"
+                )
 
             # Calcul des paramètres de risque dynamiques via le DBE
             dbe_modulation = self.dbe.compute_dynamic_modulation(
@@ -5439,6 +5457,9 @@ class MultiAssetChunkedEnv(gym.Env):
             if i >= len(action) or asset not in current_prices:
                 continue
 
+            # Get current price for SL/TP calculation
+            price = current_prices[asset]
+
             # Décodage de l'action pour l'actif courant (compatibilité 5 actifs)
             # L'action est un vecteur aplati de 15 dimensions [0-2: asset0, 3-5: asset1, 6-8: asset2, ...]
             base_idx = i * 3  # 0, 3, 6, 9, 12 pour les actifs 0, 1, 2, 3, 4
@@ -5446,8 +5467,53 @@ class MultiAssetChunkedEnv(gym.Env):
                 # Ignorer si cet indice d'actif dépasse l'espace d'action
                 continue
             main_decision = action[base_idx + 0]
+            # base_idx = i * 3  # 0, 3, 6, 9, 12 pour les actifs 0, 1, 2, 3, 4
+            # if base_idx + 2 >= len(action):
+            #     # Ignorer si cet indice d'actif dépasse l'espace d'action
+            #     continue
+            # main_decision = action[base_idx + 0]
 
             discrete_action = 0  # Hold
+            # Extraction des composantes de l'action pour cet actif
+            # Structure v2 (Autonomie): [Action, Size, Timeframe, StopLoss, TakeProfit]
+            base_idx = i * 5
+            if base_idx + 4 >= len(action): # Check if 5 dimensions are available
+                # If not enough dimensions, skip this asset or handle as an error
+                self.logger.warning(f"Not enough action dimensions for asset {asset} at index {i}. Expected 5, got less.")
+                continue
+
+            action_raw = action[base_idx]      # -1 (Sell) à 1 (Buy)
+            size_raw = action[base_idx + 1]    # 0 à 1 (Taille)
+            tf_raw = action[base_idx + 2]      # -1 (5m) à 1 (4h)
+            sl_raw = action[base_idx + 3]      # -1 (Serré) à 1 (Large)
+            tp_raw = action[base_idx + 4]      # -1 (Serré) à 1 (Large)
+
+            # 1. Décodage du Timeframe
+            # Mapping continu [-1, 1] vers discret [0, 1, 2]
+            tf_idx = int((tf_raw + 1) * 1.5)  # Maps -1->0, 0->1, 1->3 (clamped)
+            tf_idx = max(0, min(len(self.timeframes) - 1, tf_idx))
+            self.current_timeframe_for_trade = self.timeframes[tf_idx]
+
+            # 2. Décodage Action & Taille
+            main_decision = action_raw  # > thr = Buy, < -thr = Sell
+            
+            # 3. Décodage SL/TP (Autonomie)
+            # Conversion des valeurs normalisées [-1, 1] en pourcentages de distance
+            # SL: 0.5% à 10%
+            sl_pct = 0.005 + (sl_raw + 1) / 2 * (0.10 - 0.005)
+            # TP: 1.0% à 20%
+            tp_pct = 0.01 + (tp_raw + 1) / 2 * (0.20 - 0.01)
+
+            # Calcul des prix SL/TP
+            sl_price = None
+            tp_price = None
+            if main_decision > 0: # Long
+                sl_price = price * (1 - sl_pct)
+                tp_price = price * (1 + tp_pct)
+            else: # Short (si activé un jour)
+                sl_price = price * (1 + sl_pct)
+                tp_price = price * (1 - tp_pct)
+
             if main_decision < -action_threshold:
                 discrete_action = 2  # Sell
             elif main_decision > action_threshold:
@@ -5456,14 +5522,8 @@ class MultiAssetChunkedEnv(gym.Env):
             if i == 0:
                 first_discrete_action = discrete_action
 
-            risk_horizon = action[base_idx + 1]
-            desired_position_size = action[base_idx + 2]
-
-            # CORRECTION: Vérifier que le prix est disponible avant de trader
-            price = current_prices.get(asset)
-            if price is None:
-                self.logger.warning(f"Skipping trade for {asset} at step {self.current_step} due to unavailable price.")
-                continue
+            # risk_horizon = action[base_idx + 1] # This is now part of the 5-dim action as tf_raw
+            # desired_position_size = action[base_idx + 2] # This is now size_raw
 
             position = self.portfolio_manager.positions.get(asset)
             is_open = position and position.is_open
@@ -5498,6 +5558,10 @@ class MultiAssetChunkedEnv(gym.Env):
                     realized_pnl += float(receipt.get("pnl", 0.0))
                     trade_executed_this_step = True
                 continue  # Passer à l'actif suivant
+
+            # DEBUG LOGGING
+            if self.current_step % 100 == 0 and i == 0:
+                 self.logger.info(f"[DEBUG_EXEC] Asset={asset} Action={main_decision:.3f} IsOpen={is_open} CanOpen={self.can_open_trade(self.current_timeframe_for_trade)}")
 
             # A. L'agent veut VENDRE (fermer une position)
             should_force_close = False

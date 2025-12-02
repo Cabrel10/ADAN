@@ -57,6 +57,7 @@ class OrderManager:
             return False
 
         # If size is not provided, calculate it based on risk
+        # Uses Capital Tiers from config.yaml (risk_per_trade_pct varies by capital level)
         if size is None:
             stop_loss_pct = self.trading_rules.get("stop_loss", 0.0)
             risk_per_trade = self.trading_rules.get("risk_per_trade", 0.01)
@@ -69,6 +70,8 @@ class OrderManager:
             else:
                 # Default to 10% of available capital if no stop loss
                 size = (available_capital * 0.1) / price
+        # Else: size was provided by agent (from SL/TP autonomy), use it as-is
+        # The Capital Tiers system in the environment will validate it
 
         # Round to appropriate decimal places for the asset
         size = round(size, 8)  # 8 decimal places for crypto
@@ -83,10 +86,14 @@ class OrderManager:
             return False
 
         # Open the position through the portfolio manager
-        # Note: stop_loss and take_profit are not used in the current
-        # implementation of portfolio.open_position, but we keep them
-        # in the signature for future use
-        return portfolio.open_position(asset, price, size)
+        # Updated to pass SL/TP for full autonomy
+        return portfolio.open_position(
+            asset, 
+            price, 
+            size, 
+            stop_loss=stop_loss, 
+            take_profit=take_profit
+        )
 
     def close_position(
         self,

@@ -152,8 +152,9 @@ class TradeFrequencyController:
         if not is_forced:
             self.daily_trade_count += 1
         
-        # Update per-asset tracking
-        self.asset_last_trade[asset] = current_step
+        # Update per-asset tracking (ONLY for natural trades to avoid cooldown interference)
+        if not is_forced:
+            self.asset_last_trade[asset] = current_step
         self.asset_trade_count[asset] = self.asset_trade_count.get(asset, 0) + 1
         
         # Update per-timeframe tracking if provided

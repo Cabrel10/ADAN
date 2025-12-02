@@ -1353,7 +1353,7 @@ workers:
           4h: 24
         freq_penalty_weight: 0.05
       position_hold_min: 2
-      daily_max_forced_trades: 50
+      daily_max_forced_trades: 10  # Max 10 forced/day (user spec)
       position_hold_max: 70
       max_consecutive_losses: 4
       min_trade_quality_score: 0.8984
@@ -1460,7 +1460,7 @@ workers:
           1h: 33
           4h: 22
         freq_penalty_weight: 0.05
-        daily_max_forced_trades: 50
+        daily_max_forced_trades: 10  # Max 10 forced/day
     risk_per_trade_pct_by_tier:
       Enterprise: 0.6
       High: 0.8
@@ -1557,7 +1557,7 @@ workers:
           1h: 30
           4h: 9
         freq_penalty_weight: 0.05
-        daily_max_forced_trades: 50
+        daily_max_forced_trades: 10  # Max 10 forced/day
     risk_per_trade_pct_by_tier:
       Enterprise: 1.0
       High: 1.2
