@@ -661,6 +661,7 @@ environment:
   frequency_validation:
     force_trade:
       enabled: true
+      max_daily_forced_trades: 10  # Increased from 10 to prevent deadlock
       escalation_steps:
       - 30
       - 50
@@ -824,17 +825,17 @@ environment:
     1h:
       action_threshold: 0.008
       description: Medium-term trading optimized
-      force_trade_steps: 20
+      force_trade_steps: 10
       min_magnitude: 0.005
     4h:
       action_threshold: 0.012
       description: Long-term trading enabled
-      force_trade_steps: 15
+      force_trade_steps: 7
       min_magnitude: 0.008
     5m:
       action_threshold: 0.005
       description: High-frequency trading enabled
-      force_trade_steps: 30
+      force_trade_steps: 15
       min_magnitude: 0.003
   volatility_handling:
     cache_calculations: true
