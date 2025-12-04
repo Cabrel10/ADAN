@@ -607,8 +607,11 @@ class MultiAssetChunkedEnv(gym.Env):
                 close_price = market_conditions.get("close", 50000.0)
 
             # ✅ NOUVEAU: Appeler le DBE pour obtenir les modulations de risque
+            # MAIS seulement si le DBE est activé dans la config
+            dbe_enabled = self.config.get('dbe', {}).get('enabled', True)
             dbe_modulation = None
-            if hasattr(self, "dynamic_behavior_engine") and self.dynamic_behavior_engine:
+            
+            if dbe_enabled and hasattr(self, "dynamic_behavior_engine") and self.dynamic_behavior_engine:
                 try:
                     # compute_dynamic_modulation n'a besoin que de l'env
                     dbe_modulation = self.dynamic_behavior_engine.compute_dynamic_modulation(env=self)
@@ -616,6 +619,16 @@ class MultiAssetChunkedEnv(gym.Env):
                 except Exception as e:
                     logger.warning(f"[DBE_MODULATION_ERROR] Worker {self.worker_id}: {e}")
                     dbe_modulation = None
+            elif not dbe_enabled:
+                # DBE désactivé - utiliser les params de la config directement (pour Optuna)
+                risk_mgmt = self.config.get('trading_rules', {}).get('risk_management', {})
+                pos_sizing = self.config.get('trading_rules', {}).get('position_sizing', {})
+                dbe_modulation = {
+                    'sl_pct': risk_mgmt.get('stop_loss_pct', 0.02),
+                    'tp_pct': risk_mgmt.get('take_profit_pct', 0.04),
+                    'position_size_pct': pos_sizing.get('position_size_pct', 0.20),
+                }
+                logger.info(f"[DBE_DISABLED] Using config params directly: SL={dbe_modulation['sl_pct']:.4f}, TP={dbe_modulation['tp_pct']:.4f}")
 
             # 1. Détection du régime de marché
             regime, confidence = self._detect_market_regime(market_conditions)
@@ -628,7 +641,10 @@ class MultiAssetChunkedEnv(gym.Env):
                 risk_params["stop_loss_pct"] = dbe_modulation.get("sl_pct", risk_params.get("stop_loss_pct", 0.02))
                 risk_params["take_profit_pct"] = dbe_modulation.get("tp_pct", risk_params.get("take_profit_pct", 0.04))
                 risk_params["position_size_pct"] = dbe_modulation.get("position_size_pct", risk_params.get("position_size_pct", 0.1))
-                logger.info(f"[RISK_PARAMS_FROM_DBE] Worker {self.worker_id}: SL={risk_params['stop_loss_pct']:.4f}, TP={risk_params['take_profit_pct']:.4f}, PosSize={risk_params['position_size_pct']:.4f}")
+                if dbe_enabled:
+                    logger.info(f"[RISK_PARAMS_FROM_DBE] Worker {self.worker_id}: SL={risk_params['stop_loss_pct']:.4f}, TP={risk_params['take_profit_pct']:.4f}, PosSize={risk_params['position_size_pct']:.4f}")
+                else:
+                    logger.info(f"[RISK_PARAMS_FROM_CONFIG] Worker {self.worker_id}: SL={risk_params['stop_loss_pct']:.4f}, TP={risk_params['take_profit_pct']:.4f}, PosSize={risk_params['position_size_pct']:.4f}")
 
             # 3. Application des limites de risque
             self._apply_risk_limits(risk_params)
@@ -6274,7 +6290,8 @@ class MultiAssetChunkedEnv(gym.Env):
         # Trading statistics détaillées
         total_trades = portfolio_metrics.get("total_trades", 0)
         valid_trades = portfolio_metrics.get("valid_trades", 0)
-        closed_positions = portfolio_metrics.get("closed_positions", [])
+        # Utiliser _step_closed_receipts qui contient les fermetures SL/TP réelles
+        closed_positions = getattr(self, "_step_closed_receipts", []) or portfolio_metrics.get("closed_positions", [])
 
         # Récompenses et pénalités
         last_reward = getattr(self, "_last_reward", 0.0)
