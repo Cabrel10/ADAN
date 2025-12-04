@@ -41,6 +41,7 @@ class StableRewardCalculator:
         drawdown_penalty_weight: float = 0.3,
         frequency_penalty_weight: float = 0.1,
         consistency_bonus_weight: float = 0.1,
+        invalid_sell_penalty_weight: float = 0.05,  # Penalty for selling without position
         returns_window: int = 100  # Window for Sharpe calculation
     ):
         """
@@ -52,6 +53,7 @@ class StableRewardCalculator:
             drawdown_penalty_weight: Weight for drawdown penalty
             frequency_penalty_weight: Weight for frequency penalty
             consistency_bonus_weight: Weight for consistency bonus
+            invalid_sell_penalty_weight: Weight for invalid sell penalty
             returns_window: Window size for returns tracking
         """
         self.pnl_norm_factor = pnl_normalization_factor
@@ -59,6 +61,7 @@ class StableRewardCalculator:
         self.drawdown_penalty_weight = drawdown_penalty_weight
         self.frequency_penalty_weight = frequency_penalty_weight
         self.consistency_bonus_weight = consistency_bonus_weight
+        self.invalid_sell_penalty_weight = invalid_sell_penalty_weight
         
         # Track returns for Sharpe calculation
         self.returns_window = returns_window
@@ -71,7 +74,19 @@ class StableRewardCalculator:
             f"StableRewardCalculator initialized "
             f"(pnl_norm={self.pnl_norm_factor}, sharpe_w={sharpe_weight}, "
             f"dd_w={drawdown_penalty_weight}, freq_w={frequency_penalty_weight})"
+            f"dd_w={drawdown_penalty_weight}, freq_w={frequency_penalty_weight})"
         )
+
+    def update_normalization_factor(self, new_factor: float) -> None:
+        """
+        Update the PnL normalization factor dynamically.
+        Useful when capital scales significantly (e.g. Micro vs Enterprise tiers).
+        """
+        if new_factor <= 0:
+            return
+        old_factor = self.pnl_norm_factor
+        self.pnl_norm_factor = float(new_factor)
+        logger.info(f"Updated PnL Normalization Factor: {old_factor:.2f} -> {self.pnl_norm_factor:.2f}")
     
     def calculate_reward(
         self,
@@ -79,7 +94,8 @@ class StableRewardCalculator:
         portfolio_value: float,
         initial_value: float,
         trade_count: int,
-        step_return: Optional[float] = None
+        step_return: Optional[float] = None,
+        invalid_sell_attempts: int = 0
     ) -> Dict[str, float]:
         """
         Calculate normalized reward with all components.
@@ -90,6 +106,7 @@ class StableRewardCalculator:
             initial_value: Initial portfolio value
             trade_count: Number of trades executed this step
             step_return: Optional pre-calculated step return
+            invalid_sell_attempts: Number of invalid sell attempts (no position)
             
         Returns:
             Dictionary with reward breakdown:
@@ -98,6 +115,7 @@ class StableRewardCalculator:
                 'sharpe_component': float,
                 'drawdown_penalty': float,
                 'frequency_penalty': float,
+                'invalid_sell_penalty': float,
                 'consistency_bonus': float,
                 'total_reward': float  # Clipped to [-1, 1]
             }
@@ -124,12 +142,16 @@ class StableRewardCalculator:
         # 6. Consistency bonus
         consistency_bonus = self._apply_consistency_bonus(list(self.returns_history))
         
+        # 6.5 Invalid Sell Penalty
+        invalid_sell_penalty = float(invalid_sell_attempts) * self.invalid_sell_penalty_weight
+        
         # 7. Combine components
         total_reward = (
             pnl_component +
             self.sharpe_weight * sharpe_component -
             self.drawdown_penalty_weight * drawdown_penalty -
-            self.frequency_penalty_weight * frequency_penalty +
+            self.frequency_penalty_weight * frequency_penalty -
+            invalid_sell_penalty +
             self.consistency_bonus_weight * consistency_bonus
         )
         
@@ -141,6 +163,7 @@ class StableRewardCalculator:
             'sharpe_component': float(sharpe_component),
             'drawdown_penalty': float(drawdown_penalty),
             'frequency_penalty': float(frequency_penalty),
+            'invalid_sell_penalty': float(invalid_sell_penalty),
             'consistency_bonus': float(consistency_bonus),
             'total_reward': float(total_reward)
         }

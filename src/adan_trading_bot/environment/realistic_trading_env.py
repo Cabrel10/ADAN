@@ -84,12 +84,21 @@ class RealisticTradingEnv(MultiAssetChunkedEnv):
         # Hold minimum tracking (per-asset entry steps)
         self.asset_entry_steps: Dict[str, int] = {}
         
+        # Optuna Overrides (Priority over DBE)
+        self.optuna_sl_override = kwargs.get("stop_loss_pct")
+        self.optuna_tp_override = kwargs.get("take_profit_pct")
+        
+        if self.optuna_sl_override:
+            self.logger.info(f"🔒 OPTUNA OVERRIDE: Stop Loss fixed at {self.optuna_sl_override:.2%}")
+        if self.optuna_tp_override:
+            self.logger.info(f"🔒 OPTUNA OVERRIDE: Take Profit fixed at {self.optuna_tp_override:.2%}")
+
         # Initialize Market Friction Models
         self.enable_market_friction = enable_market_friction
         if self.enable_market_friction:
             f_cfg = friction_config or {}
             self.slippage_model = AdaptiveSlippage(
-                base_slippage_bps=f_cfg.get("slippage_bps", 2.0),
+                base_slippage_bps=f_cfg.get("slippage_bps", 2.0) / 100.0,
                 size_impact_factor=0.1,
                 volatility_impact_factor=0.5
             )
@@ -132,6 +141,13 @@ class RealisticTradingEnv(MultiAssetChunkedEnv):
         self.freq_controller.reset()
         if self.use_stable_reward:
             self.reward_calculator.reset()
+            # Dynamically adjust PnL normalization based on initial capital
+            # Target: 1% gain ~= 1.0 normalized reward (before tanh)
+            initial_cap = self.portfolio_manager.initial_capital
+            if initial_cap > 0:
+                # e.g. $20 -> factor 0.2; $1000 -> factor 10.0
+                dynamic_factor = max(initial_cap * 0.01, 1.0)
+                self.reward_calculator.update_normalization_factor(dynamic_factor)
         
         # Reset state tracking
         self.circuit_breaker_triggered = False
@@ -155,6 +171,7 @@ class RealisticTradingEnv(MultiAssetChunkedEnv):
             return self._get_observation(), -1.0, True, False, {"circuit_breaker": True}
             
         # Check dynamic circuit breakers (Drawdown, etc.)
+        # Check dynamic circuit breakers (Drawdown, etc.)
         if self._check_circuit_breakers():
             self.circuit_breaker_triggered = True
             self.logger.critical("🚨 CIRCUIT BREAKER TRIGGERED: Max Drawdown or Risk Limit exceeded! Closing all positions.")
@@ -162,19 +179,88 @@ class RealisticTradingEnv(MultiAssetChunkedEnv):
             return self._get_observation(), -10.0, True, False, {"circuit_breaker_triggered": True}
 
         # Proceed with normal step execution
-        return super().step(action)
+        obs, reward, terminated, truncated, info = super().step(action)
+        
+        # ------------------------------------------------------------------
+        # PARETO RISK DETECTOR UPDATE (Phase 2: Security & Robustness)
+        # ------------------------------------------------------------------
+        # Update Pareto detector with portfolio return for regime detection
+        if hasattr(self, 'order_manager') and self.order_manager.pareto_detector is not None:
+            # Calculate step return: (current_value - previous_value) / previous_value
+            current_value = self.portfolio_manager.get_total_value()
+            if not hasattr(self, '_previous_portfolio_value'):
+                self._previous_portfolio_value = current_value
+            
+            if self._previous_portfolio_value > 0:
+                portfolio_return = (current_value - self._previous_portfolio_value) / self._previous_portfolio_value
+                self.order_manager.pareto_detector.update(portfolio_return)
+            
+            self._previous_portfolio_value = current_value
 
-    def _validate_market_data(self) -> bool:
+        # CRITICAL: Enforce Optuna Overrides on Risk Parameters
+        # This must happen AFTER DBE updates but BEFORE any trading logic uses them
+        if hasattr(self, 'portfolio_manager'):
+            if self.optuna_sl_override is not None:
+                self.portfolio_manager.sl_pct = self.optuna_sl_override
+            if self.optuna_tp_override is not None:
+                self.portfolio_manager.tp_pct = self.optuna_tp_override
+        
+        return obs, reward, terminated, truncated, info
+
+    def _calculate_reward(self, action: np.ndarray, realized_pnl: float) -> float:
+        """
+        Override to use StableRewardCalculator.
+        """
+        if not self.use_stable_reward:
+            return super()._calculate_reward(action, realized_pnl)
+            
+        # Gather metrics
+        current_value = self.portfolio_manager.get_total_value()
+        initial_value = self.portfolio_manager.initial_capital
+        
+        # Get trade count for this step
+        trade_count = 0
+        if hasattr(self, '_step_info') and isinstance(self._step_info, dict):
+            trade_count = self._step_info.get('trades_executed', 0)
+            
+        # Get invalid sell attempts
+        invalid_sells = getattr(self, 'invalid_sell_attempts', 0)
+        
+        # Calculate reward
+        reward_dict = self.reward_calculator.calculate_reward(
+            pnl=realized_pnl,
+            portfolio_value=current_value,
+            initial_value=initial_value,
+            trade_count=trade_count,
+            invalid_sell_attempts=invalid_sells
+        )
+        
+        # Store breakdown in info for debugging
+        if hasattr(self, '_step_info') and isinstance(self._step_info, dict):
+            self._step_info['reward_breakdown'] = reward_dict
+            
+        return reward_dict['total_reward']
+
+    def _validate_market_data(self, current_prices: Dict[str, float] = None) -> bool:
         """
         Phase 2: Sanity Checks / Anti-Adversarial Filters
         Returns True if data is valid, False if anomaly detected.
         """
-        current_prices = self._get_current_prices()
+        if current_prices is None:
+            current_prices = self._get_current_prices()
+        
         if not current_prices:
+            # Only log if we expected prices but got none (avoid spamming if env is resetting)
+            if hasattr(self, "current_step") and self.current_step > 0:
+                self.logger.warning("⚠️ SANITY CHECK FAILED: No prices returned from _get_current_prices")
             return False
             
         for asset, price in current_prices.items():
+            if price is None:
+                self.logger.warning(f"⚠️ SANITY CHECK FAILED: Price for {asset} is None")
+                return False
             if price <= 0:
+                self.logger.warning(f"⚠️ SANITY CHECK FAILED: Price for {asset} is invalid ({price})")
                 return False
             
             # Check for extreme price jumps (> 10% in 1 step) if we have history

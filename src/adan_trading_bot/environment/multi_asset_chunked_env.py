@@ -1698,6 +1698,12 @@ class MultiAssetChunkedEnv(gym.Env):
                             f"[CHUNK_LOADER] Successfully loaded chunk {chunk_idx} on attempt {attempt + 1}",
                             rotate=True,
                         )
+                        
+                        # CRITICAL FIX: Deepcopy to prevent cache corruption
+                        # DataLoader uses lru_cache, so we must not modify the returned object in-place
+                        import copy
+                        chunk_data = copy.deepcopy(chunk_data)
+
                         # 2. Charger l'état du DBE
                         if hasattr(self, "dbe") and self.dbe is not None and os.path.exists(dbe_state_file):
                             try:
@@ -2720,6 +2726,14 @@ class MultiAssetChunkedEnv(gym.Env):
             # Ensure local info dict exists to attach spot protection context
             info = {}
             current_prices = self._get_current_prices()
+            
+            # CRITICAL FIX: Update portfolio value with current prices and PnL
+            if hasattr(self, "portfolio_manager") and hasattr(self.portfolio_manager, "_update_equity"):
+                try:
+                    self.portfolio_manager._update_equity(current_prices)
+                except Exception as e:
+                    logger.warning(f"Failed to update equity: {e}")
+            
             try:
                 # Update portfolio with current prices and enforce protection limits
                 if hasattr(self, "portfolio_manager"):
@@ -2793,20 +2807,37 @@ class MultiAssetChunkedEnv(gym.Env):
 
             # Get frequency configuration for trade execution
             frequency_config = self.config.get("trading_rules", {}).get("frequency", {})
-            # FIX: Use action_threshold directly, NOT min_confidence
-            # CURRICULUM LEARNING: Start with lower thresholds to help 25D action space learning
-            base_threshold = frequency_config.get("action_threshold", 0.001)
             
-            # Adaptive threshold: Start at 50% of config value, increase to 100% over 100k steps
-            curriculum_progress = min(1.0, self.current_step / 100000.0)
-            threshold_multiplier = 0.5 + (0.5 * curriculum_progress)
-            action_threshold = base_threshold * threshold_multiplier
+            # ===================================================================
+            # FIX CRITIQUE: Charger action_threshold depuis le BON endroit
+            # AVANT: Utilisait trading_rules.frequency.action_threshold (inexistant)
+            #        + curriculum learning contre-productif (×0.5 au début)
+            # APRÈS: Charge environment.action_thresholds[timeframe] directement
+            # ===================================================================
             
-            if self.current_step % 10000 == 0:  # Log every 10k steps
+            # 1. Charger thresholds depuis environment (config calibré)
+            env_thresholds = self.config.get("environment", {}).get("action_thresholds", {})
+            
+            # 2. Déterminer timeframe actuel
+            current_timeframe = getattr(self, "current_timeframe_for_trade", "5m")
+            
+            # 3. Charger threshold pour ce timeframe (avec fallback sécurisé)
+            if env_thresholds and current_timeframe in env_thresholds:
+                action_threshold = float(env_thresholds[current_timeframe])
+            else:
+                # Fallback si config mal formaté: valeurs sécurisées par défaut
+                default_thresholds = {'5m': 0.05, '1h': 0.08, '4h': 0.10}
+                action_threshold = default_thresholds.get(current_timeframe, 0.05)
+                self.logger.warning(
+                    f"[THRESHOLD] Config environment.action_thresholds manquant pour {current_timeframe}, "
+                    f"utilisation fallback: {action_threshold}"
+                )
+            
+            # Log du threshold appliqué (tous les 1000 steps)
+            if self.current_step % 1000 == 0:
                 self.logger.info(
-                    f"[CURRICULUM] Step {self.current_step}: "
-                    f"Threshold multiplier={threshold_multiplier:.2f}, "
-                    f"Effective threshold={action_threshold:.4f} (base={base_threshold:.4f})"
+                    f"[THRESHOLD] Step {self.current_step} | TF={current_timeframe} | "
+                    f"Threshold={action_threshold:.4f} (config direct, NO curriculum)"
                 )
 
             # Calcul des paramètres de risque dynamiques via le DBE
@@ -3850,13 +3881,16 @@ class MultiAssetChunkedEnv(gym.Env):
 
     def _get_current_prices(self) -> Dict[str, float]:
         """
-        CORRECTED: Retrieve representative prices per asset with STRICT indexing.
-        No more fallbacks to past or last known prices. If the price for the current
-        step is not available, it returns None for that asset.
+        CORRECTED V3: Retrieve prices with robust indexing and safety net.
+        1. Calculates correct index per timeframe.
+        2. Backtracks if invalid price (0.0/NaN) is found (handling padding).
+        3. Returns None only if no valid price found after backtracking.
         """
         prices: Dict[str, Optional[float]] = {}
-        step_idx = int(getattr(self, "step_in_chunk", 0))
-
+        
+        # Get the step within current chunk (calculated for base timeframe, usually 5m)
+        base_step_in_chunk = int(getattr(self, "step_in_chunk", 0))
+        
         if not hasattr(self, "current_data") or not self.current_data:
             self.logger.error("_get_current_prices called without current_data loaded")
             return {a: None for a in getattr(self, "assets", [])}
@@ -3868,13 +3902,27 @@ class MultiAssetChunkedEnv(gym.Env):
                     return lowered[candidate]
             return None
 
+        # Timeframe conversion ratios (minutes per candle)
+        tf_minutes = {
+            "1m": 1,
+            "5m": 5,
+            "15m": 15,
+            "30m": 30,
+            "1h": 60,
+            "4h": 240,
+            "1d": 1440
+        }
+        
+       # Assume base timeframe is 5m (most common)
+        base_tf_minutes = 5
+
         for asset in getattr(self, "assets", []):
             asset_key = asset.upper()
             tf_map = self.current_data.get(asset)
             prices[asset_key] = None  # Default to None
 
             if not isinstance(tf_map, dict) or not tf_map:
-                self.smart_logger.warning(f"PRICE_DATA_MISSING | asset={asset_key} | reason=empty_timeframe_map")
+                self.smart_logger.warning(f"PRICE_DATA_MISSING | asset={asset_key} | reason=empty_timeframe_map", dedupe=True)
                 continue
 
             preferred_order = [getattr(self, "current_timeframe_for_trade", None), "5m", "1h", "4h"]
@@ -3882,7 +3930,7 @@ class MultiAssetChunkedEnv(gym.Env):
             df = tf_map.get(timeframe)
 
             if df is None or df.empty:
-                self.smart_logger.warning(f"PRICE_DATA_EMPTY | asset={asset_key} | timeframe={timeframe}")
+                self.smart_logger.warning(f"PRICE_DATA_EMPTY | asset={asset_key} | timeframe={timeframe}", dedupe=True)
                 continue
 
             close_col = _resolve_close_column(df)
@@ -3890,36 +3938,61 @@ class MultiAssetChunkedEnv(gym.Env):
                 self.smart_logger.error(f"PRICE_NO_CLOSE_COL | asset={asset_key} | timeframe={timeframe} | cols={list(df.columns)}")
                 continue
 
-            # STRICT INDEXING with clamping to avoid hard failures at chunk edges
-            if not (0 <= step_idx < len(df)):
-                self.smart_logger.warning(
-                    f"PRICE_OUT_OF_BOUNDS | asset={asset_key} | timeframe={timeframe} | step_in_chunk={step_idx} outside [0, {len(df)-1}] — clamping.",
-                    dedupe=True,
-                )
-                # Clamp index into valid bounds
-                step_idx = max(0, min(step_idx, len(df) - 1))
-                self.smart_logger.warning(
-                    f"PRICE_INDEX_CLAMP | asset={asset_key} | timeframe={timeframe} | clamped_step={step_idx}",
-                    dedupe=True,
-                )
+            # CRITICAL: Convert step_in_chunk to this timeframe's index
+            tf_minutes_value = tf_minutes.get(timeframe, base_tf_minutes)
+            conversion_ratio = tf_minutes_value / base_tf_minutes
+            
+            # Calculate index for THIS timeframe
+            target_step_idx = int(base_step_in_chunk / conversion_ratio)
+            
+            # Safety bounds check
+            chunk_size_for_tf = len(df)
+            
+            # Initial clamp
+            step_idx = min(target_step_idx, chunk_size_for_tf - 1)
+            
+            if step_idx < 0:
+                step_idx = 0
 
-            try:
-                price = float(df.iloc[step_idx][close_col])
-                if not np.isfinite(price) or price <= 0:
-                    self.smart_logger.error(f"PRICE_NON_FINITE | asset={asset_key} | timeframe={timeframe} | value={price}")
-                    continue # Keep price as None
+            # SAFETY NET: Backtrack if price is invalid (0.0 or NaN)
+            # This handles padding at the end of chunks or corrupted rows
+            max_backtrack = 5
+            found_valid = False
+            
+            for offset in range(max_backtrack + 1):
+                current_idx = step_idx - offset
+                if current_idx < 0:
+                    break
                 
-                prices[asset_key] = price
-
-            except (ValueError, IndexError) as price_error:
+                try:
+                    price = float(df.iloc[current_idx][close_col])
+                    
+                    if np.isfinite(price) and price > 0:
+                        prices[asset_key] = price
+                        found_valid = True
+                        
+                        if offset > 0:
+                            self.smart_logger.warning(
+                                f"PRICE_BACKTRACKED | asset={asset_key} | timeframe={timeframe} | target_idx={step_idx} | valid_idx={current_idx} | offset={offset} | value={price}",
+                                dedupe=True
+                            )
+                        break
+                except (ValueError, IndexError):
+                    continue
+            
+            if not found_valid:
+                # Log failure only if we couldn't find ANY valid price
+                try:
+                    bad_val = df.iloc[step_idx][close_col]
+                except:
+                    bad_val = "ERROR"
+                    
                 self.smart_logger.error(
-                    f"PRICE_READ_ERROR | asset={asset_key} | timeframe={timeframe} | idx={step_idx} | error={price_error}",
-                    dedupe=True,
+                    f"PRICE_INVALID_ALL_ATTEMPTS | asset={asset_key} | timeframe={timeframe} | idx={step_idx} | value={bad_val} | backtracked={max_backtrack}",
+                    dedupe=True
                 )
                 continue # Keep price as None
         
-        # NO MORE FALLBACKS to _last_known_prices.
-        # The method now returns None for assets where price is unavailable.
         return prices
 
     def _check_excessive_forward_fill(self):
@@ -5736,6 +5809,11 @@ class MultiAssetChunkedEnv(gym.Env):
                 # Pourcentage effectivement alloué vs equity
                 equity = self.portfolio_manager.get_equity()
                 final_pct = (position_size_usdt / equity) if equity > 0 else 0.0
+                
+                # Fix: risk_horizon non défini - utiliser valeur par défaut
+                # Cette variable était retirée de l'action space mais toujours utilisée ici
+                risk_horizon = 0.0  # Valeur par défaut sécurisée
+                
                 if size_in_asset_units > 0:
                     # Gate agent-initiated openings by can_open_trade()
                     tf = getattr(self, "current_timeframe_for_trade", "5m")

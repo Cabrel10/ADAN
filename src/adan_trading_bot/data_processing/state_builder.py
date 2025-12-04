@@ -855,7 +855,9 @@ class StateBuilder:
                     raise ValueError(f"No features configured for timeframe {tf}")
 
                 # Concatenate all assets for this timeframe
-                df = pd.concat(asset_dfs, axis=0)
+                # CRITICAL FIX: Explicit copy to prevent shared memory with self.current_data
+                # pd.concat can return a view/shared buffer if list has 1 element
+                df = pd.concat(asset_dfs, axis=0).copy()
 
                 # Standardize column names to lowercase
                 df.columns = [col.lower() for col in df.columns]

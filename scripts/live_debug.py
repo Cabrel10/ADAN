@@ -67,11 +67,14 @@ def run_live_debug(duration_seconds=30):
     
     logger.info("="*80)
     logger.info("✅ ENVIRONMENT READY - STARTING TRADING LOOP")
-    logger.info("="*80)
+    logger.info(f"Starting live debug session for {duration_seconds} seconds...")
     
-    start_time = time.time()
     steps = 0
-    trades = 0
+    start_time = time.time()
+    
+    # Initialize tracking variables
+    prev_num_positions = 0
+    prev_executed = 0
     
     while time.time() - start_time < duration_seconds:
         steps += 1
@@ -121,22 +124,28 @@ def run_live_debug(duration_seconds=30):
                 logger.info(f"      → {asset}: Size={pos.size:.6f}, Entry={pos.entry_price:.2f}")
         
         # EXECUTE STEP
-        logger.info("   ⚙️  Executing env.step()...")
+        logger.info("        # Execute step")
         obs, reward, terminated, truncated, info = env.step(action)
         
         # LOG POST-STEP STATE
-        new_daily_total = env.positions_count.get('daily_total', 0)
-        trades_this_step = info.get('trades_executed', 0)
+        portfolio_value = info.get('portfolio_value', 0)
+        num_positions = info.get('num_positions', 0)
         
-        if trades_this_step > 0:
-            trades += trades_this_step
-            logger.info(f"   🎉 TRADE EXECUTED! Total natural trades: {trades}")
+        # Check if trade was executed
+        trade_executed = num_positions > prev_num_positions or info.get('executed_trades_opened', 0) > prev_executed
+        
+        if trade_executed:
+            logger.info(f"   ✅ TRADE EXECUTED!")
         else:
             logger.info(f"   ⭕ No trade executed")
         
         logger.info(f"   Reward: {reward:.4f}")
         logger.info(f"   Info: {info}")
         
+        prev_num_positions = num_positions
+        prev_executed = info.get('executed_trades_opened', 0)
+        
+        # Check if episode ended
         if terminated or truncated:
             logger.info(f"   🔁 Episode ended ({'terminated' if terminated else 'truncated'})")
             obs, info = env.reset()
@@ -144,14 +153,17 @@ def run_live_debug(duration_seconds=30):
         # Small delay for readability
         time.sleep(0.1)
     
+    # Get final trade count from info
+    final_trades = info.get('frequency', {}).get('counts', {}).get('daily_total', 0)
+    
     logger.info("="*80)
     logger.info("🏁 SESSION COMPLETE")
     logger.info(f"   Total Steps: {steps}")
-    logger.info(f"   Natural Trades: {trades}")
+    logger.info(f"   Natural Trades: {final_trades}")
     logger.info(f"   Duration: {time.time() - start_time:.2f}s")
     logger.info("="*80)
     
-    return trades
+    return final_trades
 
 if __name__ == "__main__":
     duration = int(sys.argv[1]) if len(sys.argv) > 1 else 30

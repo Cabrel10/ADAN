@@ -636,9 +636,9 @@ diagnostics:
     validate_volatility_range: true
 environment:
   action_thresholds:
-    1h: 0.40   # Validé stable - filtre bruit gaussien
-    4h: 0.50   # Validé stable
-    5m: 0.30   # Validé stable - 0 trades natural sur gaussien (correct!)
+    1h: 0.40   # Test final: 0.40 pour 25D
+    4h: 0.50   # Test final: 0.50
+    5m: 0.30   # Test final: 0.30 - attendu ~15 trades/100 avec gaussien
   assets:
   - btcusdt
   base_currency: USDT

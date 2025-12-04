@@ -1,27 +1,57 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
-"""Manages and validates trade orders."""
-from typing import Any, Dict, Optional, Tuple
+"""
+Order Manager for ADAN Trading Bot.
+Handles order validation, execution, and risk management.
+"""
 
-from ..common.utils import get_logger
+import logging
+from typing import Optional
+
+# Import Pareto Risk Detector for tail event protection
+try:
+    from adan_trading_bot.risk.pareto_risk_detector import ParetoRiskDetector
+    PARETO_AVAILABLE = True
+except ImportError:
+    PARETO_AVAILABLE = False
+    
 from ..portfolio.portfolio_manager import PortfolioManager
 
 
-logger = get_logger()
+logger = logging.getLogger(__name__)
 
 
 class OrderManager:
-    """Manages and validates trade orders."""
+    """
+    Manages trade orders with risk controls and position sizing.
+    Integrates Pareto Risk Detector for dynamic risk adjustment during extreme market conditions.
+    """
 
-    def __init__(self, trading_rules: dict, penalties: dict):
-        """Initialize the OrderManager.
+    def __init__(self, trading_rules: dict, penalties: dict, enable_pareto: bool = True):
+        """
+        Initialize OrderManager.
 
         Args:
-            trading_rules: Dictionary of trading rules from the config.
-            penalties: Dictionary of penalties for invalid actions.
+            trading_rules: Trading rules configuration
+            penalties: Penalty configuration for invalid trades
+            enable_pareto: Whether to enable Pareto Risk Detector
         """
         self.trading_rules = trading_rules
         self.penalties = penalties
+        
+        # Initialize Pareto Risk Detector if available and enabled
+        self.pareto_detector = None
+        if PARETO_AVAILABLE and enable_pareto:
+            self.pareto_detector = ParetoRiskDetector(
+                window_size=100,
+                update_frequency=20,
+                high_vol_threshold=2.0,
+                extreme_threshold=5.0
+            )
+            logger.info("✅ Pareto Risk Detector enabled")
+        elif enable_pareto and not PARETO_AVAILABLE:
+            logger.warning("⚠️ Pareto Risk Detector requested but not available")
+        
         logger.info("OrderManager initialized.")
 
     def open_position(
@@ -61,6 +91,24 @@ class OrderManager:
         if size is None:
             stop_loss_pct = self.trading_rules.get("stop_loss", 0.0)
             risk_per_trade = self.trading_rules.get("risk_per_trade", 0.01)
+            
+            # ------------------------------------------------------------------
+            # PARETO RISK ADJUSTMENT (Phase 2: Security & Robustness)
+            # ------------------------------------------------------------------
+            # Adjust risk based on market regime (fat tails detection)
+            if self.pareto_detector is not None:
+                original_risk = risk_per_trade
+                risk_per_trade = self.pareto_detector.get_risk_multiplier(risk_per_trade)
+                
+                # Log adjustment if regime is not NORMAL
+                regime_info = self.pareto_detector.get_regime_info()
+                if regime_info['regime'] != "NORMAL":
+                    logger.info(
+                        f"📊 Pareto Adjustment: {regime_info['regime']} regime detected | "
+                        f"Risk: {original_risk*100:.1f}% → {risk_per_trade*100:.1f}% "
+                        f"(×{regime_info['multiplier']:.2f})"
+                    )
+            
             available_capital = portfolio.get_available_capital()
 
             # Simple position sizing based on risk per trade
