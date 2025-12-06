@@ -1,36 +1,36 @@
 {
   "trial": 3,
   "worker": "w3",
-  "timestamp": "2025-11-22T01:26:24.078596",
+  "timestamp": "2025-12-05T17:44:30.839531",
   "metrics": {
-    "total_trades": 16,
+    "total_trades": 49,
     "total_pnl": 0,
     "win_rate": 0.0,
-    "portfolio_final": 22.658718301923482,
-    "portfolio_growth": 0.10530333180114547,
+    "portfolio_final": 23.664960804324206,
+    "portfolio_growth": 0.15438833191825396,
     "timeframe_trades": {
       "5m": 0,
       "1h": 0,
       "4h": 0
     },
     "tf_diversity": 0,
-    "score": 0.23805616613040093,
+    "score": 0.2564859161713889,
     "params": {
-      "position_size_pct": 0.21277338797301093,
-      "risk_multiplier": 0.9832877049416716,
-      "patience_steps": 4,
-      "min_confidence": 0.008103032115366973,
-      "mts_5m": 9,
-      "mts_1h": 4,
-      "mts_4h": 4
+      "position_size_pct": 0.204300957674936,
+      "risk_multiplier": 0.9391297701387304,
+      "patience_steps": 1,
+      "min_confidence": 0.0026127883685224586,
+      "mts_5m": 1,
+      "mts_1h": 2,
+      "mts_4h": 8
     },
     "positions_opened": 0,
     "positions_closed": 0,
     "trade_attempts": 0,
-    "actions_taken": 2000,
-    "evaluation_steps": 2000,
-    "trade_frequency": 0.008,
-    "activity_score": 16,
+    "actions_taken": 3000,
+    "evaluation_steps": 3000,
+    "trade_frequency": 0.01633333333333333,
+    "activity_score": 49,
     "tier_progression": {
       "current_tier": "Micro",
       "tier_history": [
@@ -45,16 +45,16 @@
       "reached_enterprise": false
     },
     "reached_enterprise": false,
-    "max_drawdown": 0.6559460704208148,
+    "max_drawdown": 0.4042387833418871,
     "profit_consistency": 1.0
   },
   "hyperparams": {
-    "position_size_pct": 0.21277338797301093,
-    "risk_multiplier": 0.9832877049416716,
-    "patience_steps": 4,
-    "min_confidence": 0.008103032115366973,
-    "mts_5m": 9,
-    "mts_1h": 4,
-    "mts_4h": 4
+    "position_size_pct": 0.204300957674936,
+    "risk_multiplier": 0.9391297701387304,
+    "patience_steps": 1,
+    "min_confidence": 0.0026127883685224586,
+    "mts_5m": 1,
+    "mts_1h": 2,
+    "mts_4h": 8
   }
 }

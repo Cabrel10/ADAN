@@ -1,0 +1,771 @@
+{
+  "summary": {
+    "total_modules": 53,
+    "total_lines": 17034,
+    "total_classes": 97,
+    "total_functions": 36,
+    "complex": 34,
+    "substantial": 2,
+    "empty": 9
+  },
+  "categories": {
+    "INIT_EMPTY": [
+      {
+        "path": "src/adan_trading_bot/agent/__init__.py",
+        "lines": 4,
+        "classes": 0,
+        "functions": 0
+      },
+      {
+        "path": "src/adan_trading_bot/evaluation/__init__.py",
+        "lines": 4,
+        "classes": 0,
+        "functions": 0
+      },
+      {
+        "path": "src/adan_trading_bot/optimization/config/__init__.py",
+        "lines": 1,
+        "classes": 0,
+        "functions": 0
+      },
+      {
+        "path": "src/adan_trading_bot/optimization/monitoring/__init__.py",
+        "lines": 1,
+        "classes": 0,
+        "functions": 0
+      },
+      {
+        "path": "src/adan_trading_bot/optimization/scripts/__init__.py",
+        "lines": 1,
+        "classes": 0,
+        "functions": 0
+      },
+      {
+        "path": "src/adan_trading_bot/optimization/tests/__init__.py",
+        "lines": 1,
+        "classes": 0,
+        "functions": 0
+      }
+    ],
+    "COMPLEX": [
+      {
+        "path": "src/adan_trading_bot/agent/custom_recurrent_policy.py",
+        "lines": 67,
+        "classes": 1,
+        "functions": 0
+      },
+      {
+        "path": "src/adan_trading_bot/evaluation/decision_quality_analyzer.py",
+        "lines": 611,
+        "classes": 2,
+        "functions": 0
+      },
+      {
+        "path": "src/adan_trading_bot/exchange_api/connector.py",
+        "lines": 283,
+        "classes": 2,
+        "functions": 4
+      },
+      {
+        "path": "src/adan_trading_bot/live_trading/experience_buffer.py",
+        "lines": 220,
+        "classes": 1,
+        "functions": 0
+      },
+      {
+        "path": "src/adan_trading_bot/live_trading/online_reward_calculator.py",
+        "lines": 675,
+        "classes": 5,
+        "functions": 0
+      },
+      {
+        "path": "src/adan_trading_bot/live_trading/safety_manager.py",
+        "lines": 370,
+        "classes": 1,
+        "functions": 0
+      },
+      {
+        "path": "src/adan_trading_bot/monitoring/alert_system.py",
+        "lines": 475,
+        "classes": 6,
+        "functions": 0
+      },
+      {
+        "path": "src/adan_trading_bot/monitoring/system_health_monitor.py",
+        "lines": 679,
+        "classes": 6,
+        "functions": 0
+      },
+      {
+        "path": "src/adan_trading_bot/monitoring/worker_monitor.py",
+        "lines": 291,
+        "classes": 3,
+        "functions": 0
+      },
+      {
+        "path": "src/adan_trading_bot/optimization/config/experiment_config.py",
+        "lines": 101,
+        "classes": 1,
+        "functions": 4
+      },
+      {
+        "path": "src/adan_trading_bot/optimization/hyperparameter_optimizer.py",
+        "lines": 179,
+        "classes": 1,
+        "functions": 0
+      },
+      {
+        "path": "src/adan_trading_bot/optimization/monitoring/experiment_tracker.py",
+        "lines": 486,
+        "classes": 3,
+        "functions": 4
+      },
+      {
+        "path": "src/adan_trading_bot/optimization/tests/load_testing.py",
+        "lines": 629,
+        "classes": 1,
+        "functions": 6
+      },
+      {
+        "path": "src/adan_trading_bot/patches/gugu_march_excellence_rewards.py",
+        "lines": 486,
+        "classes": 2,
+        "functions": 2
+      },
+      {
+        "path": "src/adan_trading_bot/performance/metrics.py",
+        "lines": 721,
+        "classes": 1,
+        "functions": 0
+      },
+      {
+        "path": "src/adan_trading_bot/portfolio/portfolio_manager.py",
+        "lines": 1676,
+        "classes": 2,
+        "functions": 0
+      },
+      {
+        "path": "src/adan_trading_bot/risk_management/position_sizer.py",
+        "lines": 664,
+        "classes": 4,
+        "functions": 0
+      },
+      {
+        "path": "src/adan_trading_bot/risk_management/risk_manager.py",
+        "lines": 62,
+        "classes": 1,
+        "functions": 0
+      },
+      {
+        "path": "src/adan_trading_bot/trading/action_translator.py",
+        "lines": 618,
+        "classes": 5,
+        "functions": 0
+      },
+      {
+        "path": "src/adan_trading_bot/trading/action_validator.py",
+        "lines": 701,
+        "classes": 6,
+        "functions": 0
+      },
+      {
+        "path": "src/adan_trading_bot/trading/fee_manager.py",
+        "lines": 453,
+        "classes": 5,
+        "functions": 0
+      },
+      {
+        "path": "src/adan_trading_bot/trading/manual_trading_interface.py",
+        "lines": 819,
+        "classes": 7,
+        "functions": 0
+      },
+      {
+        "path": "src/adan_trading_bot/trading/order_manager.py",
+        "lines": 165,
+        "classes": 5,
+        "functions": 0
+      },
+      {
+        "path": "src/adan_trading_bot/trading/position_sizer.py",
+        "lines": 257,
+        "classes": 2,
+        "functions": 0
+      },
+      {
+        "path": "src/adan_trading_bot/trading/safety_manager.py",
+        "lines": 349,
+        "classes": 1,
+        "functions": 0
+      },
+      {
+        "path": "src/adan_trading_bot/trading/secure_api_manager.py",
+        "lines": 932,
+        "classes": 6,
+        "functions": 0
+      },
+      {
+        "path": "src/adan_trading_bot/training/callbacks.py",
+        "lines": 395,
+        "classes": 2,
+        "functions": 0
+      },
+      {
+        "path": "src/adan_trading_bot/training/hyperparam_modulator.py",
+        "lines": 147,
+        "classes": 1,
+        "functions": 0
+      },
+      {
+        "path": "src/adan_trading_bot/training/shared_experience_buffer.py",
+        "lines": 377,
+        "classes": 1,
+        "functions": 0
+      },
+      {
+        "path": "src/adan_trading_bot/training/trainer.py",
+        "lines": 392,
+        "classes": 2,
+        "functions": 3
+      },
+      {
+        "path": "src/adan_trading_bot/training/training_orchestrator.py",
+        "lines": 371,
+        "classes": 1,
+        "functions": 0
+      },
+      {
+        "path": "src/adan_trading_bot/visualization/gradcam_1d.py",
+        "lines": 119,
+        "classes": 1,
+        "functions": 1
+      },
+      {
+        "path": "src/adan_trading_bot/workflows/workflow_orchestrator.py",
+        "lines": 593,
+        "classes": 4,
+        "functions": 0
+      },
+      {
+        "path": "src/adan_trading_bot/online_learning_agent.py",
+        "lines": 839,
+        "classes": 5,
+        "functions": 2
+      }
+    ],
+    "SMALL": [
+      {
+        "path": "src/adan_trading_bot/exchange_api/__init__.py",
+        "lines": 25,
+        "classes": 0,
+        "functions": 0
+      },
+      {
+        "path": "src/adan_trading_bot/live_trading/__init__.py",
+        "lines": 15,
+        "classes": 0,
+        "functions": 0
+      },
+      {
+        "path": "src/adan_trading_bot/optimization/__init__.py",
+        "lines": 11,
+        "classes": 0,
+        "functions": 0
+      },
+      {
+        "path": "src/adan_trading_bot/portfolio/__init__.py",
+        "lines": 13,
+        "classes": 0,
+        "functions": 0
+      },
+      {
+        "path": "src/adan_trading_bot/risk_management/__init__.py",
+        "lines": 15,
+        "classes": 0,
+        "functions": 0
+      },
+      {
+        "path": "src/adan_trading_bot/trading/__init__.py",
+        "lines": 18,
+        "classes": 0,
+        "functions": 0
+      },
+      {
+        "path": "src/adan_trading_bot/constants.py",
+        "lines": 36,
+        "classes": 0,
+        "functions": 0
+      }
+    ],
+    "EMPTY": [
+      {
+        "path": "src/adan_trading_bot/optimization/hyperparameter_optimizer_fixed.py",
+        "lines": 1,
+        "classes": 0,
+        "functions": 0
+      },
+      {
+        "path": "src/adan_trading_bot/training/__init__.py",
+        "lines": 8,
+        "classes": 0,
+        "functions": 0
+      },
+      {
+        "path": "src/adan_trading_bot/training/dynamic_training_callback.py",
+        "lines": 1,
+        "classes": 0,
+        "functions": 0
+      }
+    ],
+    "SUBSTANTIAL": [
+      {
+        "path": "src/adan_trading_bot/optimization/optimize_attention.py",
+        "lines": 467,
+        "classes": 0,
+        "functions": 5
+      },
+      {
+        "path": "src/adan_trading_bot/main.py",
+        "lines": 120,
+        "classes": 0,
+        "functions": 3
+      }
+    ],
+    "MEDIUM": [
+      {
+        "path": "src/adan_trading_bot/visualization/plotting_styles.py",
+        "lines": 90,
+        "classes": 0,
+        "functions": 2
+      }
+    ],
+    "MISSING": [],
+    "ERROR": []
+  },
+  "details": {
+    "src/adan_trading_bot/agent/__init__.py": {
+      "exists": true,
+      "lines": 4,
+      "classes": 0,
+      "functions": 0,
+      "value": "INIT_EMPTY",
+      "path": "src/adan_trading_bot/agent/__init__.py"
+    },
+    "src/adan_trading_bot/agent/custom_recurrent_policy.py": {
+      "exists": true,
+      "lines": 67,
+      "classes": 1,
+      "functions": 0,
+      "value": "COMPLEX",
+      "path": "src/adan_trading_bot/agent/custom_recurrent_policy.py"
+    },
+    "src/adan_trading_bot/evaluation/__init__.py": {
+      "exists": true,
+      "lines": 4,
+      "classes": 0,
+      "functions": 0,
+      "value": "INIT_EMPTY",
+      "path": "src/adan_trading_bot/evaluation/__init__.py"
+    },
+    "src/adan_trading_bot/evaluation/decision_quality_analyzer.py": {
+      "exists": true,
+      "lines": 611,
+      "classes": 2,
+      "functions": 0,
+      "value": "COMPLEX",
+      "path": "src/adan_trading_bot/evaluation/decision_quality_analyzer.py"
+    },
+    "src/adan_trading_bot/exchange_api/__init__.py": {
+      "exists": true,
+      "lines": 25,
+      "classes": 0,
+      "functions": 0,
+      "value": "SMALL",
+      "path": "src/adan_trading_bot/exchange_api/__init__.py"
+    },
+    "src/adan_trading_bot/exchange_api/connector.py": {
+      "exists": true,
+      "lines": 283,
+      "classes": 2,
+      "functions": 4,
+      "value": "COMPLEX",
+      "path": "src/adan_trading_bot/exchange_api/connector.py"
+    },
+    "src/adan_trading_bot/live_trading/__init__.py": {
+      "exists": true,
+      "lines": 15,
+      "classes": 0,
+      "functions": 0,
+      "value": "SMALL",
+      "path": "src/adan_trading_bot/live_trading/__init__.py"
+    },
+    "src/adan_trading_bot/live_trading/experience_buffer.py": {
+      "exists": true,
+      "lines": 220,
+      "classes": 1,
+      "functions": 0,
+      "value": "COMPLEX",
+      "path": "src/adan_trading_bot/live_trading/experience_buffer.py"
+    },
+    "src/adan_trading_bot/live_trading/online_reward_calculator.py": {
+      "exists": true,
+      "lines": 675,
+      "classes": 5,
+      "functions": 0,
+      "value": "COMPLEX",
+      "path": "src/adan_trading_bot/live_trading/online_reward_calculator.py"
+    },
+    "src/adan_trading_bot/live_trading/safety_manager.py": {
+      "exists": true,
+      "lines": 370,
+      "classes": 1,
+      "functions": 0,
+      "value": "COMPLEX",
+      "path": "src/adan_trading_bot/live_trading/safety_manager.py"
+    },
+    "src/adan_trading_bot/monitoring/alert_system.py": {
+      "exists": true,
+      "lines": 475,
+      "classes": 6,
+      "functions": 0,
+      "value": "COMPLEX",
+      "path": "src/adan_trading_bot/monitoring/alert_system.py"
+    },
+    "src/adan_trading_bot/monitoring/system_health_monitor.py": {
+      "exists": true,
+      "lines": 679,
+      "classes": 6,
+      "functions": 0,
+      "value": "COMPLEX",
+      "path": "src/adan_trading_bot/monitoring/system_health_monitor.py"
+    },
+    "src/adan_trading_bot/monitoring/worker_monitor.py": {
+      "exists": true,
+      "lines": 291,
+      "classes": 3,
+      "functions": 0,
+      "value": "COMPLEX",
+      "path": "src/adan_trading_bot/monitoring/worker_monitor.py"
+    },
+    "src/adan_trading_bot/optimization/__init__.py": {
+      "exists": true,
+      "lines": 11,
+      "classes": 0,
+      "functions": 0,
+      "value": "SMALL",
+      "path": "src/adan_trading_bot/optimization/__init__.py"
+    },
+    "src/adan_trading_bot/optimization/config/__init__.py": {
+      "exists": true,
+      "lines": 1,
+      "classes": 0,
+      "functions": 0,
+      "value": "INIT_EMPTY",
+      "path": "src/adan_trading_bot/optimization/config/__init__.py"
+    },
+    "src/adan_trading_bot/optimization/config/experiment_config.py": {
+      "exists": true,
+      "lines": 101,
+      "classes": 1,
+      "functions": 4,
+      "value": "COMPLEX",
+      "path": "src/adan_trading_bot/optimization/config/experiment_config.py"
+    },
+    "src/adan_trading_bot/optimization/hyperparameter_optimizer.py": {
+      "exists": true,
+      "lines": 179,
+      "classes": 1,
+      "functions": 0,
+      "value": "COMPLEX",
+      "path": "src/adan_trading_bot/optimization/hyperparameter_optimizer.py"
+    },
+    "src/adan_trading_bot/optimization/hyperparameter_optimizer_fixed.py": {
+      "exists": true,
+      "lines": 1,
+      "classes": 0,
+      "functions": 0,
+      "value": "EMPTY",
+      "path": "src/adan_trading_bot/optimization/hyperparameter_optimizer_fixed.py"
+    },
+    "src/adan_trading_bot/optimization/monitoring/__init__.py": {
+      "exists": true,
+      "lines": 1,
+      "classes": 0,
+      "functions": 0,
+      "value": "INIT_EMPTY",
+      "path": "src/adan_trading_bot/optimization/monitoring/__init__.py"
+    },
+    "src/adan_trading_bot/optimization/monitoring/experiment_tracker.py": {
+      "exists": true,
+      "lines": 486,
+      "classes": 3,
+      "functions": 4,
+      "value": "COMPLEX",
+      "path": "src/adan_trading_bot/optimization/monitoring/experiment_tracker.py"
+    },
+    "src/adan_trading_bot/optimization/optimize_attention.py": {
+      "exists": true,
+      "lines": 467,
+      "classes": 0,
+      "functions": 5,
+      "value": "SUBSTANTIAL",
+      "path": "src/adan_trading_bot/optimization/optimize_attention.py"
+    },
+    "src/adan_trading_bot/optimization/scripts/__init__.py": {
+      "exists": true,
+      "lines": 1,
+      "classes": 0,
+      "functions": 0,
+      "value": "INIT_EMPTY",
+      "path": "src/adan_trading_bot/optimization/scripts/__init__.py"
+    },
+    "src/adan_trading_bot/optimization/tests/__init__.py": {
+      "exists": true,
+      "lines": 1,
+      "classes": 0,
+      "functions": 0,
+      "value": "INIT_EMPTY",
+      "path": "src/adan_trading_bot/optimization/tests/__init__.py"
+    },
+    "src/adan_trading_bot/optimization/tests/load_testing.py": {
+      "exists": true,
+      "lines": 629,
+      "classes": 1,
+      "functions": 6,
+      "value": "COMPLEX",
+      "path": "src/adan_trading_bot/optimization/tests/load_testing.py"
+    },
+    "src/adan_trading_bot/patches/gugu_march_excellence_rewards.py": {
+      "exists": true,
+      "lines": 486,
+      "classes": 2,
+      "functions": 2,
+      "value": "COMPLEX",
+      "path": "src/adan_trading_bot/patches/gugu_march_excellence_rewards.py"
+    },
+    "src/adan_trading_bot/performance/metrics.py": {
+      "exists": true,
+      "lines": 721,
+      "classes": 1,
+      "functions": 0,
+      "value": "COMPLEX",
+      "path": "src/adan_trading_bot/performance/metrics.py"
+    },
+    "src/adan_trading_bot/portfolio/__init__.py": {
+      "exists": true,
+      "lines": 13,
+      "classes": 0,
+      "functions": 0,
+      "value": "SMALL",
+      "path": "src/adan_trading_bot/portfolio/__init__.py"
+    },
+    "src/adan_trading_bot/portfolio/portfolio_manager.py": {
+      "exists": true,
+      "lines": 1676,
+      "classes": 2,
+      "functions": 0,
+      "value": "COMPLEX",
+      "path": "src/adan_trading_bot/portfolio/portfolio_manager.py"
+    },
+    "src/adan_trading_bot/risk_management/__init__.py": {
+      "exists": true,
+      "lines": 15,
+      "classes": 0,
+      "functions": 0,
+      "value": "SMALL",
+      "path": "src/adan_trading_bot/risk_management/__init__.py"
+    },
+    "src/adan_trading_bot/risk_management/position_sizer.py": {
+      "exists": true,
+      "lines": 664,
+      "classes": 4,
+      "functions": 0,
+      "value": "COMPLEX",
+      "path": "src/adan_trading_bot/risk_management/position_sizer.py"
+    },
+    "src/adan_trading_bot/risk_management/risk_manager.py": {
+      "exists": true,
+      "lines": 62,
+      "classes": 1,
+      "functions": 0,
+      "value": "COMPLEX",
+      "path": "src/adan_trading_bot/risk_management/risk_manager.py"
+    },
+    "src/adan_trading_bot/trading/__init__.py": {
+      "exists": true,
+      "lines": 18,
+      "classes": 0,
+      "functions": 0,
+      "value": "SMALL",
+      "path": "src/adan_trading_bot/trading/__init__.py"
+    },
+    "src/adan_trading_bot/trading/action_translator.py": {
+      "exists": true,
+      "lines": 618,
+      "classes": 5,
+      "functions": 0,
+      "value": "COMPLEX",
+      "path": "src/adan_trading_bot/trading/action_translator.py"
+    },
+    "src/adan_trading_bot/trading/action_validator.py": {
+      "exists": true,
+      "lines": 701,
+      "classes": 6,
+      "functions": 0,
+      "value": "COMPLEX",
+      "path": "src/adan_trading_bot/trading/action_validator.py"
+    },
+    "src/adan_trading_bot/trading/fee_manager.py": {
+      "exists": true,
+      "lines": 453,
+      "classes": 5,
+      "functions": 0,
+      "value": "COMPLEX",
+      "path": "src/adan_trading_bot/trading/fee_manager.py"
+    },
+    "src/adan_trading_bot/trading/manual_trading_interface.py": {
+      "exists": true,
+      "lines": 819,
+      "classes": 7,
+      "functions": 0,
+      "value": "COMPLEX",
+      "path": "src/adan_trading_bot/trading/manual_trading_interface.py"
+    },
+    "src/adan_trading_bot/trading/order_manager.py": {
+      "exists": true,
+      "lines": 165,
+      "classes": 5,
+      "functions": 0,
+      "value": "COMPLEX",
+      "path": "src/adan_trading_bot/trading/order_manager.py"
+    },
+    "src/adan_trading_bot/trading/position_sizer.py": {
+      "exists": true,
+      "lines": 257,
+      "classes": 2,
+      "functions": 0,
+      "value": "COMPLEX",
+      "path": "src/adan_trading_bot/trading/position_sizer.py"
+    },
+    "src/adan_trading_bot/trading/safety_manager.py": {
+      "exists": true,
+      "lines": 349,
+      "classes": 1,
+      "functions": 0,
+      "value": "COMPLEX",
+      "path": "src/adan_trading_bot/trading/safety_manager.py"
+    },
+    "src/adan_trading_bot/trading/secure_api_manager.py": {
+      "exists": true,
+      "lines": 932,
+      "classes": 6,
+      "functions": 0,
+      "value": "COMPLEX",
+      "path": "src/adan_trading_bot/trading/secure_api_manager.py"
+    },
+    "src/adan_trading_bot/training/__init__.py": {
+      "exists": true,
+      "lines": 8,
+      "classes": 0,
+      "functions": 0,
+      "value": "EMPTY",
+      "path": "src/adan_trading_bot/training/__init__.py"
+    },
+    "src/adan_trading_bot/training/callbacks.py": {
+      "exists": true,
+      "lines": 395,
+      "classes": 2,
+      "functions": 0,
+      "value": "COMPLEX",
+      "path": "src/adan_trading_bot/training/callbacks.py"
+    },
+    "src/adan_trading_bot/training/dynamic_training_callback.py": {
+      "exists": true,
+      "lines": 1,
+      "classes": 0,
+      "functions": 0,
+      "value": "EMPTY",
+      "path": "src/adan_trading_bot/training/dynamic_training_callback.py"
+    },
+    "src/adan_trading_bot/training/hyperparam_modulator.py": {
+      "exists": true,
+      "lines": 147,
+      "classes": 1,
+      "functions": 0,
+      "value": "COMPLEX",
+      "path": "src/adan_trading_bot/training/hyperparam_modulator.py"
+    },
+    "src/adan_trading_bot/training/shared_experience_buffer.py": {
+      "exists": true,
+      "lines": 377,
+      "classes": 1,
+      "functions": 0,
+      "value": "COMPLEX",
+      "path": "src/adan_trading_bot/training/shared_experience_buffer.py"
+    },
+    "src/adan_trading_bot/training/trainer.py": {
+      "exists": true,
+      "lines": 392,
+      "classes": 2,
+      "functions": 3,
+      "value": "COMPLEX",
+      "path": "src/adan_trading_bot/training/trainer.py"
+    },
+    "src/adan_trading_bot/training/training_orchestrator.py": {
+      "exists": true,
+      "lines": 371,
+      "classes": 1,
+      "functions": 0,
+      "value": "COMPLEX",
+      "path": "src/adan_trading_bot/training/training_orchestrator.py"
+    },
+    "src/adan_trading_bot/visualization/gradcam_1d.py": {
+      "exists": true,
+      "lines": 119,
+      "classes": 1,
+      "functions": 1,
+      "value": "COMPLEX",
+      "path": "src/adan_trading_bot/visualization/gradcam_1d.py"
+    },
+    "src/adan_trading_bot/visualization/plotting_styles.py": {
+      "exists": true,
+      "lines": 90,
+      "classes": 0,
+      "functions": 2,
+      "value": "MEDIUM",
+      "path": "src/adan_trading_bot/visualization/plotting_styles.py"
+    },
+    "src/adan_trading_bot/workflows/workflow_orchestrator.py": {
+      "exists": true,
+      "lines": 593,
+      "classes": 4,
+      "functions": 0,
+      "value": "COMPLEX",
+      "path": "src/adan_trading_bot/workflows/workflow_orchestrator.py"
+    },
+    "src/adan_trading_bot/constants.py": {
+      "exists": true,
+      "lines": 36,
+      "classes": 0,
+      "functions": 0,
+      "value": "SMALL",
+      "path": "src/adan_trading_bot/constants.py"
+    },
+    "src/adan_trading_bot/main.py": {
+      "exists": true,
+      "lines": 120,
+      "classes": 0,
+      "functions": 3,
+      "value": "SUBSTANTIAL",
+      "path": "src/adan_trading_bot/main.py"
+    },
+    "src/adan_trading_bot/online_learning_agent.py": {
+      "exists": true,
+      "lines": 839,
+      "classes": 5,
+      "functions": 2,
+      "value": "COMPLEX",
+      "path": "src/adan_trading_bot/online_learning_agent.py"
+    }
+  }
+}

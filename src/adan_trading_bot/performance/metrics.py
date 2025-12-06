@@ -122,6 +122,11 @@ class PerformanceMetrics:
             **trade_result
         })
 
+        # BUG FIX: Peupler closed_positions si c'est une fermeture
+        if trade_result.get('action') == 'close':
+            self.closed_positions.append(trade_result)
+
+
     # --- Nouveaux enregistreurs pour tentatives et exécutions ---
     def record_trade_attempt(self, valid: bool, reason: Optional[str] = None, context: Optional[Dict] = None) -> None:
         """Enregistre une tentative de trade (valide/invalide)."""

@@ -37,6 +37,7 @@ from src.adan_trading_bot.common.config_loader import ConfigLoader
 from src.adan_trading_bot.common.custom_logger import setup_logging
 from src.adan_trading_bot.data_processing.data_loader import ChunkedDataLoader
 from src.adan_trading_bot.environment.multi_asset_chunked_env import MultiAssetChunkedEnv
+from src.adan_trading_bot.performance.metrics import PerformanceMetrics
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -199,66 +200,7 @@ class CapitalTierTracker:
         }
 
 
-# DailyMetricsTracker class definition
-class DailyMetricsTracker:
-    """Simple daily metrics tracker for optimization."""
-
-    def __init__(self, initial_balance):
-        self.initial_balance = initial_balance
-        self.current_day = 0
-        self.daily_data = {}
-        self.total_days = 0
-
-    def update(self, current_day, balance, trade_info, return_value):
-        """Update daily metrics."""
-        if current_day != self.current_day:
-            self.current_day = current_day
-            self.total_days += 1
-
-        if current_day not in self.daily_data:
-            self.daily_data[current_day] = {
-                "trades_closed": 0,
-                "daily_pnl": 0.0,
-                "daily_return_pct": 0.0,
-                "win_rate": 0.0,
-                "profit_factor": 0.0,
-                "daily_sharpe": 0.0,
-                "profitable_days_pct": 0.0,
-            }
-
-        # Update trade info
-        if trade_info.get("trade_closed", False):
-            self.daily_data[current_day]["trades_closed"] += 1
-            pnl = trade_info.get("trade_pnl", 0.0)
-            self.daily_data[current_day]["daily_pnl"] += pnl
-
-    def get_current_day_summary(self):
-        """Get current day summary."""
-        if self.current_day in self.daily_data:
-            return self.daily_data[self.current_day]
-        return {}
-
-    def get_average_daily_performance(self):
-        """Get average daily performance."""
-        if not self.daily_data:
-            return {}
-
-        total_trades = sum(day["trades_closed"] for day in self.daily_data.values())
-        total_pnl = sum(day["daily_pnl"] for day in self.daily_data.values())
-
-        return {
-            "total_days": self.total_days,
-            "avg_trades_per_day": total_trades / max(self.total_days, 1),
-            "avg_daily_return_pct": (total_pnl / self.initial_balance) * 100,
-            "avg_win_rate": 0.5,  # Placeholder
-            "avg_profit_factor": 1.0,  # Placeholder
-            "avg_daily_sharpe": 0.0,  # Placeholder
-            "profitable_days_pct": 50.0,  # Placeholder
-        }
-
-    def finalize_current_day(self):
-        """Finalize current day tracking."""
-        pass
+# DailyMetricsTracker removed - replaced by PerformanceMetrics
 
 
 # Setup advanced logging
@@ -754,11 +696,10 @@ class OptunaPruningCallback(BaseCallback):
         self.last_log_step = 0
         self.num_workers = self.eval_env.num_envs
 
-        # Add daily metrics trackers for each worker
-        self.daily_trackers = {
-            i: DailyMetricsTracker(initial_balance) for i in range(self.num_workers)
+        # Add performance metrics trackers for each worker
+        self.performance_metrics_trackers = {
+            i: PerformanceMetrics(config=GLOBAL_CONFIG, worker_id=i) for i in range(self.num_workers)
         }
-
         # Add capital tier trackers for each worker
         self.tier_trackers = {
             i: CapitalTierTracker(initial_balance) for i in range(self.num_workers)
@@ -806,29 +747,31 @@ class OptunaPruningCallback(BaseCallback):
                                 "trade_pnl": last_trade.get("pnl", 0.0),
                             }
 
-                # Update daily tracker
-                return_value = metrics.get("last_return", 0.0)
-                self.daily_trackers[worker_id].update(
-                    current_day, balance, trade_info, return_value
+                # Update performance metrics
+                tracker = self.performance_metrics_trackers[worker_id]
+                tracker.record_equity_snapshot(balance)
+                
+                # If trade closed, update metrics
+                if trade_info.get("trade_closed", False):
+                     # Construct trade result dict
+                     trade_result = {
+                         "action": "close",
+                         "pnl": trade_info.get("trade_pnl", 0.0),
+                         "equity": balance,
+                         "timestamp": datetime.now().isoformat()
+                     }
+                     tracker.update_trade(trade_result)
+
+                # Get performance summary
+                metrics_summary = tracker.get_metrics_summary()
+
+                # Enhanced logging with robust metrics
+                daily_info = (
+                    f" | Sharpe={metrics_summary['sharpe_ratio']:.2f} "
+                    f"PF={metrics_summary['profit_factor']:.2f} "
+                    f"WR={metrics_summary['win_rate']:.1f}% "
+                    f"DD={metrics_summary['max_drawdown']:.2f}%"
                 )
-
-                # Update tier tracker
-                self.tier_trackers[worker_id].update(self.num_timesteps, balance, pnl)
-
-                # Get daily performance summary
-                daily_summary = self.daily_trackers[
-                    worker_id
-                ].get_average_daily_performance()
-
-                # Enhanced logging with daily metrics
-                daily_info = ""
-                if daily_summary and daily_summary.get("total_days", 0) > 0:
-                    daily_info = (
-                        f" | Daily: Return={daily_summary.get('avg_daily_return_pct', 0):.2f}% "
-                        f"Trades={daily_summary.get('avg_trades_per_day', 0):.1f} "
-                        f"WinRate={daily_summary.get('avg_win_rate', 0):.1f}% "
-                        f"PF={min(daily_summary.get('avg_profit_factor', 0), 9.99):.2f}"
-                    )
 
                 # Get tier information
                 tier_info = self.tier_trackers[worker_id].get_progression_summary()
@@ -934,7 +877,7 @@ class OptunaPruningCallback(BaseCallback):
             obs = self.eval_env.reset()
             returns = []
 
-            for _ in range(min(500, self.eval_freq // 5)):  # Quick evaluation
+            for _ in range(min(1000, self.eval_freq // 2)):  # Quick evaluation (increased)
                 action, _ = self.model.predict(obs, deterministic=True)
                 obs, reward, done, info = self.eval_env.step(action)
 
@@ -969,7 +912,7 @@ class OptunaPruningCallback(BaseCallback):
             trade_history = []
             portfolio_values = []
             steps = 0
-            max_eval_steps = 1000  # Evaluation rapide mais suffisante
+            max_eval_steps = 2000  # Evaluation plus robuste
 
             for step in range(max_eval_steps):
                 action, _ = self.model.predict(obs, deterministic=True)
@@ -1107,31 +1050,26 @@ class OptunaPruningCallback(BaseCallback):
         return gross_profit / gross_loss if gross_loss > 0 else 0.0
 
     def _calculate_multi_tier_score(self) -> float:
-        """Calcule un score global multi-paliers avec focus sur les performances journalières."""
+        """Calcule un score global multi-paliers basé sur les métriques robustes."""
         if not self.tier_performances:
             return 0.0
 
-        # Finalize daily tracking for all workers
+        # Calculate performance scores from robust metrics
+        worker_scores = []
         for worker_id in range(self.num_workers):
-            self.daily_trackers[worker_id].finalize_current_day()
-
-        # Calculate daily performance scores
-        daily_scores = []
-        for worker_id in range(self.num_workers):
-            daily_perf = self.daily_trackers[worker_id].get_average_daily_performance()
-            if daily_perf and daily_perf.get("total_days", 0) > 0:
-                # Daily performance composite score
-                daily_score = (
-                    daily_perf.get("avg_daily_return_pct", 0) * 0.3
-                    + min(daily_perf.get("avg_profit_factor", 0), 5.0) * 0.25
-                    + daily_perf.get("avg_win_rate", 0) * 0.2
-                    + daily_perf.get("avg_daily_sharpe", 0) * 0.15
-                    + daily_perf.get("profitable_days_pct", 0) * 0.1
-                )
-                if (
-                    daily_perf.get("avg_trades_per_day", 0) >= 1
-                ):  # Ensure sufficient trading activity
-                    daily_scores.append(daily_score)
+            summary = self.performance_metrics_trackers[worker_id].get_metrics_summary()
+            
+            # Score composite basé sur les métriques globales
+            # Sharpe (max 3.0) + PF (max 5.0) + WinRate + Low DD
+            score = (
+                min(summary['sharpe_ratio'], 3.0) / 3.0 * 0.35 +
+                min(summary['profit_factor'], 5.0) / 5.0 * 0.25 +
+                (summary['win_rate'] / 100.0) * 0.2 +
+                (1.0 - min(summary['max_drawdown'] / 100.0, 1.0)) * 0.2
+            )
+            
+            if summary['total_trades'] >= 5:  # Minimum trades required for valid score
+                worker_scores.append(score)
 
         # Calculate traditional multi-tier score
         traditional_score = 0.0
@@ -1157,21 +1095,13 @@ class OptunaPruningCallback(BaseCallback):
             traditional_score / total_weight if total_weight > 0 else 0.0
         )
 
-        # Combine daily and traditional scores with heavy weight on daily performance
-        if daily_scores:
-            daily_score_avg = np.mean(daily_scores)
-            final_score = daily_score_avg * 0.7 + traditional_score * 0.3
-
-            # Bonus for consistency across workers
-            if len(daily_scores) > 1:
-                consistency_bonus = max(
-                    0, 1.0 - (np.std(daily_scores) / max(abs(daily_score_avg), 0.01))
-                )
-                final_score *= 1.0 + consistency_bonus * 0.1
-
+        # Combine scores
+        if worker_scores:
+            worker_score_avg = np.mean(worker_scores)
+            final_score = worker_score_avg * 0.6 + traditional_score * 0.4
             return final_score
         else:
-            return traditional_score * 0.5  # Penalty if no sufficient daily data
+            return traditional_score * 0.5  # Penalty if no sufficient trade data
 
     def _generate_trial_summary(self):
         """Generate trial summary with tier progression."""
@@ -1184,12 +1114,12 @@ class OptunaPruningCallback(BaseCallback):
 
         for worker_id in range(self.num_workers):
             tier_summary = self.tier_trackers[worker_id].get_progression_summary()
-            daily_perf = self.daily_trackers[worker_id].get_average_daily_performance()
+            metrics_summary = self.performance_metrics_trackers[worker_id].get_metrics_summary()
 
             worker_summary = {
                 "tier_progression": tier_summary,
                 "reached_enterprise": tier_summary["reached_enterprise"],
-                "daily_performance": daily_perf,
+                "performance_metrics": metrics_summary,
             }
 
             summary["workers"][f"w{worker_id + 1}"] = worker_summary
@@ -1270,9 +1200,43 @@ def objective(trial: optuna.Trial) -> float:
         # Initialiser le gestionnaire de progression par paliers
         tier_manager = TierProgressionManager(total_epochs=n_epochs)
 
-        # Nouveaux intervalles SL/TP selon vos spécifications
-        stop_loss_pct = trial.suggest_float("stop_loss_pct", 0.05, 0.13)  # 5-13%
-        take_profit_pct = trial.suggest_float("take_profit_pct", 0.05, 0.15)  # 5-15%
+        # ═══════════════════════════════════════════════════════════════════
+        # NOUVEAU: Contraintes spécifiques par worker (ADN)
+        # ═══════════════════════════════════════════════════════════════════
+        worker_id = getattr(trial, 'worker_id', 'w1')  # Récupère w1, w2, w3 ou w4
+
+        if worker_id == 'w1':  # ═══════════════════════════════════════
+            # SCALPER - Rapide, précis, sécurisé
+            # Profil: Beaucoup de trades, petits gains, haute fréquence
+            stop_loss_pct = trial.suggest_float("stop_loss_pct", 0.015, 0.040)  # 1.5-4%
+            take_profit_pct = trial.suggest_float("take_profit_pct", 0.020, 0.060)  # 2-6%
+            position_hold_max = trial.suggest_int("position_hold_max", 12, 48)  # 1-4h en 5m
+            
+        elif worker_id == 'w2':  # ═══════════════════════════════════════
+            # SWING - Tendance, patience, équilibre
+            # Profil: Moins de trades, mais plus gros gains, R/R élevé
+            stop_loss_pct = trial.suggest_float("stop_loss_pct", 0.040, 0.080)  # 4-8%
+            take_profit_pct = trial.suggest_float("take_profit_pct", 0.080, 0.160)  # 8-16%
+            position_hold_max = trial.suggest_int("position_hold_max", 48, 200)  # 4-16h en 5m
+            
+        elif worker_id == 'w3':  # ═══════════════════════════════════════
+            # AGGRESSIVE - Risque fort, gains massifs
+            # Profil: Trades moins fréquents mais avec de très gros R/R
+            stop_loss_pct = trial.suggest_float("stop_loss_pct", 0.060, 0.120)  # 6-12%
+            take_profit_pct = trial.suggest_float("take_profit_pct", 0.150, 0.300)  # 15-30%
+            position_hold_max = trial.suggest_int("position_hold_max", 50, 300)  # 4-25h en 5m
+            
+        elif worker_id == 'w4':  # ═══════════════════════════════════════
+            # SHARPE/HFT - Efficience, courbe lisse
+            # Profil: Trades très fréquents, petits gains, volume élevé
+            stop_loss_pct = trial.suggest_float("stop_loss_pct", 0.030, 0.070)  # 3-7%
+            take_profit_pct = trial.suggest_float("take_profit_pct", 0.050, 0.120)  # 5-12%
+            position_hold_max = trial.suggest_int("position_hold_max", 24, 100)  # 2-8h en 5m
+            
+        else:  # Fallback générique
+            stop_loss_pct = trial.suggest_float("stop_loss_pct", 0.02, 0.10)
+            take_profit_pct = trial.suggest_float("take_profit_pct", 0.03, 0.15)
+            position_hold_max = trial.suggest_int("position_hold_max", 20, 200)
 
         # Hyperparamètres PPO - Simplifiés pour éviter les conflits
         ppo_params = {
@@ -1311,7 +1275,7 @@ def objective(trial: optuna.Trial) -> float:
                 "min_trade_quality_score", 0.6, 0.9
             ),
             "position_hold_min": trial.suggest_int("position_hold_min", 5, 30),
-            "position_hold_max": trial.suggest_int("position_hold_max", 50, 500),
+            # position_hold_max est déjà défini par worker au-dessus
         }
 
         # NOUVEAU: force_trade_steps adaptatif par timeframe (pris du config.yaml)
@@ -1734,8 +1698,8 @@ def objective(trial: optuna.Trial) -> float:
         worker_behaviors = {}
 
         # Évaluation INTENSIVE par worker avec LOGGING COMPLET
-        # Augmenté à 2000 pour single worker, 700 pour multi
-        EVALUATION_STEPS = 2000 if TARGET_WORKER else 700
+        # Réduit à 1000 pour single worker (5 min/trial = 100 min/20 trials), 500 pour multi
+        EVALUATION_STEPS = 1000 if TARGET_WORKER else 500
 
         # Évaluer seulement les workers cibles
         eval_worker_ids = (
@@ -1876,13 +1840,23 @@ def objective(trial: optuna.Trial) -> float:
             # ✅ UTILISER trade_log du portfolio manager (source de vérité absolue)
             total_trades = 0
             try:
-                # Accéder à l'env vectorisé correctement
+                # Support pour DummyVecEnv
                 if hasattr(env, 'envs') and len(env.envs) > worker_idx:
                     single_env = env.envs[worker_idx]
                     if hasattr(single_env, 'portfolio_manager') and hasattr(single_env.portfolio_manager, 'trade_log'):
                         closed_trades = [t for t in single_env.portfolio_manager.trade_log if t.get("action") == "close"]
                         total_trades = len(closed_trades)
-                        logger.info(f"   📋 Trade log: {len(single_env.portfolio_manager.trade_log)}, Closed: {total_trades}")
+                        logger.info(f"   📋 Trade log (Dummy): {len(single_env.portfolio_manager.trade_log)}, Closed: {total_trades}")
+                
+                # Support pour SubprocVecEnv
+                elif hasattr(env, 'get_attr'):
+                    pms = env.get_attr("portfolio_manager")
+                    if pms and len(pms) > worker_idx:
+                        pm = pms[worker_idx]
+                        if hasattr(pm, 'trade_log'):
+                            closed_trades = [t for t in pm.trade_log if t.get("action") == "close"]
+                            total_trades = len(closed_trades)
+                            logger.info(f"   📋 Trade log (Subproc): {len(pm.trade_log)}, Closed: {total_trades}")
             except Exception as e:
                 logger.warning(f"   ⚠️ Erreur accès trade_log: {e}")
             
@@ -1979,15 +1953,75 @@ def objective(trial: optuna.Trial) -> float:
                 except Exception:
                     profit_consistency = 0.0
 
-                # Score composite
-                base_score = (
-                    portfolio_growth * 0.35
-                    + win_rate * 0.25
-                    + tf_bonus * 0.25
-                    + trade_frequency * 0.15
-                )
+                # --- CALCUL DES MÉTRIQUES MANQUANTES POUR VALIDATION ---
+                # Profit Factor
+                gross_profit = sum(t.get("pnl", 0) for t in trades_list if t.get("pnl", 0) > 0)
+                gross_loss = abs(sum(t.get("pnl", 0) for t in trades_list if t.get("pnl", 0) < 0))
+                profit_factor = 0.0
+                if gross_loss > 0:
+                    profit_factor = gross_profit / gross_loss
+                elif gross_profit > 0:
+                    profit_factor = 10.0 # Cap for infinite
+                worker_data["profit_factor"] = profit_factor
 
-                # Bonus pour activité
+                # Sharpe Ratio (Simplifié sur les trades)
+                sharpe_ratio = 0.0
+                if len(trades_list) > 1:
+                    pnls = np.array([t.get("pnl", 0.0) for t in trades_list], dtype=float)
+                    std_pnl = np.std(pnls)
+                    if std_pnl > 0:
+                        sharpe_ratio = np.mean(pnls) / std_pnl
+                worker_data["sharpe_ratio"] = sharpe_ratio
+                # -------------------------------------------------------
+
+                # ═══════════════════════════════════════════════════════════════════
+                # NOUVEAU: Scoring différencié par worker (ADN)
+                # ═══════════════════════════════════════════════════════════════════
+                
+                if worker_id == 'w1':  # SCALPER - Priorité Win Rate
+                    base_score = (win_rate * 2.0) + (profit_factor * 0.5)
+                    if win_rate > 0.60:
+                        base_score += 0.5
+                    if total_trades < 10:
+                        base_score -= 0.3
+                        
+                elif worker_id == 'w2':  # SWING - Priorité PnL
+                    base_score = (total_pnl * 1.5) + (sharpe_ratio * 0.5)
+                    if profit_factor > 2.0:
+                        base_score += 0.5
+                    if take_profit_pct / stop_loss_pct < 1.5:
+                        base_score -= 1.0
+                        
+                elif worker_id == 'w3':  # AGGRESSIVE - Priorité PnL Max
+                    max_drawdown = worker_data.get("max_drawdown", 1.0)
+                    if max_drawdown < 0.25:  # DD < 25%
+                        base_score = total_pnl * 2.0  # Bonus PnL
+                    else:
+                        base_score = total_pnl * 0.5  # Pénalité DD élevé
+                    if take_profit_pct / stop_loss_pct > 2.5:
+                        base_score += 1.0  # Bonus R/R
+                    if max_drawdown > 0.50:
+                        base_score -= 2.0  # Pénalité DD très élevé
+                        
+                elif worker_id == 'w4':  # SHARPE - Priorité Sharpe
+                    base_score = (sharpe_ratio * 3.0) + (win_rate * 0.5)
+                    if sharpe_ratio > 2.0:
+                        base_score += 1.0
+                    if win_rate > 0.75:
+                        base_score += 0.5
+                    volatility = worker_data.get("volatility", 0.05)
+                    if volatility > 0.05:
+                        base_score -= 0.5
+                        
+                else:  # Fallback générique
+                    base_score = (
+                        portfolio_growth * 0.35
+                        + win_rate * 0.25
+                        + tf_bonus * 0.25
+                        + trade_frequency * 0.15
+                    )
+
+                # Bonus pour activité (appliqué à tous)
                 activity_bonus = 0.0
                 if total_trades >= 5:
                     activity_bonus += 0.1
@@ -2350,7 +2384,7 @@ def main():
     logger.info(f"📊 Nombre de trials: {args.n_trials}")
     logger.info(f"⏱️ Timeout: {args.timeout}s")
     logger.info(f"🚫 Trades forcés: DÉSACTIVÉS")
-    logger.info(f"📈 Evaluation steps: 5000")
+    logger.info(f"📈 Evaluation steps: 3000 (Target) / 1000 (Others)")
     logger.info("=" * 80)
 
     try:
@@ -2361,8 +2395,15 @@ def main():
             f"Démarrage de {args.n_trials} trials pour {args.worker} "
             f"(n_jobs=1, single worker mode)"
         )
+        
+        # Créer une fonction wrapper pour passer worker_id à objective
+        def objective_wrapper(trial):
+            # Injecter worker_id dans le contexte de trial
+            trial.worker_id = args.worker
+            return objective(trial)
+        
         study.optimize(
-            objective,
+            objective_wrapper,
             n_trials=args.n_trials,
             n_jobs=1,
             gc_after_trial=True,

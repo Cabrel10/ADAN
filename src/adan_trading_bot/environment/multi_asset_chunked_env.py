@@ -2146,7 +2146,9 @@ class MultiAssetChunkedEnv(gym.Env):
         self._needs_full_reset = False  # Reset the flag
 
         # CORRECTION CRITIQUE : Réinitialiser les index de chunks
-        self.current_chunk_idx = 0
+        # Utiliser start_chunk_index de la config si disponible (pour validation Out-of-Sample)
+        start_chunk = self.config.get("environment", {}).get("start_chunk_index", 0)
+        self.current_chunk_idx = start_chunk
         if hasattr(self, "current_chunk"):
             self.current_chunk = 0
 
@@ -2857,10 +2859,31 @@ class MultiAssetChunkedEnv(gym.Env):
                 )
 
             # Calcul des paramètres de risque dynamiques via le DBE
-            dbe_modulation = self.dbe.compute_dynamic_modulation(
-                env=self,
-                risk_horizon=float(action[1]) if len(action) > 1 else 0.0,
-            )
+            # ✅ CORRECTION: Vérifier si le DBE est activé avant de l'appeler
+            dbe_enabled = self.config.get('dbe', {}).get('enabled', True)
+            
+            if dbe_enabled and hasattr(self, 'dbe') and self.dbe:
+                dbe_modulation = self.dbe.compute_dynamic_modulation(
+                    env=self,
+                    risk_horizon=float(action[1]) if len(action) > 1 else 0.0,
+                )
+            else:
+                # DBE désactivé - utiliser les paramètres de la config directement
+                risk_mgmt = self.config.get('trading_rules', {}).get('risk_management', {})
+                pos_sizing = self.config.get('trading_rules', {}).get('position_sizing', {})
+                dbe_modulation = {
+                    'sl_pct': risk_mgmt.get('stop_loss_pct', 0.02),
+                    'tp_pct': risk_mgmt.get('take_profit_pct', 0.04),
+                    'position_size_pct': pos_sizing.get('position_size_pct', 0.10),
+                    'risk_mode': 'CONFIG_DIRECT',
+                }
+                if self.current_step % 500 == 0:
+                    self.logger.info(
+                        f"[DBE_BYPASSED] Step {self.current_step} | Using config params: "
+                        f"SL={dbe_modulation['sl_pct']:.2%}, TP={dbe_modulation['tp_pct']:.2%}, "
+                        f"PosSize={dbe_modulation['position_size_pct']:.2%}"
+                    )
+
 
             # --- PHASE 1: EXÉCUTION DES TRADES NORMAUX ---
             realized_pnl, discrete_action, _ = self._execute_trades(
@@ -5608,6 +5631,24 @@ class MultiAssetChunkedEnv(gym.Env):
             elif main_decision > action_threshold:
                 discrete_action = 1  # Buy
 
+            # === LOG MODEL INTENTION ===
+            action_str = "HOLD"
+            reason_str = ""
+            if discrete_action == 1:
+                action_str = "BUY"
+                reason_str = f"action({main_decision:.3f}) > thr({action_threshold:.3f})"
+            elif discrete_action == 2:
+                action_str = "SELL"
+                reason_str = f"action({main_decision:.3f}) < -thr({-action_threshold:.3f})"
+            else:
+                reason_str = f"|action({main_decision:.3f})| <= thr({action_threshold:.3f})"
+            
+            self.logger.info(
+                f"[MODEL_INTENTION] Step {self.current_step} | Asset={asset} | "
+                f"Action={action_str} | Raw={main_decision:.4f} | Thr={action_threshold:.3f} | "
+                f"Reason: {reason_str}"
+            )
+
             if i == 0:
                 first_discrete_action = discrete_action
 
@@ -5723,15 +5764,21 @@ class MultiAssetChunkedEnv(gym.Env):
 
             # B. L'agent veut ACHETER (ouvrir une position)
             elif main_decision > action_threshold and not is_open:
+                # Log the BUY attempt
+                self.logger.info(
+                    f"[MODEL_BUY_ATTEMPT] Step {self.current_step} | Asset={asset} | "
+                    f"action={main_decision:.4f} > thr={action_threshold:.3f} | is_open={is_open}"
+                )
+                
                 # Check if trade can be opened based on daily limits
                 if not self.can_open_trade(self.current_timeframe_for_trade):
-                    self.smart_logger.info(
-                        f"[TRADE BLOCKED] Worker {self.worker_id} | TF {self.current_timeframe_for_trade} | Reason: Daily limits exceeded",
-                        rotate=True,
+                    self.logger.warning(
+                        f"[TRADE_BLOCKED] Step {self.current_step} | Worker {self.worker_id} | Asset={asset} | "
+                        f"TF={self.current_timeframe_for_trade} | Reason: can_open_trade=False (daily limits)"
                     )
-                    # Optionally, add a penalty to the reward here if needed
-                    self.invalid_trade_attempts += 1 # Count as invalid attempt
-                    continue # Skip opening this trade
+                    self.invalid_trade_attempts += 1
+                    continue
+
 
                 self._log_agent_thought(
                     timeframe=self.current_timeframe_for_trade,
@@ -6118,52 +6165,59 @@ class MultiAssetChunkedEnv(gym.Env):
         return summary
 
     def _update_risk_metrics(self, portfolio_value, returns):
-        """Met à jour les métriques de risque du portefeuille."""
+        """Met à jour les métriques de risque du portefeuille en utilisant PerformanceMetrics."""
         try:
-            # Ajout du rendement à l'historique
-            self.performance_history.append(returns)
-
-            # Calcul du ratio de Sharpe (annualisé)
-            if len(self.performance_history) > 1:
-                returns_series = pd.Series(self.performance_history)
-                excess_returns = returns_series - (
-                    0.01 / 252
-                )  # Taux sans risque journalier (1% annuel)
-
-                # Ratio de Sharpe (annualisé)
-                sharpe_ratio = np.sqrt(252) * (
-                    excess_returns.mean() / (returns_series.std() + 1e-8)
+            # Utiliser les métriques centralisées du PortfolioManager si disponibles
+            if hasattr(self, "portfolio_manager") and hasattr(self.portfolio_manager, "metrics"):
+                metrics_summary = self.portfolio_manager.metrics.get_metrics_summary()
+                
+                # Log la source des métriques pour traçabilité
+                self.logger.debug(
+                    f"[METRICS_FLOW] Worker {self.worker_id} | Source: PortfolioManager.metrics | "
+                    f"Trades={metrics_summary.get('total_trades', 0)}, "
+                    f"Sharpe={metrics_summary.get('sharpe_ratio', 0.0):.4f}, "
+                    f"MaxDD={metrics_summary.get('max_drawdown', 0.0):.2%}"
                 )
-
-                # Ratio de Sortino (seulement la volatilité à la baisse)
-                downside_returns = returns_series[returns_series < 0]
-                downside_std = (
-                    np.sqrt((downside_returns**2).mean())
-                    if len(downside_returns) > 0
-                    else 0
-                )
-                sortino_ratio = np.sqrt(252) * (
-                    returns_series.mean() / (downside_std + 1e-8)
-                )
-
-                # Mise à jour des métriques
+                
                 self.risk_metrics.update(
                     {
-                        "sharpe_ratio": sharpe_ratio,
-                        "sortino_ratio": sortino_ratio,
-                        "volatility": returns_series.std()
-                        * np.sqrt(252),  # Volatilité annualisée
-                        "max_drawdown": (
-                            self.portfolio.max_drawdown
-                            if hasattr(self.portfolio, "max_drawdown")
-                            else 0.0
-                        ),
+                        "sharpe_ratio": metrics_summary.get("sharpe_ratio", 0.0),
+                        "sortino_ratio": metrics_summary.get("sortino_ratio", 0.0),
+                        "volatility": metrics_summary.get("volatility", 0.0),
+                        "max_drawdown": metrics_summary.get("max_drawdown", 0.0),
+                        "win_rate": metrics_summary.get("win_rate", 0.0),
+                        "total_trades": metrics_summary.get("total_trades", 0),
+                    }
+                )
+                
+                # Log périodique de confirmation (tous les 500 steps)
+                if self.current_step % 500 == 0:
+                    self.logger.info(
+                        f"[METRICS_SYNC] Step {self.current_step} | Worker {self.worker_id} | "
+                        f"Sharpe={self.risk_metrics['sharpe_ratio']:.4f}, "
+                        f"Sortino={self.risk_metrics['sortino_ratio']:.4f}, "
+                        f"WinRate={self.risk_metrics['win_rate']:.2%}, "
+                        f"Trades={self.risk_metrics['total_trades']}"
+                    )
+            else:
+                # Fallback si pas de metrics manager (ne devrait pas arriver avec la config actuelle)
+                self.logger.warning(
+                    f"[METRICS_FLOW_ERROR] Worker {self.worker_id} | PortfolioManager.metrics NOT available | "
+                    f"has_pm={hasattr(self, 'portfolio_manager')}, "
+                    f"has_metrics={hasattr(self.portfolio_manager, 'metrics') if hasattr(self, 'portfolio_manager') else 'N/A'}"
+                )
+                self.risk_metrics.update(
+                    {
+                        "sharpe_ratio": 0.0,
+                        "sortino_ratio": 0.0,
+                        "volatility": 0.0,
+                        "max_drawdown": 0.0,
                     }
                 )
 
         except Exception as e:
             self.logger.error(
-                f"Erreur lors du calcul des métriques de risque: {str(e)}"
+                f"[METRICS_FLOW_EXCEPTION] Worker {self.worker_id} | Error: {str(e)}"
             )
 
     def reset_daily_counts(self):

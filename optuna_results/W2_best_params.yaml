@@ -1,14 +1,14 @@
 metrics:
-  drawdown: 0.20421743678718748
-  sharpe: 2.9327775446097344
-  trades: 477
-  win_rate: 0.5
+  drawdown: 0.1612375252051014
+  sharpe: 3.5167748146637163
+  trades: 258
+  win_rate: 0.516347547631003
 parameters:
-  max_concurrent_positions: 1
-  min_holding_period_steps: 25
-  position_size_pct: 0.15887078845774305
-  risk_per_trade_pct: 0.0172169327068267
-  stop_loss_pct: 0.03693508624405141
-  take_profit_pct: 0.12561887597249566
-score: 3.3046216973721316
+  max_concurrent_positions: 2
+  min_holding_period_steps: 26
+  position_size_pct: 0.27209383908141693
+  risk_per_trade_pct: 0.017135075385833358
+  stop_loss_pct: 0.04703154479370312
+  take_profit_pct: 0.17480670394168155
+score: 3.99054519512824
 worker: W2

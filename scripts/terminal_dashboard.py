@@ -21,6 +21,15 @@ from rich.text import Text
 from rich import box
 from rich.style import Style
 
+# ✅ JOUR 2: Importer le système unifié
+sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
+try:
+    from adan_trading_bot.performance.unified_metrics_db import UnifiedMetricsDB
+    UNIFIED_DB_AVAILABLE = True
+except ImportError:
+    UNIFIED_DB_AVAILABLE = False
+    UnifiedMetricsDB = None
+
 console = Console()
 
 
@@ -466,6 +475,14 @@ def main():
     time.sleep(1)
     
     try:
+        # ✅ JOUR 2: Initialiser la base de données unifiée
+        db = None
+        if UNIFIED_DB_AVAILABLE and UnifiedMetricsDB:
+            try:
+                db = UnifiedMetricsDB()
+            except Exception as e:
+                console.print(f"[yellow]⚠️  Impossible de charger la base de données unifiée: {e}[/]")
+        
         with Live(generate_dashboard({}), refresh_per_second=2, console=console, screen=True) as live:
             while True:
                 data = load_status(status_path)
@@ -477,6 +494,32 @@ def main():
                 # Add recent logs
                 if log_path:
                     data['recent_logs'] = tail_log(log_path, n_lines=20)
+                
+                # ✅ JOUR 2: Ajouter les données de la base de données unifiée
+                if db:
+                    try:
+                        # Récupérer les derniers trades
+                        recent_trades = db.get_trades(limit=5)
+                        if recent_trades:
+                            data['recent_trades'] = [
+                                {
+                                    'side': t['action'],
+                                    'qty': t['quantity'],
+                                    'price': t['price'],
+                                    'pnl': t['pnl'],
+                                    'timestamp': t['timestamp']
+                                }
+                                for t in recent_trades
+                            ]
+                        
+                        # Récupérer les dernières métriques
+                        sharpe_metrics = db.get_metrics('sharpe_ratio', limit=1)
+                        if sharpe_metrics:
+                            data['metrics'] = {
+                                'sharpe': sharpe_metrics[0]['value']
+                            }
+                    except Exception as e:
+                        pass  # Silently fail if DB read fails
                 
                 live.update(generate_dashboard(data))
                 time.sleep(1)

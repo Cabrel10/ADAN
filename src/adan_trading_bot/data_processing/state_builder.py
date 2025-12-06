@@ -14,7 +14,28 @@ from typing import List, Dict, Any, Optional, Tuple, Union
 
 import numpy as np
 import pandas as pd
-from sklearn.preprocessing import MinMaxScaler, RobustScaler, StandardScaler
+try:
+    from sklearn.preprocessing import MinMaxScaler, RobustScaler, StandardScaler
+    SKLEARN_AVAILABLE = True
+except ImportError:
+    SKLEARN_AVAILABLE = False
+    
+    # Fallback scalers
+    class StandardScaler:
+        def fit(self, data): pass
+        def transform(self, data): return data
+        def fit_transform(self, data): return data
+        
+    class MinMaxScaler:
+        def __init__(self, feature_range=(0, 1)): pass
+        def fit(self, data): pass
+        def transform(self, data): return data
+        def fit_transform(self, data): return data
+        
+    class RobustScaler:
+        def fit(self, data): pass
+        def transform(self, data): return data
+        def fit_transform(self, data): return data
 
 # Configuration du logger
 logger = logging.getLogger(__name__)

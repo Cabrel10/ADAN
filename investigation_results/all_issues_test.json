@@ -1,0 +1,21 @@
+{
+  "timestamp": "2025-12-06T15:17:53.541998",
+  "test_name": "All Issues Test",
+  "tests_passed": 14,
+  "tests_failed": 1,
+  "total_tests": 15,
+  "issues": [
+    {
+      "severity": "CRITICAL",
+      "test": "Import Error",
+      "module": "adan_trading_bot.training.trainer",
+      "error": "No module named 'adan_trading_bot.models'"
+    }
+  ],
+  "summary": {
+    "total_issues": 1,
+    "critical_issues": 1,
+    "major_issues": 0,
+    "success_rate": 93.33333333333333
+  }
+}

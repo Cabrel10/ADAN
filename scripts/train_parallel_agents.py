@@ -30,6 +30,18 @@ from adan_trading_bot.environment.realistic_trading_env import (
 from adan_trading_bot.model.model_ensemble import ModelEnsemble
 from adan_trading_bot.utils.seed_manager import SeedManager
 
+# ✅ JOUR 2: Importer le système unifié
+try:
+    from adan_trading_bot.common.central_logger import logger as central_logger
+    from adan_trading_bot.performance.unified_metrics import UnifiedMetrics
+    from adan_trading_bot.performance.unified_metrics_db import UnifiedMetricsDB
+    UNIFIED_SYSTEM_AVAILABLE = True
+except ImportError:
+    UNIFIED_SYSTEM_AVAILABLE = False
+    central_logger = None
+    UnifiedMetrics = None
+    UnifiedMetricsDB = None
+
 def linear_schedule(start_val, end_val, progress):
     return start_val + (end_val - start_val) * progress
 
@@ -305,6 +317,12 @@ class MetricsMonitor(BaseCallback):
                     * self.config["portfolio"]["initial_balance"]
                     / 100.0
                 )
+                
+                # ✅ JOUR 2: Ajouter les métriques unifiées
+                if UNIFIED_SYSTEM_AVAILABLE and central_logger:
+                    central_logger.metric(f"Worker_{worker_id}_Balance", current_balance)
+                    central_logger.metric(f"Worker_{worker_id}_PnL", current_pnl)
+                    central_logger.metric(f"Worker_{worker_id}_Sharpe", metrics.get("sharpe_ratio", 0.0))
 
                 # Get current day from environment data
                 current_day = 0

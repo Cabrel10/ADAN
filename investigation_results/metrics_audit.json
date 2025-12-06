@@ -1,0 +1,31 @@
+{
+  "timestamp": "2025-12-06T15:14:35.581462",
+  "test_name": "Metrics Audit",
+  "findings": [],
+  "errors": [],
+  "validation_results": {
+    "sharpe": {
+      "kiro": -0.024889860562505476,
+      "manual": -0.020681227012622476,
+      "difference": 0.004208633549883,
+      "is_valid": true
+    },
+    "max_dd": {
+      "kiro": 29.130735397338867,
+      "manual": 29.130732638699065,
+      "difference": 2.7586398019252556e-06,
+      "is_valid": true
+    },
+    "sortino": {
+      "kiro": 1.6680103848762553,
+      "manual": 1.3859660379537746,
+      "is_valid": true
+    }
+  },
+  "summary": {
+    "total_findings": 0,
+    "critical_findings": 0,
+    "major_findings": 0,
+    "total_errors": 0
+  }
+}

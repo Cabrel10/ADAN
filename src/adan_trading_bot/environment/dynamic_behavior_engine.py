@@ -512,8 +512,15 @@ class DynamicBehaviorEngine:
             # Récupère regime
             regime = str(getattr(self, "current_regime", "sideways")).lower()
 
+            # --- FORCE DISABLE DBE FOR OPTUNA ---
+            # On récupère les params de base du tier/worker
             base_sl, base_tp, tier_adj_pos = self._get_tier_based_parameters(worker_key, current_tier)
-            final_sl, final_tp, final_pos = self._compute_regime_modulation(base_sl, base_tp, tier_adj_pos, regime)
+            
+            # ⚠️ IMPORTANT: BYPASS REGIME MODULATION
+            # On utilise directement les valeurs de base sans modulation de régime
+            final_sl = base_sl
+            final_tp = base_tp
+            final_pos = tier_adj_pos
 
             # Respect strict du cap du palier
             try:
@@ -527,14 +534,14 @@ class DynamicBehaviorEngine:
 
             tier_name = current_tier if isinstance(current_tier, str) else getattr(current_tier, "name", str(current_tier))
             logger.info(
-                f"[DBE_DECISION] {worker_key} | Tier={tier_name} | Regime={regime} | Final SL={final_sl:.2%}, TP={final_tp:.2%}, PosSize={final_pos:.2%}"
+                f"[DBE_DECISION] {worker_key} | Tier={tier_name} | Regime={regime} (IGNORED) | Final SL={final_sl:.2%}, TP={final_tp:.2%}, PosSize={final_pos:.2%}"
             )
 
             mod = {
                 "sl_pct": final_sl,
                 "tp_pct": final_tp,
                 "position_size_pct": final_pos,
-                "risk_mode": regime.upper(),
+                "risk_mode": "DISABLED_FOR_OPTUNA",
             }
             return mod
         except Exception as e:

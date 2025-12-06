@@ -29,6 +29,7 @@ from adan_trading_bot.data_processing.data_loader import ChunkedDataLoader
 from adan_trading_bot.environment.multi_asset_chunked_env import (
     MultiAssetChunkedEnv
 )
+from adan_trading_bot.model.custom_cnn import CustomCNN
 from adan_trading_bot.models.feature_extractors import CustomCNNFeatureExtractor
 from adan_trading_bot.utils.timeout_manager import (
     TimeoutManager,

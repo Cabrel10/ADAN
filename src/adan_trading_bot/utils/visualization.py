@@ -12,9 +12,19 @@ import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
 from matplotlib import style
 from typing import Dict, List, Optional, Tuple, Union
-import plotly.graph_objects as go
-from plotly.subplots import make_subplots
-import plotly.express as px
+try:
+    import plotly.graph_objects as go
+    from plotly.subplots import make_subplots
+    PLOTLY_AVAILABLE = True
+except ImportError:
+    PLOTLY_AVAILABLE = False
+    go = None
+    make_subplots = None
+
+try:
+    import plotly.express as px
+except ImportError:
+    px = None
 
 # Configuration du style des graphiques
 try:
@@ -43,7 +53,7 @@ class TradingVisualizer:
         benchmark_values: Optional[List[float]] = None,
         title: str = 'Évolution de la valeur du portefeuille',
         save_path: Optional[str] = None
-    ) -> go.Figure:
+    ):
         """
         Trace l'évolution de la valeur du portefeuille au fil du temps.
         
@@ -99,7 +109,7 @@ class TradingVisualizer:
         timestamps: Optional[List] = None,
         title: str = 'Décisions de trading',
         save_path: Optional[str] = None
-    ) -> go.Figure:
+    ):
         """
         Visualise les décisions d'achat/vente par rapport au prix.
         
@@ -195,7 +205,7 @@ class TradingVisualizer:
         returns: List[float],
         title: str = 'Distribution des rendements',
         save_path: Optional[str] = None
-    ) -> go.Figure:
+    ):
         """
         Affiche la distribution des rendements.
         
@@ -254,7 +264,7 @@ class TradingVisualizer:
         metrics: Dict[str, List[float]],
         title: str = 'Métriques d\'entraînement',
         save_path: Optional[str] = None
-    ) -> go.Figure:
+    ):
         """
         Affiche les métriques d'entraînement au fil du temps.
         

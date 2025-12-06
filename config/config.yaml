@@ -636,9 +636,9 @@ diagnostics:
     validate_volatility_range: true
 environment:
   action_thresholds:
-    1h: 0.40   # Validé stable - filtre bruit gaussien
-    4h: 0.50   # Validé stable
-    5m: 0.30   # Validé stable - 0 trades natural sur gaussien (correct!)
+    1h: 0.4
+    4h: 0.5
+    5m: 0.3
   assets:
   - btcusdt
   base_currency: USDT
@@ -661,7 +661,7 @@ environment:
   frequency_validation:
     force_trade:
       enabled: true
-      max_daily_forced_trades: 10  # Increased from 10 to prevent deadlock
+      max_daily_forced_trades: 10
       escalation_steps:
       - 30
       - 50
@@ -823,19 +823,19 @@ environment:
         trailing_enabled: false
   timeframe_trading_config:
     1h:
-      action_threshold: 0.08  # Aligné avec environment.action_thresholds
+      action_threshold: 0.08
       description: Medium-term trading optimized
-      force_trade_steps: 150  # Augmenté 10→150 pour réduire over-trading
-      min_magnitude: 0.05     # Aligné avec threshold
+      force_trade_steps: 150
+      min_magnitude: 0.05
     4h:
-      action_threshold: 0.10  # Aligné avec environment.action_thresholds
+      action_threshold: 0.1
       description: Long-term trading enabled
-      force_trade_steps: 200  # Augmenté 7→200
+      force_trade_steps: 200
       min_magnitude: 0.08
     5m:
-      action_threshold: 0.05  # Aligné avec environment.action_thresholds
+      action_threshold: 0.05
       description: High-frequency trading enabled
-      force_trade_steps: 100  # Augmenté 15→100 - CRITIQUE
+      force_trade_steps: 100
       min_magnitude: 0.03
   volatility_handling:
     cache_calculations: true
@@ -1257,9 +1257,9 @@ trading_rules:
     action_threshold: 0.01
     bonus_weight: 0.6
     force_trade_steps:
-      1h: 150   # Augmenté 20→150
-      4h: 200   # Augmenté 50→200
-      5m: 100   # Augmenté 15→100
+      1h: 150
+      4h: 200
+      5m: 100
     grace_period_steps: 5
     max_positions:
       1h: 13
@@ -1354,7 +1354,7 @@ workers:
           4h: 24
         freq_penalty_weight: 0.05
       position_hold_min: 2
-      daily_max_forced_trades: 10  # Max 10 forced/day (user spec)
+      daily_max_forced_trades: 10
       position_hold_max: 70
       max_consecutive_losses: 4
       min_trade_quality_score: 0.8984
@@ -1461,7 +1461,7 @@ workers:
           1h: 33
           4h: 22
         freq_penalty_weight: 0.05
-        daily_max_forced_trades: 10  # Max 10 forced/day
+        daily_max_forced_trades: 10
     risk_per_trade_pct_by_tier:
       Enterprise: 0.6
       High: 0.8
@@ -1496,18 +1496,6 @@ workers:
           max_tracking_steps: 52
           min_tracking_steps: 1
           optimal_duration: 33
-    stop_loss_pct_by_tier:
-      Enterprise: 0.07850585945847913
-      High: 0.07850585945847913
-      Medium: 0.07850585945847913
-      Micro: 0.07850585945847913
-      Small: 0.07850585945847913
-    take_profit_pct_by_tier:
-      Enterprise: 0.05478471313293483
-      High: 0.05478471313293483
-      Medium: 0.05478471313293483
-      Micro: 0.05478471313293483
-      Small: 0.05478471313293483
     timeframes:
     - 5m
     - 1h
@@ -1558,7 +1546,7 @@ workers:
           1h: 30
           4h: 9
         freq_penalty_weight: 0.05
-        daily_max_forced_trades: 10  # Max 10 forced/day
+        daily_max_forced_trades: 10
     risk_per_trade_pct_by_tier:
       Enterprise: 1.0
       High: 1.2
@@ -1589,18 +1577,6 @@ workers:
           max_tracking_steps: 49
           min_tracking_steps: 1
           optimal_duration: 30
-    stop_loss_pct_by_tier:
-      Enterprise: 0.07850585945847913
-      High: 0.07850585945847913
-      Medium: 0.07850585945847913
-      Micro: 0.07850585945847913
-      Small: 0.07850585945847913
-    take_profit_pct_by_tier:
-      Enterprise: 0.05478471313293483
-      High: 0.05478471313293483
-      Medium: 0.05478471313293483
-      Micro: 0.05478471313293483
-      Small: 0.05478471313293483
     timeframes:
     - 5m
     - 1h
@@ -1638,18 +1614,6 @@ workers:
     risk_management:
       stop_loss_pct: 0.09726955024795811
       take_profit_pct: 0.1456989601711994
-    stop_loss_pct_by_tier:
-      Micro: 0.07850585945847913
-      Small: 0.07850585945847913
-      Medium: 0.07850585945847913
-      High: 0.07850585945847913
-      Enterprise: 0.07850585945847913
-    take_profit_pct_by_tier:
-      Micro: 0.05478471313293483
-      Small: 0.05478471313293483
-      Medium: 0.05478471313293483
-      High: 0.05478471313293483
-      Enterprise: 0.05478471313293483
     risk_per_trade_pct_by_tier:
       Micro: 0.025
       Small: 0.02

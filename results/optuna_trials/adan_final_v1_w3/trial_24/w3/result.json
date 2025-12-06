@@ -1,0 +1,60 @@
+{
+  "trial": 24,
+  "worker": "w3",
+  "timestamp": "2025-12-06T06:09:22.537465",
+  "metrics": {
+    "total_trades": 29,
+    "total_pnl": 0,
+    "win_rate": 0.0,
+    "portfolio_final": 18.376390782719888,
+    "portfolio_growth": -0.10359069352585913,
+    "timeframe_trades": {
+      "5m": 0,
+      "1h": 0,
+      "4h": 0
+    },
+    "tf_diversity": 0,
+    "score": 0.1651932572659493,
+    "params": {
+      "position_size_pct": 0.15109814747703113,
+      "risk_multiplier": 1.296113715934757,
+      "patience_steps": 8,
+      "min_confidence": 0.015334501045113642,
+      "mts_5m": 5,
+      "mts_1h": 8,
+      "mts_4h": 7
+    },
+    "positions_opened": 0,
+    "positions_closed": 0,
+    "trade_attempts": 0,
+    "actions_taken": 3000,
+    "evaluation_steps": 3000,
+    "trade_frequency": 0.009666666666666667,
+    "activity_score": 29,
+    "tier_progression": {
+      "current_tier": "Micro",
+      "tier_history": [
+        [
+          "Micro",
+          0,
+          20
+        ]
+      ],
+      "total_progressions": 0,
+      "progression_log": [],
+      "reached_enterprise": false
+    },
+    "reached_enterprise": false,
+    "max_drawdown": 0.46056638350674434,
+    "profit_consistency": 1.0
+  },
+  "hyperparams": {
+    "position_size_pct": 0.15109814747703113,
+    "risk_multiplier": 1.296113715934757,
+    "patience_steps": 8,
+    "min_confidence": 0.015334501045113642,
+    "mts_5m": 5,
+    "mts_1h": 8,
+    "mts_4h": 7
+  }
+}

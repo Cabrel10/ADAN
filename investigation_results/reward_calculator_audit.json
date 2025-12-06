@@ -1,0 +1,19 @@
+{
+  "timestamp": "2025-12-06T15:15:12.769448",
+  "test_name": "Reward Calculator Audit",
+  "findings": [
+    {
+      "severity": "MAJOR",
+      "test": "Reward Asymmetry",
+      "issue": "Asym\u00e9trie significative: 2.7735",
+      "impact": "R\u00e9compenses biais\u00e9es par action"
+    }
+  ],
+  "errors": [],
+  "summary": {
+    "total_findings": 1,
+    "critical_findings": 0,
+    "major_findings": 1,
+    "total_errors": 0
+  }
+}

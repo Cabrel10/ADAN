@@ -1,36 +1,36 @@
 {
   "trial": 13,
   "worker": "w3",
-  "timestamp": "2025-11-22T02:45:27.414132",
+  "timestamp": "2025-12-06T04:56:22.440633",
   "metrics": {
-    "total_trades": 113,
+    "total_trades": 48,
     "total_pnl": 0,
     "win_rate": 0.0,
-    "portfolio_final": 44.08597124219942,
-    "portfolio_growth": 1.1505351825463133,
+    "portfolio_final": 25.29402070129322,
+    "portfolio_growth": 0.23385466835576685,
     "timeframe_trades": {
       "5m": 0,
       "1h": 0,
       "4h": 0
     },
     "tf_diversity": 0,
-    "score": 0.6111623138912097,
+    "score": 0.2842491339245184,
     "params": {
-      "position_size_pct": 0.07906251616367266,
-      "risk_multiplier": 1.2107957115739456,
-      "patience_steps": 7,
-      "min_confidence": 0.015360181565938259,
+      "position_size_pct": 0.21662839620605842,
+      "risk_multiplier": 1.3612970631607764,
+      "patience_steps": 9,
+      "min_confidence": 0.014935487570189773,
       "mts_5m": 7,
-      "mts_1h": 2,
-      "mts_4h": 3
+      "mts_1h": 8,
+      "mts_4h": 7
     },
     "positions_opened": 0,
     "positions_closed": 0,
     "trade_attempts": 0,
-    "actions_taken": 2000,
-    "evaluation_steps": 2000,
-    "trade_frequency": 0.0565,
-    "activity_score": 113,
+    "actions_taken": 3000,
+    "evaluation_steps": 3000,
+    "trade_frequency": 0.016,
+    "activity_score": 48,
     "tier_progression": {
       "current_tier": "Micro",
       "tier_history": [
@@ -45,16 +45,16 @@
       "reached_enterprise": false
     },
     "reached_enterprise": false,
-    "max_drawdown": 0.7641926808589804,
+    "max_drawdown": 0.43410645380821916,
     "profit_consistency": 1.0
   },
   "hyperparams": {
-    "position_size_pct": 0.07906251616367266,
-    "risk_multiplier": 1.2107957115739456,
-    "patience_steps": 7,
-    "min_confidence": 0.015360181565938259,
+    "position_size_pct": 0.21662839620605842,
+    "risk_multiplier": 1.3612970631607764,
+    "patience_steps": 9,
+    "min_confidence": 0.014935487570189773,
     "mts_5m": 7,
-    "mts_1h": 2,
-    "mts_4h": 3
+    "mts_1h": 8,
+    "mts_4h": 7
   }
 }

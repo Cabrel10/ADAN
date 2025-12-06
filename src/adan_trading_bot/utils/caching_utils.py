@@ -3,9 +3,19 @@ import logging
 from pathlib import Path
 from typing import Callable, Dict, Tuple
 
-import joblib
+try:
+    import joblib
+    JOBLIB_AVAILABLE = True
+except ImportError:
+    JOBLIB_AVAILABLE = False
+    joblib = None
 import pandas as pd
-from sklearn.preprocessing import StandardScaler
+try:
+    from sklearn.preprocessing import StandardScaler
+    SKLEARN_AVAILABLE = True
+except ImportError:
+    SKLEARN_AVAILABLE = False
+    StandardScaler = None
 
 
 logger = logging.getLogger(__name__)
@@ -55,15 +65,18 @@ class DataCacheManager:
 
             # Mettre à jour le scaler si nécessaire
             if timeframe not in self.scaler_cache:
-                logger.info(f"Création du scaler pour {timeframe}")
-                numeric_cols = data.select_dtypes(include=["float64", "int64"]).columns
-                scaler = StandardScaler()
-                scaler.fit(data[numeric_cols])
-                self.scaler_cache[timeframe] = scaler
+                if SKLEARN_AVAILABLE:
+                    logger.info(f"Création du scaler pour {timeframe}")
+                    numeric_cols = data.select_dtypes(include=["float64", "int64"]).columns
+                    scaler = StandardScaler()
+                    scaler.fit(data[numeric_cols])
+                    self.scaler_cache[timeframe] = scaler
+                else:
+                    self.scaler_cache[timeframe] = None
         else:
             logger.debug(f"Données trouvées dans le cache pour {asset} {timeframe}")
 
-        return self.data_cache[cache_key], self.scaler_cache[timeframe]
+        return self.data_cache[cache_key], self.scaler_cache.get(timeframe)
 
     def load_or_process_data(
         self,
@@ -93,16 +106,23 @@ class DataCacheManager:
         self.data_cache[cache_key] = data
 
         if timeframe not in self.scaler_cache or force_reload:
-            logger.info("Création du scaler pour %s", timeframe)
-            numeric_cols = data.select_dtypes(include=["float64", "int64"]).columns
-            scaler = StandardScaler()
-            scaler.fit(data[numeric_cols])
-            self.scaler_cache[timeframe] = scaler
+            if SKLEARN_AVAILABLE:
+                logger.info("Création du scaler pour %s", timeframe)
+                numeric_cols = data.select_dtypes(include=["float64", "int64"]).columns
+                scaler = StandardScaler()
+                scaler.fit(data[numeric_cols])
+                self.scaler_cache[timeframe] = scaler
+            else:
+                self.scaler_cache[timeframe] = None
 
-        return data, self.scaler_cache[timeframe]
+        return data, self.scaler_cache.get(timeframe)
 
     def save_cache(self) -> None:
         """Sauvegarde le cache sur disque."""
+        if not JOBLIB_AVAILABLE:
+            logger.warning("Joblib non disponible, sauvegarde du cache ignorée")
+            return
+            
         cache_file = self.cache_dir / "data_cache.pkl"
         joblib.dump({"data": self.data_cache, "scalers": self.scaler_cache}, cache_file)
         logger.info(f"Cache sauvegardé dans {cache_file}")
@@ -113,6 +133,9 @@ class DataCacheManager:
         Returns:
             bool: True si le chargement a réussi, False sinon
         """
+        if not JOBLIB_AVAILABLE:
+            return False
+            
         cache_file = self.cache_dir / "data_cache.pkl"
         if cache_file.exists():
             try:

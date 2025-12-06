@@ -24,6 +24,11 @@ sys.path.insert(0, str(Path(__file__).parent / "src"))
 
 from adan_trading_bot.environment.multi_asset_chunked_env import MultiAssetChunkedEnv
 
+# ✅ JOUR 2: Importer le système unifié
+from adan_trading_bot.common.central_logger import logger as central_logger
+from adan_trading_bot.performance.unified_metrics import UnifiedMetrics
+from adan_trading_bot.performance.unified_metrics_db import UnifiedMetricsDB
+
 # Import PPO pour charger les modèles entraînés
 try:
     from stable_baselines3 import PPO
@@ -40,7 +45,11 @@ MODEL_PATHS = {
     'W4': Path(__file__).parent / 'models' / 'rl_agents' / 'final' / 'w4_final.zip',
 }
 
-# Setup logging
+# ✅ JOUR 2: Initialiser le système unifié
+metrics = UnifiedMetrics()
+db = UnifiedMetricsDB()
+
+# Setup logging (garder l'ancien pour compatibilité)
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s'
@@ -409,6 +418,16 @@ def objective(trial: optuna.Trial, base_config: Dict, worker_config: WorkerConfi
         # Calculate score
         score = calculate_score(metrics, worker_config, eval_steps)
         
+        # ✅ JOUR 2: Ajouter les métriques unifiées
+        central_logger.metric("Trial Score", score)
+        central_logger.metric("Sharpe Ratio", metrics['sharpe_ratio'])
+        central_logger.metric("Max Drawdown", metrics['max_drawdown'])
+        central_logger.metric("Win Rate", metrics['win_rate'])
+        central_logger.metric("Total Trades", metrics['total_trades'])
+        
+        # ✅ JOUR 2: Validation
+        central_logger.validation("Trial Execution", score > -999, f"Trial {trial.number}")
+        
         # Log trial results
         logger.info(f"Trial {trial.number}: Score={score:.4f}, Sharpe={metrics['sharpe_ratio']:.4f}, "
                    f"Trades={metrics['total_trades']}, DD={metrics['max_drawdown']:.2%}, "
@@ -520,6 +539,25 @@ def main():
     logger.info(f"  Drawdown: {study.best_trial.user_attrs['drawdown']:.2%}")
     logger.info(f"  Win Rate: {study.best_trial.user_attrs['win_rate']:.2%}")
     
+    # ✅ JOUR 2: Synchronisation finale
+    central_logger.sync(
+        component="Optuna Optimization",
+        status="completed",
+        details={
+            "worker": args.worker,
+            "trials": args.trials,
+            "best_score": float(study.best_value),
+            "best_sharpe": float(study.best_trial.user_attrs['sharpe']),
+            "best_trades": int(study.best_trial.user_attrs['trades']),
+        }
+    )
+    
+    # ✅ JOUR 2: Rapport final
+    report = metrics.get_report()
+    central_logger.metric("Final Sharpe", report['metrics']['sharpe_ratio'])
+    central_logger.metric("Final Drawdown", report['metrics']['max_drawdown'])
+    central_logger.metric("Final Win Rate", report['metrics']['win_rate'])
+    
     # Save best params
     output_file = output_dir / f"{args.worker}_best_params.yaml"
     with open(output_file, 'w') as f:
@@ -538,6 +576,9 @@ def main():
     logger.info(f"")
     logger.info(f"Results saved to: {output_file}")
     logger.info(f"Study database: {storage_name}")
+    logger.info(f"")
+    logger.info(f"✅ Unified metrics database: metrics.db")
+    logger.info(f"✅ Unified logs: logs/central/adan_*.log")
     logger.info(f"=" * 80)
 
 

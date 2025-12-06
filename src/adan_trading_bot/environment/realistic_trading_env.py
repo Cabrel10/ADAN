@@ -26,6 +26,24 @@ from .market_friction import (
     StaleDataSimulator
 )
 
+# ✅ JOUR 2: Importer le système unifié
+try:
+    from adan_trading_bot.common.central_logger import logger as central_logger
+    from adan_trading_bot.performance.unified_metrics import UnifiedMetrics
+    UNIFIED_SYSTEM_AVAILABLE = True
+except ImportError:
+    UNIFIED_SYSTEM_AVAILABLE = False
+    central_logger = None
+    UnifiedMetrics = None
+
+# ✅ PHASE FINALE: Importer le RiskManager robuste
+try:
+    from ..risk_management.risk_manager import RiskManager
+    RISK_MANAGER_AVAILABLE = True
+except ImportError:
+    RISK_MANAGER_AVAILABLE = False
+    RiskManager = None
+
 
 class RealisticTradingEnv(MultiAssetChunkedEnv):
     """
@@ -128,10 +146,14 @@ class RealisticTradingEnv(MultiAssetChunkedEnv):
                 use_bnb_discount=False
             )
         
+        # ✅ PHASE FINALE: Initialize RiskManager
+        self._initialize_risk_manager(circuit_breaker_pct)
+        
         self.logger = logging.getLogger(__name__)
         self.logger.info(f"🛡️ RealisticTradingEnv initialized (Live={live_mode}, StableReward={use_stable_reward}, Friction={enable_market_friction})")
         self.logger.info(f"   Hold={min_hold_steps} steps, Cooldown={cooldown_steps} steps, DailyLimit={daily_trade_limit}")
         self.logger.info(f"   Min Notional=${min_notional}, Circuit Breaker={circuit_breaker_pct:.1%}")
+        self.logger.info(f"   Risk Manager: {'RiskManager' if self.risk_manager else 'Circuit Breaker'}")
 
     def reset(self, **kwargs):
         """Reset environment and all controllers."""
@@ -154,6 +176,34 @@ class RealisticTradingEnv(MultiAssetChunkedEnv):
         self.asset_entry_steps.clear()
         
         return obs
+
+    def _initialize_risk_manager(self, circuit_breaker_pct: float):
+        """Initialize risk management system."""
+        self.risk_manager = None
+        if RISK_MANAGER_AVAILABLE and RiskManager:
+            try:
+                # Configuration pour le RiskManager
+                risk_config = {
+                    'max_daily_drawdown': circuit_breaker_pct,  # Utiliser le circuit breaker comme max drawdown
+                    'max_position_risk': 0.02,  # 2% par position
+                    'max_portfolio_risk': 0.10,  # 10% du portefeuille
+                    'initial_capital': self.config.get('portfolio', {}).get('initial_balance', 10000)
+                }
+                self.risk_manager = RiskManager(risk_config)
+                self.logger.info("✅ RiskManager robuste initialisé")
+                
+                # Logger avec le système unifié
+                if UNIFIED_SYSTEM_AVAILABLE and central_logger:
+                    central_logger.sync(
+                        component="RiskManager",
+                        status="initialized",
+                        details=risk_config
+                    )
+            except Exception as e:
+                self.logger.warning(f"Could not initialize RiskManager: {e}")
+                self.risk_manager = None
+        else:
+            self.logger.warning("RiskManager not available, using fallback circuit breaker")
 
     def step(self, action: np.ndarray) -> Tuple[np.ndarray, float, bool, bool, Dict[str, Any]]:
         """
@@ -271,26 +321,56 @@ class RealisticTradingEnv(MultiAssetChunkedEnv):
 
     def _check_circuit_breakers(self) -> bool:
         """
-        Phase 2: Kill Switch & Circuit Breakers
+        Phase 2: Validation robuste avec RiskManager ou fallback
         Returns True if trading should stop immediately.
         """
-        # 1. Max Drawdown Check
-        # Calculate drawdown from peak equity
-        total_value = self.portfolio_manager.get_total_value()
-        # Assuming portfolio manager tracks peak_equity, or we calculate it here
-        # For now, let's use a simplified drawdown calc if not available
-        # (You might need to add peak_equity tracking to PortfolioManager or here)
-        
-        # Using the metric from portfolio if available, else skip for now
-        # risk_metrics = self.portfolio_manager.get_risk_metrics() 
-        # But let's assume we can access drawdown directly or calculate it
-        
-        # Hard Kill: If total value drops below 85% of initial (15% loss)
         initial_capital = self.portfolio_manager.initial_capital
+        total_value = self.portfolio_manager.get_total_value()
+        
+        # ✅ PHASE FINALE: Utiliser RiskManager robuste si disponible
+        if self.risk_manager:
+            try:
+                # Mettre à jour les peaks
+                self.risk_manager.update_peak(total_value)
+                
+                # Vérifier le drawdown avec le RiskManager
+                current_drawdown = (self.risk_manager.portfolio_peak - total_value) / self.risk_manager.portfolio_peak
+                
+                if current_drawdown > self.risk_manager.max_daily_drawdown:
+                    # Logger avec le système unifié
+                    if UNIFIED_SYSTEM_AVAILABLE and central_logger:
+                        central_logger.validation(
+                            "Risk Management",
+                            False,
+                            f"Drawdown {current_drawdown:.2%} > Max {self.risk_manager.max_daily_drawdown:.2%}"
+                        )
+                    
+                    self.logger.critical(
+                        f"🛡️  RISK MANAGER: Drawdown {current_drawdown:.2%} exceeds limit {self.risk_manager.max_daily_drawdown:.2%}"
+                    )
+                    return True
+                
+                return False
+                
+            except Exception as e:
+                self.logger.error(f"RiskManager error, falling back to circuit breaker: {e}")
+                # Fallback au circuit breaker simple
+        
+        # Fallback: Circuit breaker simple
         if total_value < initial_capital * (1 - self.circuit_breaker_pct):
-            self.logger.critical(f"💀 KILL SWITCH: Total Value ({total_value}) < 85% of Initial ({initial_capital})")
-            return True
+            # Logger avec le système unifié
+            if UNIFIED_SYSTEM_AVAILABLE and central_logger:
+                central_logger.validation(
+                    "Circuit Breaker",
+                    False,
+                    f"Portfolio {total_value:.2f} < {(1-self.circuit_breaker_pct)*100:.0f}% of initial {initial_capital:.2f}"
+                )
             
+            self.logger.critical(
+                f"💀 CIRCUIT BREAKER: Total Value ({total_value:.2f}) < {(1-self.circuit_breaker_pct)*100:.0f}% of initial ({initial_capital:.2f})"
+            )
+            return True
+        
         return False
 
     def _check_new_day(self):
@@ -408,6 +488,19 @@ class RealisticTradingEnv(MultiAssetChunkedEnv):
                         # Increment daily total
                         self.positions_count['daily_total'] = self.positions_count.get('daily_total', 0) + 1
                         self.logger.debug(f"[NATURAL_TRADE] TF={tf} Count={self.positions_count.get(tf, 0)}, Daily={self.positions_count['daily_total']}")
+                    
+                    # ✅ JOUR 2: Logger le trade dans le système unifié
+                    if UNIFIED_SYSTEM_AVAILABLE and central_logger:
+                        action_type = "BUY" if action[base_idx + 0] > 0 else "SELL"
+                        current_price = current_prices.get(asset, 0)
+                        central_logger.trade(
+                            action=action_type,
+                            symbol=asset,
+                            quantity=abs(action[base_idx + 0]),
+                            price=current_price,
+                            pnl=0.0  # PnL sera calculé à la fermeture
+                        )
+                    
                     trades_executed_this_step += 1
 
         # Call parent implementation with filtered actions

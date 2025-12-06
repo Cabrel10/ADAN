@@ -10,6 +10,7 @@ reinforcement learning agent.
 # Standard library imports
 import logging
 import traceback
+from datetime import datetime
 from enum import Enum
 from typing import Any, Dict, Optional
 
@@ -19,6 +20,15 @@ import numpy as np
 # Local application imports
 from ..common.reward_logger import RewardLogger
 
+# ✅ PHASE FINALE: Intégrer le système unifié
+try:
+    from ..common.central_logger import logger as central_logger
+    from ..performance.unified_metrics import UnifiedMetrics
+    UNIFIED_SYSTEM_AVAILABLE = True
+except ImportError:
+    UNIFIED_SYSTEM_AVAILABLE = False
+    central_logger = None
+    UnifiedMetrics = None
 
 logger = logging.getLogger(__name__)
 
@@ -70,6 +80,14 @@ class RewardCalculator:
         # Initialize reward logger
         self.reward_logger = RewardLogger(env_config)
 
+        # ✅ PHASE FINALE: Initialiser le système unifié
+        self.unified_metrics = None
+        if UNIFIED_SYSTEM_AVAILABLE and UnifiedMetrics:
+            try:
+                self.unified_metrics = UnifiedMetrics()
+            except Exception as e:
+                logger.warning(f"Could not initialize UnifiedMetrics: {e}")
+
         # Episode tracking
         # Track rewards for current episode
         self.current_episode_rewards = []
@@ -99,13 +117,18 @@ class RewardCalculator:
         self.annual_trading_days = 365
         # Decay factor for time-weighted calculations
         self.decay_factor = 0.99
+        
+        # CRITICAL FIX: Initialize missing attributes
+        self.returns_dates = []  # Track dates for returns
+        self.current_chunk_id = None  # Track current chunk ID
 
         # Weights for composite reward calculation
+        # ✅ PHASE FINALE: Rééquilibrer pour éviter le biais de récompense
         self.weights = {
-            "pnl": 0.4,  # Base PnL component
-            "sharpe": 0.25,  # Risk-adjusted return (volatility)
-            "sortino": 0.25,  # Downside risk-adjusted return
-            "calmar": 0.1,  # Drawdown-adjusted return
+            "pnl": 0.25,   # 25% - Réduit (évite prise de risque excessive)
+            "sharpe": 0.30,  # 30% - Augmenté (risque-ajusté)
+            "sortino": 0.30,  # 30% - Augmenté (downside risk)
+            "calmar": 0.15,  # 15% - Augmenté (drawdown-adjusted)
         }
 
         # Exploration Tutor configuration
@@ -401,6 +424,25 @@ class RewardCalculator:
             
             # Clip and return final reward
             final_reward = np.clip(final_reward, *self.clipping_range)
+            
+            # ✅ PHASE FINALE: Logger avec le système unifié
+            if UNIFIED_SYSTEM_AVAILABLE and central_logger:
+                central_logger.metric("Reward Final", float(final_reward))
+                central_logger.metric("Reward PnL Component", base_reward)
+                central_logger.metric("Reward Sharpe Component", sharpe_ratio if len(self.returns_history) >= 5 else 0.0)
+                central_logger.metric("Reward Sortino Component", sortino_ratio if len(self.returns_history) >= 5 else 0.0)
+                central_logger.metric("Reward Calmar Component", calmar_ratio if len(self.returns_history) >= 5 else 0.0)
+                
+                # Ajouter à UnifiedMetrics si disponible
+                if self.unified_metrics:
+                    # Ajouter le return pour le calcul des métriques
+                    if trade_pnl != 0:
+                        self.unified_metrics.add_return(trade_pnl)
+                    
+                    # Ajouter la valeur du portefeuille
+                    if 'portfolio_value' in portfolio_metrics:
+                        self.unified_metrics.add_portfolio_value(portfolio_metrics['portfolio_value'])
+            
             return float(final_reward)
 
         except Exception as e:
