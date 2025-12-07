@@ -1673,3 +1673,48 @@ class PortfolioManager:
             return self.fund_operations_log.copy()
 
         return self.fund_operations_log[-limit:] if limit > 0 else []
+
+    def close_all_positions(self, current_step: int, reason: str = "MANUAL", current_prices: Optional[Dict[str, float]] = None) -> List[Dict[str, Any]]:
+        """
+        Ferme toutes les positions ouvertes immédiatement.
+        
+        Args:
+            current_step: Étape actuelle de l'entraînement
+            reason: Raison de la fermeture (ex: "CIRCUIT_BREAKER", "MANUAL")
+            current_prices: Prix actuels des actifs (optionnel)
+            
+        Returns:
+            Liste des reçus de fermeture
+        """
+        closed_receipts = []
+        
+        # Obtenir les prix actuels si non fournis
+        if current_prices is None:
+            current_prices = {}
+            for asset, position in self.positions.items():
+                if position.is_open and position.current_price > 0:
+                    current_prices[asset] = position.current_price
+        
+        # Fermer chaque position ouverte
+        for asset, position in self.positions.items():
+            if position.is_open:
+                try:
+                    price = current_prices.get(asset, position.current_price)
+                    if price <= 0:
+                        logger.warning(f"Prix invalide pour {asset}: {price}. Utilisation du prix d'entrée.")
+                        price = position.entry_price
+                    
+                    receipt = self.close_position(
+                        asset=asset,
+                        price=price,
+                        current_step=current_step,
+                        reason=f"{reason}_BULK_CLOSE"
+                    )
+                    if receipt:
+                        closed_receipts.append(receipt)
+                        logger.info(f"Position fermée pour {asset}: {receipt.get('pnl', 0):.4f} PnL")
+                except Exception as e:
+                    logger.error(f"Erreur lors de la fermeture de {asset}: {e}")
+        
+        logger.info(f"🔒 Fermeture en masse: {len(closed_receipts)} positions fermées (raison: {reason})")
+        return closed_receipts

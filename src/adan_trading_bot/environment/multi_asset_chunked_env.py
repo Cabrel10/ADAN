@@ -2514,17 +2514,54 @@ class MultiAssetChunkedEnv(gym.Env):
 
     def set_global_risk(self, worker_id: int = None, **kwargs):
         """
-        Dynamically sets global risk parameters for the environment and portfolio.
-        """
-        # These parameters can be updated on the fly during fine-tuning.
-        if 'max_position_size_pct' in kwargs:
-            self.portfolio_manager.pos_size_pct = kwargs['max_position_size_pct']
-        if 'stop_loss_pct' in kwargs:
-            self.portfolio_manager.sl_pct = kwargs['stop_loss_pct']
-        if 'take_profit_pct' in kwargs:
-            self.portfolio_manager.tp_pct = kwargs['take_profit_pct']
+        Dynamically adjusts risk parameters by applying DBE market regime adjustments.
         
-        self.smart_logger.info(f"[ADAPTIVE_RISK_SET] New risk params applied: {kwargs}")
+        DBE adjusts model parameters by ±10% based on market regime:
+        - Bull market: +10% to position size and take profit
+        - Bear market: -10% to position size, +10% to stop loss
+        - Sideways: No adjustment (±0%)
+        - Volatile: -10% to position size, +10% to stop loss
+        
+        This teaches the model to respect market regimes without overriding its decisions.
+        """
+        # Store original model parameters
+        original_pos_size = self.portfolio_manager.pos_size_pct
+        original_sl = self.portfolio_manager.sl_pct
+        original_tp = self.portfolio_manager.tp_pct
+        
+        # Apply DBE adjustments (±10% based on market regime)
+        if 'max_position_size_pct' in kwargs:
+            dbe_pos_size = kwargs['max_position_size_pct']
+            # DBE suggests adjustment, but we apply only ±10% to model's decision
+            # Calculate the adjustment factor (should be close to 1.0 for ±10%)
+            adjustment_factor = dbe_pos_size / original_pos_size if original_pos_size > 0 else 1.0
+            # Clamp adjustment to ±10%
+            adjustment_factor = max(0.9, min(1.1, adjustment_factor))
+            self.portfolio_manager.pos_size_pct = original_pos_size * adjustment_factor
+        
+        if 'stop_loss_pct' in kwargs:
+            dbe_sl = kwargs['stop_loss_pct']
+            # Apply only ±10% adjustment to model's stop loss
+            adjustment_factor = dbe_sl / original_sl if original_sl > 0 else 1.0
+            adjustment_factor = max(0.9, min(1.1, adjustment_factor))
+            self.portfolio_manager.sl_pct = original_sl * adjustment_factor
+        
+        if 'take_profit_pct' in kwargs:
+            dbe_tp = kwargs['take_profit_pct']
+            # Apply only ±10% adjustment to model's take profit
+            adjustment_factor = dbe_tp / original_tp if original_tp > 0 else 1.0
+            adjustment_factor = max(0.9, min(1.1, adjustment_factor))
+            self.portfolio_manager.tp_pct = original_tp * adjustment_factor
+        
+        # Log the adjustment for transparency
+        self.smart_logger.info(
+            f"[DBE_MARKET_REGIME_ADJUSTMENT] "
+            f"Model: PosSize={original_pos_size:.2%}, SL={original_sl:.2%}, TP={original_tp:.2%} | "
+            f"Adjusted: PosSize={self.portfolio_manager.pos_size_pct:.2%}, "
+            f"SL={self.portfolio_manager.sl_pct:.2%}, "
+            f"TP={self.portfolio_manager.tp_pct:.2%} | "
+            f"(±10% max based on market regime)"
+        )
 
 
     def step(self, action: np.ndarray) -> tuple:

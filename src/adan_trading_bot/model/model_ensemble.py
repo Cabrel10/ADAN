@@ -325,38 +325,78 @@ class ModelEnsemble:
         """Vérifie si un modèle fait partie de l'ensemble."""
         return model_name in self.models
 
-    def get_fusion_weights(self) -> Dict[str, float]:
-        """Retourne un dictionnaire {model_name: weight} robuste pour l'export.
+    def get_fusion_weights(self, capital_tier: Optional[str] = None) -> Dict[str, float]:
+        """Retourne un dictionnaire {model_name: weight} adapté au pallier de capital.
 
-        Ordre de priorité:
-        1) Si `self.fusion_weights` existe (déjà chargé depuis un checkpoint), on l'utilise.
-        2) Sinon on tente de charger depuis un checkpoint connu contenant 'fusion_weights'.
-        3) Sinon fallback uniforme sur les modèles présents (ou 4 workers par défaut).
+        Les poids varient selon le pallier pour optimiser la stratégie:
+        - Micro (0-100$): W1 (Conservative) dominant
+        - Small (100-1000$): W2 (Balanced) dominant
+        - Medium (1000-10k$): W4 (Hybrid) dominant
+        - High (10k-100k$): W3 (Aggressive) dominant
+        - Enterprise (100k+$): Ensemble équilibré
+
+        Args:
+            capital_tier: Pallier de capital ('Micro', 'Small', 'Medium', 'High', 'Enterprise')
+                         Si None, retourne poids uniformes
+
+        Returns:
+            Dict[str, float]: Poids normalisés pour chaque modèle
         """
-        # 1) In-memory weights if present
+        # Définir les poids par pallier
+        tier_weights = {
+            'Micro': {'w1': 0.50, 'w2': 0.20, 'w3': 0.10, 'w4': 0.20},      # Conservative dominant
+            'Small': {'w1': 0.20, 'w2': 0.50, 'w3': 0.10, 'w4': 0.20},      # Balanced dominant
+            'Medium': {'w1': 0.15, 'w2': 0.20, 'w3': 0.15, 'w4': 0.50},     # Hybrid dominant
+            'High': {'w1': 0.10, 'w2': 0.15, 'w3': 0.50, 'w4': 0.25},       # Aggressive dominant
+            'Enterprise': {'w1': 0.25, 'w2': 0.25, 'w3': 0.25, 'w4': 0.25}, # Équilibré
+        }
+
+        # 1) Si capital_tier est spécifié, utiliser les poids adaptés
+        if capital_tier and capital_tier in tier_weights:
+            base_weights = tier_weights[capital_tier]
+            
+            # Adapter les poids selon les performances réelles
+            if self.models:
+                names = list(self.models.keys())
+                weights: Dict[str, float] = {}
+                
+                for name in names:
+                    # Poids de base du pallier
+                    base_w = base_weights.get(name, 0.25)
+                    
+                    # Ajuster selon la performance du modèle
+                    try:
+                        perf = self.performance.get(name, ModelPerformance(name))
+                        accuracy_factor = max(0.5, min(2.0, perf.accuracy + 0.5))  # Entre 0.5 et 2.0
+                        weights[name] = base_w * accuracy_factor
+                    except Exception:
+                        weights[name] = base_w
+                
+                # Normaliser les poids
+                total = sum(weights.values())
+                if total > 0:
+                    return {k: v / total for k, v in weights.items()}
+                return weights
+
+        # 2) In-memory weights if present
         try:
             fw_attr = getattr(self, "fusion_weights", None)
             if isinstance(fw_attr, (list, tuple, np.ndarray, dict)):
                 if isinstance(fw_attr, dict):
-                    # Assume already mapped by model name or worker idx as string
                     return {str(k): float(v) for k, v in fw_attr.items()}
                 else:
                     arr = np.asarray(fw_attr, dtype=float)
-                    # Map by model order if available, else by worker index
                     if self.models:
                         names = list(self.models.keys())
-                        # Normalize length mismatch safely
                         n = min(len(names), len(arr))
                         if n > 0:
                             return {names[i]: float(arr[i]) for i in range(n)}
-                    # Fallback to index keys
                     return {str(i): float(w) for i, w in enumerate(arr.tolist())}
         except Exception:
             pass
 
-        # 2) Try loading from known fine-tune checkpoint artifact if present
+        # 3) Try loading from known fine-tune checkpoint artifact if present
         try:
-            # Common path where we saved fusion weights during training
             candidate_paths = [
                 Path("checkpoints/finetune/run_10k/final/adan_model_for_finetuning.pth"),
                 Path("checkpoints/optuna_best/adan_model_for_finetuning.pth"),
@@ -374,12 +414,10 @@ class ModelEnsemble:
                                 return {names[i]: float(arr[i]) for i in range(n)}
                         return {str(i): float(w) for i, w in enumerate(arr.tolist())}
         except Exception:
-            # Do not break if fusion weights can't be loaded
             pass
 
-        # 3) Fallbacks
+        # 4) Fallbacks
         if self.models:
-            # Uniform over available models using stored performance weights if any
             names = list(self.models.keys())
             weights: Dict[str, float] = {}
             for name in names:
@@ -390,5 +428,67 @@ class ModelEnsemble:
                 weights[name] = w
             return weights
 
-        # If no models registered, assume 4 workers default equal weights
+        # Si no models registered, assume 4 workers default equal weights
         return {str(i): 0.25 for i in range(4)}
+
+    def predict_with_tier(self, x: torch.Tensor, capital_tier: Optional[str] = None) -> torch.Tensor:
+        """Effectue une prédiction avec poids adaptés au pallier de capital.
+
+        Args:
+            x: Tenseur d'entrée
+            capital_tier: Pallier de capital pour adapter les poids
+
+        Returns:
+            Prédiction combinée avec poids adaptés
+        """
+        if not self.models:
+            raise ValueError("Aucun modèle n'a été ajouté à l'ensemble")
+
+        predictions = []
+        weights = self.get_fusion_weights(capital_tier=capital_tier)
+        weight_list = []
+
+        with torch.no_grad():
+            for name, model in self.models.items():
+                pred = model(x)
+                predictions.append(pred)
+                weight_list.append(weights.get(name, 0.25))
+
+        return self.voting_mechanism.combine_predictions(predictions, weight_list)
+
+    def save(self, filepath: str) -> None:
+        """Sauvegarde l'ensemble complet (modèles + performances) dans un fichier pickle."""
+        import pickle
+        
+        ensemble_data = {
+            'models': self.models,
+            'performance': {name: perf.to_dict() for name, perf in self.performance.items()},
+            'voting_method': self.voting_mechanism.method,
+            'timestamp': datetime.now(timezone.utc).isoformat(),
+            'version': '1.0'
+        }
+        
+        os.makedirs(os.path.dirname(os.path.abspath(filepath)), exist_ok=True)
+        
+        with open(filepath, 'wb') as f:
+            pickle.dump(ensemble_data, f)
+    
+    @classmethod
+    def load(cls, filepath: str) -> 'ModelEnsemble':
+        """Charge un ensemble depuis un fichier pickle."""
+        import pickle
+        
+        with open(filepath, 'rb') as f:
+            ensemble_data = pickle.load(f)
+        
+        ensemble = cls(voting_method=ensemble_data.get('voting_method', 'weighted'))
+        
+        # Restaurer les modèles
+        for name, model in ensemble_data.get('models', {}).items():
+            ensemble.models[name] = model
+        
+        # Restaurer les performances
+        for name, perf_dict in ensemble_data.get('performance', {}).items():
+            ensemble.performance[name] = ModelPerformance.from_dict(perf_dict)
+        
+        return ensemble

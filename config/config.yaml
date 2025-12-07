@@ -1344,8 +1344,10 @@ workers:
       patience_bonus: 1.4807
       pnl_weight: 85.0998512978671
     risk_management:
-      stop_loss_pct: 0.0578
-      take_profit_pct: 0.0883
+      stop_loss_pct: 0.03885747982638574
+      take_profit_pct: 0.03524358220837648
+      risk_per_trade_pct: 0.019903972812986285
+      position_size_pct: 0.14159863754897406
     trading_rules:
       frequency:
         force_trade_steps:
@@ -1353,7 +1355,7 @@ workers:
           1h: 18
           4h: 24
         freq_penalty_weight: 0.05
-      position_hold_min: 2
+      position_hold_min: 11
       daily_max_forced_trades: 10
       position_hold_max: 70
       max_consecutive_losses: 4
@@ -1362,6 +1364,8 @@ workers:
         5m: 20
         1h: 15
         4h: 10
+      max_positions:
+        total: 4
     risk_per_trade_pct_by_tier:
       Micro: 0.0914
       Small: 0.0823
@@ -1452,8 +1456,10 @@ workers:
       stop_loss_penalty: -1.5237843121836676
       take_profit_bonus: 4.328263076608351
     risk_management:
-      stop_loss_pct: 0.07757214059046727
-      take_profit_pct: 0.10561230653246938
+      stop_loss_pct: 0.04703154479370312
+      take_profit_pct: 0.17480670394168155
+      risk_per_trade_pct: 0.017135075385833358
+      position_size_pct: 0.27209383908141693
     trading_rules:
       frequency:
         force_trade_steps:
@@ -1462,6 +1468,9 @@ workers:
           4h: 22
         freq_penalty_weight: 0.05
         daily_max_forced_trades: 10
+      max_positions:
+        total: 2
+      position_hold_min: 26
     risk_per_trade_pct_by_tier:
       Enterprise: 0.6
       High: 0.8
@@ -1537,8 +1546,10 @@ workers:
       stop_loss_penalty: -1.5237843121836676
       take_profit_bonus: 4.328263076608351
     risk_management:
-      stop_loss_pct: 0.09217669043091613
-      take_profit_pct: 0.12477521474449761
+      stop_loss_pct: 0.05406585285177397
+      take_profit_pct: 0.273235229154987
+      risk_per_trade_pct: 0.03202230023486417
+      position_size_pct: 0.3416145155592091
     trading_rules:
       frequency:
         force_trade_steps:
@@ -1547,6 +1558,9 @@ workers:
           4h: 9
         freq_penalty_weight: 0.05
         daily_max_forced_trades: 10
+      max_positions:
+        total: 1
+      position_hold_min: 147
     risk_per_trade_pct_by_tier:
       Enterprise: 1.0
       High: 1.2
@@ -1612,8 +1626,10 @@ workers:
       stop_loss_penalty: -1.5237843121836676
       take_profit_bonus: 4.328263076608351
     risk_management:
-      stop_loss_pct: 0.09726955024795811
-      take_profit_pct: 0.1456989601711994
+      stop_loss_pct: 0.008849343056814276
+      take_profit_pct: 0.03683618801477559
+      risk_per_trade_pct: 0.008999669076221791
+      position_size_pct: 0.1451700562185014
     risk_per_trade_pct_by_tier:
       Micro: 0.025
       Small: 0.02
@@ -1627,6 +1643,9 @@ workers:
           1h: 15
           4h: 19
         freq_penalty_weight: 1.1309727879060552
+      max_positions:
+        total: 5
+      position_hold_min: 3
     assets:
     - BTCUSDT
     data_split: train

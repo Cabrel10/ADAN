@@ -27,6 +27,7 @@ from adan_trading_bot.data_processing.data_loader import ChunkedDataLoader
 from adan_trading_bot.environment.realistic_trading_env import (
     RealisticTradingEnv
 )
+from adan_trading_bot.environment.multi_asset_chunked_env import MultiAssetChunkedEnv
 from adan_trading_bot.model.model_ensemble import ModelEnsemble
 from adan_trading_bot.utils.seed_manager import SeedManager
 
@@ -677,27 +678,10 @@ def train_worker(worker_id: str, worker_idx: int, config: dict, resume: bool, ch
                 )
                 os.makedirs(env_log_dir, exist_ok=True)
                 
-                return RealisticTradingEnv(
-                    data=data,
-                    timeframes=config["data"]["timeframes"],
-                    window_sizes=config["environment"]["observation"]["window_sizes"],
-                    features_config=config["data"]["features_config"]["timeframes"],
-                    max_steps=config["environment"]["max_steps"],
-                    initial_balance=config["portfolio"]["initial_balance"],
-                    commission=config["environment"]["commission"],
-                    reward_scaling=config["environment"]["reward_scaling"],
-                    enable_logging=True,
-                    log_dir=env_log_dir,
-                    worker_config=env_worker_config,
-                    config=config,
-                    exploration_tutor=config.get("reward_shaping", {}).get("exploration_tutor", {}),
-                    # Realistic Constraints
-                    live_mode=False,
-                    min_hold_steps=6,  # 30m
-                    cooldown_steps=3,  # 15m
-                    min_notional=10.0,
-                    circuit_breaker_pct=0.15
-                )
+                # ✅ CORRECTION: Utiliser MultiAssetChunkedEnv (même que Optuna)
+                # RealisticTradingEnv ajoute des contraintes live qui ne sont pas en Optuna
+                # Cela causait une divergence entre Optuna et Training
+                return MultiAssetChunkedEnv(config=config)
             return _init
         
         # Create DummyVecEnv for this worker
@@ -906,6 +890,68 @@ def main(
             p.join()
             
         logger.info("✅ All workers completed.")
+        
+        # ✅ GÉNÉRATION DU RAPPORT DE PERFORMANCE
+        logger.info("="*80)
+        logger.info("📊 GÉNÉRATION DU RAPPORT DE PERFORMANCE")
+        logger.info("="*80)
+        
+        try:
+            # Vérifier que tous les modèles ont été créés
+            worker_results = {}
+            for worker_id in worker_ids:
+                model_path = os.path.join(final_export_dir, f"{worker_id}_final.zip")
+                vec_path = os.path.join(final_export_dir, f"{worker_id}_vecnormalize.pkl")
+                if os.path.exists(model_path) and os.path.exists(vec_path):
+                    model_size = os.path.getsize(model_path) / (1024*1024)  # MB
+                    worker_results[worker_id] = {
+                        "model_path": model_path,
+                        "vec_path": vec_path,
+                        "model_size_mb": round(model_size, 2),
+                        "status": "✅ SUCCESS"
+                    }
+                    logger.info(f"✅ {worker_id}: Model saved ({model_size:.1f}MB)")
+                else:
+                    worker_results[worker_id] = {
+                        "model_path": model_path,
+                        "vec_path": vec_path,
+                        "model_size_mb": 0,
+                        "status": "❌ FAILED"
+                    }
+                    logger.error(f"❌ {worker_id}: Model NOT found")
+            
+            # Créer un rapport de performance
+            performance_report = {
+                "timestamp": datetime.now().isoformat(),
+                "training_completed": True,
+                "workers_trained": len([w for w in worker_results.values() if w["status"] == "✅ SUCCESS"]),
+                "total_workers": len(worker_ids),
+                "worker_results": worker_results,
+                "next_steps": [
+                    "1. Analyser les performances de chaque worker",
+                    "2. Comparer Sharpe, Drawdown, Win Rate",
+                    "3. Décider des poids de fusion basés sur les résultats",
+                    "4. Créer l'ensemble ADAN avec fusion adaptative"
+                ],
+                "fusion_ready": len([w for w in worker_results.values() if w["status"] == "✅ SUCCESS"]) == 4
+            }
+            
+            report_path = os.path.join(final_export_dir, "training_performance_report.json")
+            with open(report_path, 'w') as f:
+                json.dump(performance_report, f, indent=2)
+            logger.info(f"✅ Rapport de performance: {report_path}")
+            
+            logger.info("="*80)
+            logger.info("🎯 ENTRAÎNEMENT TERMINÉ - PRÊT POUR ANALYSE!")
+            logger.info("="*80)
+            logger.info("📊 PROCHAINES ÉTAPES:")
+            logger.info("1. Analyser les résultats de chaque worker")
+            logger.info("2. Comparer les performances (Sharpe, Drawdown, etc.)")
+            logger.info("3. Décider des poids de fusion intelligemment")
+            logger.info("4. Créer l'ensemble ADAN avec vos poids optimaux")
+            
+        except Exception as e:
+            logger.error(f"❌ Erreur lors de la génération du rapport: {e}", exc_info=True)
         
     except Exception as e:
         logger.error(f"❌ Main process error: {e}", exc_info=True)
