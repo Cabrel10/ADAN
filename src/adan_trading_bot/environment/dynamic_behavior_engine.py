@@ -1611,95 +1611,42 @@ class DynamicBehaviorEngine:
 
             logger.debug(f"[DBE_CALC] tier_config reçu: {tier_config}")
 
+            # HIÉRARCHIE V2 : Utiliser directement les paramètres de compute_dynamic_modulation()
             risk_params = self.compute_dynamic_modulation()
-            # The agent's action value (worker_pref_pct) should determine the size.
-            # Normalize from [0.5, 1.0] to [0, 1] to scale within the allowed range.
-            normalized_action = (
-                (worker_pref_pct - 0.5) * 2 if worker_pref_pct >= 0.5 else 0
-            )
-            aggressivity = risk_params.get(
-                "aggressivity", 0.5
-            )  # Keep for logging/other potential uses
+            
+            # Récupérer les paramètres finaux (déjà appliqués par la hiérarchie)
+            position_pct = float(risk_params.get("position_size_pct", 0.1))
+            sl_pct = float(risk_params.get("sl_pct", 0.02))
+            tp_pct = float(risk_params.get("tp_pct", 0.04))
+            
             logger.debug(
-                f"[DBE_CALC] Action de l'agent (normalisée): {normalized_action:.2f}, Agressivité DBE: {aggressivity:.2f}"
+                f"[DBE_CALC_V2] Paramètres de compute_dynamic_modulation: Pos={position_pct:.2%}, SL={sl_pct:.2%}, TP={tp_pct:.2%}"
             )
 
-            exposure_range = tier_config.get("exposure_range")
-            if (
-                not exposure_range
-                or not isinstance(exposure_range, list)
-                or len(exposure_range) != 2
-            ):
-                logger.warning(
-                    f"[DBE_CALC] Échec: 'exposure_range' invalide ou manquant dans le palier {tier_config.get('name')}. Reçu: {exposure_range}"
-                )
-                return {
-                    "feasible": False,
-                    "reason": f"exposure_range invalide pour le palier {tier_config.get('name')}",
-                }
-
-            logger.debug(
-                f"[DBE_CALC] Palier '{tier_config.get('name')}': exposure_range={exposure_range}"
-            )
-
-            min_position_pct = exposure_range[0] / 100.0
-            max_position_pct = exposure_range[1] / 100.0
-            logger.debug(
-                f"[DBE_CALC] Intervalle d'exposition: min={min_position_pct:.2%}, max={max_position_pct:.2%}"
-            )
-
-            # Use the desired_position_size to determine position size
-            # Transform from [-1, 1] to [0, 1]
-            normalized_size = (desired_position_size + 1) / 2.0
-            # Scale within the allowed range
-            position_pct = (
-                min_position_pct
-                + (max_position_pct - min_position_pct) * normalized_size
-            )
-            # Clip PosSize between 5% and 80%
-            position_pct = np.clip(position_pct, 0.05, 0.80)
-            logger.debug(
-                f"[DBE_CALC] Taille de position (basée sur desired_position_size={desired_position_size:.2f}): {position_pct:.2%}"
-            )
-
-            max_position = tier_config.get("max_position_size_pct", 0.5) / 100.0
-            position_pct = min(max_position, position_pct)
-            logger.debug(
-                f"[DBE_CALC] Taille de position (après contrainte max du palier de {max_position:.2%}): {position_pct:.2%}"
-            )
-
+            # Vérifier notional ≥ 11 USDT (hard_constraint)
             position_size_usdt = capital * position_pct
-            logger.debug(
-                f"[DBE_CALC] Taille de position (en USDT): {position_size_usdt:.2f}"
+            min_trade_value = float(
+                self.config.get("environment", {}).get("hard_constraints", {}).get("min_order_value_usdt", 11.0)
             )
-
-            # Determine the minimum trade value coherently with config
-            # Prefer tier_config.min_trade_value if present, otherwise fall back to trading_rules.min_order_value_usdt
-            min_trade_value = tier_config.get(
-                "min_trade_value",
-                self.config.get("trading_rules", {}).get("min_order_value_usdt", 11.0),
-            )
+            
             if position_size_usdt < min_trade_value:
                 logger.warning(
-                    f"[DBE_CALC] Taille calculée ({position_size_usdt:.2f} USDT) < min_trade_value ({min_trade_value} USDT). Ajustement."
+                    f"[DBE_CALC_V2] Notional calculé ({position_size_usdt:.2f} USDT) < min_trade_value ({min_trade_value} USDT). Vérification."
                 )
                 if capital < min_trade_value:
                     logger.warning(
-                        f"[DBE_CALC] Échec: Capital ({capital:.2f} USDT) insuffisant pour le trade minimum de {min_trade_value} USDT."
+                        f"[DBE_CALC_V2] Échec: Capital ({capital:.2f} USDT) insuffisant pour le trade minimum de {min_trade_value} USDT."
                     )
                     return {
                         "feasible": False,
                         "reason": f"Capital insuffisant (min {min_trade_value} USDT requis)",
                     }
+                # Remontée à min_trade_value
                 position_pct = min_trade_value / capital
                 position_size_usdt = min_trade_value
                 logger.debug(
-                    f"[DBE_CALC] Taille de position ajustée au minimum: {position_pct:.2%} ({position_size_usdt:.2f} USDT)"
+                    f"[DBE_CALC_V2] Notional ajusté au minimum: {position_pct:.2%} ({position_size_usdt:.2f} USDT)"
                 )
-
-            # Récupérer les valeurs de base (IMMUABLES)
-            sl_pct = risk_params.get("sl_pct", 0.02)
-            tp_pct = risk_params.get("tp_pct", sl_pct * 2)
 
             # Journaliser la décision
             logger.debug(
