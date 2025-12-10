@@ -393,11 +393,13 @@ class DynamicBehaviorEngine:
         return mapping.get(name, "Micro")
 
     def _get_tier_based_parameters(self, worker_key: str, current_tier: Any) -> Tuple[float, float, float]:
-        """Récupère SL/TP/PosSize de base par tier et applique l'agressivité inversée depuis config.yaml.
+        """Récupère SL/TP/PosSize de base depuis trading_parameters (source unique de vérité Optuna).
 
-        - SL/TP: pris depuis worker (par tier) sinon risk_management, sinon defaults
-        - PosSize: basé sur le cap du palier (max_position_size_pct) avec agressivité inversée
-          Micro vise ~80% du cap, Enterprise reste conservateur
+        HIÉRARCHIE :
+        1. Charger trading_parameters (base Optuna - source unique)
+        2. Retourner les valeurs pures (pas de modulation ici)
+        
+        La modulation DBE sera appliquée dans compute_dynamic_modulation()
         """
         tier_key = self._normalize_tier_key(current_tier)
 
@@ -409,64 +411,24 @@ class DynamicBehaviorEngine:
             worker_config = getattr(self.env, "worker_config", {}) or {}
 
         logger.debug(
-            f"[TIER_PARAMS] {worker_key} | tier_key={tier_key} | source={'config.yaml' if self.config.get('workers', {}).get(worker_key) else 'env.worker_config'}"
+            f"[TIER_PARAMS_V2] {worker_key} | tier_key={tier_key} | source={'config.yaml' if self.config.get('workers', {}).get(worker_key) else 'env.worker_config'}"
         )
 
-        # SL: try tier-specific first, then risk_management, then default
-        base_sl = (
-            worker_config.get("stop_loss_pct_by_tier", {}).get(tier_key)
-            or worker_config.get("risk_management", {}).get("stop_loss_pct")
-            or self.config.get("risk_parameters", {}).get("base_sl_pct", 0.02)
+        # SOURCE UNIQUE DE VÉRITÉ : trading_parameters (Optuna)
+        trading_params = worker_config.get("trading_parameters", {})
+        
+        base_sl = float(trading_params.get("stop_loss_pct", 0.02))
+        base_tp = float(trading_params.get("take_profit_pct", 0.04))
+        base_pos = float(trading_params.get("position_size_pct", 0.1))
+
+        logger.debug(
+            f"[TIER_PARAMS_V2] {worker_key} | Optuna base: SL={base_sl:.2%}, TP={base_tp:.2%}, Pos={base_pos:.2%}"
         )
 
-        # TP: try tier-specific first, then risk_management, then default
-        base_tp = (
-            worker_config.get("take_profit_pct_by_tier", {}).get(tier_key)
-            or worker_config.get("risk_management", {}).get("take_profit_pct")
-            or self.config.get("risk_parameters", {}).get("base_tp_pct", 0.04)
-        )
-
-        # 1) Cap du palier depuis capital_tiers
-        tier_cap_pct = 0.90  # default 90%
-        try:
-            # current_tier peut être dict avec 'max_position_size_pct'
-            if isinstance(current_tier, dict) and "max_position_size_pct" in current_tier:
-                tier_cap_pct = float(current_tier.get("max_position_size_pct", 90.0)) / 100.0
-            else:
-                # fallback: trouver dans config.capital_tiers par nom
-                for t in self.config.get("capital_tiers", []):
-                    if tier_key.lower() in str(t.get("name", "")).lower():
-                        tier_cap_pct = float(t.get("max_position_size_pct", 90.0)) / 100.0
-                        break
-        except Exception:
-            tier_cap_pct = 0.90
-
-        # 2) Base selon agressivité inversée par tier
-        inverted_targets = {
-            "Micro": 0.80,       # 80% du cap (ex: 0.8 * 0.90 = 72%)
-            "Small": 0.75,       # 75% du cap
-            "Medium": 0.65,      # 65% du cap
-            "High": 0.55,        # 55% du cap
-            "Enterprise": 0.50,  # 50% du cap
-        }
-        base_target = inverted_targets.get(tier_key, 0.70)
-        base_pos_size = tier_cap_pct * base_target
-
-        # 3) Optionnel: si un risk_per_trade_pct_by_tier est fourni, on peut le considérer comme un minimum
-        rpt = worker_config.get("risk_per_trade_pct_by_tier", {}).get(tier_key)
-        if rpt is not None:
-            rpt = float(rpt) / 100.0 if rpt > 1.0 else float(rpt)
-            base_pos_size = max(base_pos_size, rpt)
-
-        # 4) Agressivité fine (si fournie)
-        agg_cfg = self.config.get("aggressiveness_decay", {})
-        aggressiveness = agg_cfg.get(tier_key.lower(), 1.0) if isinstance(agg_cfg, dict) else 1.0
-        tier_adjusted_pos_size = float(base_pos_size) * float(aggressiveness)
-
-        # 5) Clamp à [1%, tier cap]
-        tier_adjusted_pos_size = max(min(tier_adjusted_pos_size, tier_cap_pct), 0.01)
-
-        return float(base_sl), float(base_tp), float(tier_adjusted_pos_size)
+        # Pas d'aggressiveness_decay ici - sera appliqué dans compute_dynamic_modulation()
+        # Pas de modulation de régime ici - sera appliquée dans compute_dynamic_modulation()
+        
+        return float(base_sl), float(base_tp), float(base_pos)
 
     def _compute_regime_modulation(self, base_sl: float, base_tp: float, pos_size: float, regime: str) -> Tuple[float, float, float]:
         """Applique la modulation par régime de marché."""
@@ -487,13 +449,20 @@ class DynamicBehaviorEngine:
         return final_sl, final_tp, final_pos_size
 
     def compute_dynamic_modulation(self, env=None, risk_horizon: float = 0.0) -> Dict[str, Any]:
-        """Orchestre le calcul des paramètres en respectant worker -> tier -> regime."""
+        """Orchestre le calcul des paramètres en respectant la hiérarchie Optuna -> DBE -> Environnement.
+        
+        FLUX :
+        1. Charger base Optuna (trading_parameters)
+        2. Appliquer multiplicateurs DBE (±15% max)
+        3. Clamp par hard_constraints (min/max absolus)
+        4. Clamp par tier (max_position_size_pct)
+        """
         try:
             if env:
                 self.set_env_reference(env)
             
             if not hasattr(self, "env") or self.env is None:
-                logger.warning("[DBE] Référence 'env' manquante, retour des paramètres par défaut")
+                logger.warning("[DBE_V2] Référence 'env' manquante, retour des paramètres par défaut")
                 return self._get_default_modulation()
 
             # Récupère worker_key
@@ -513,41 +482,70 @@ class DynamicBehaviorEngine:
             # Récupère regime
             regime = str(getattr(self, "current_regime", "sideways")).lower()
 
-            # --- FORCE DISABLE DBE FOR OPTUNA ---
-            # On récupère les params de base du tier/worker
-            base_sl, base_tp, tier_adj_pos = self._get_tier_based_parameters(worker_key, current_tier)
+            # ÉTAPE 1 : Charger base Optuna
+            base_sl, base_tp, base_pos = self._get_tier_based_parameters(worker_key, current_tier)
             
-            # ⚠️ IMPORTANT: BYPASS REGIME MODULATION
-            # On utilise directement les valeurs de base sans modulation de régime
-            final_sl = base_sl
-            final_tp = base_tp
-            final_pos = tier_adj_pos
-
-            # Respect strict du cap du palier
+            # ÉTAPE 2 : Appliquer multiplicateurs DBE (±15% max)
+            regime_params = self.config.get("dbe", {}).get("regime_parameters", {}).get(regime, {})
+            
+            # Convertir multiplicateurs absolus en relatifs et borner à ±15%
+            pos_mult_raw = float(regime_params.get("position_size_multiplier", 1.0))
+            sl_mult_raw = float(regime_params.get("sl_multiplier", 1.0))
+            tp_mult_raw = float(regime_params.get("tp_multiplier", 1.0))
+            
+            # Convertir en ajustement relatif et borner à ±15%
+            pos_adjustment = min(max(pos_mult_raw - 1.0, -0.15), 0.15)
+            sl_adjustment = min(max(sl_mult_raw - 1.0, -0.15), 0.15)
+            tp_adjustment = min(max(tp_mult_raw - 1.0, -0.15), 0.15)
+            
+            # Appliquer ajustements
+            adjusted_pos = base_pos * (1 + pos_adjustment)
+            adjusted_sl = base_sl * (1 + sl_adjustment)
+            adjusted_tp = base_tp * (1 + tp_adjustment)
+            
+            logger.debug(
+                f"[DBE_V2_MOD] {worker_key} | Regime={regime} | Adjustments: Pos{pos_adjustment:+.1%}, SL{sl_adjustment:+.1%}, TP{tp_adjustment:+.1%}"
+            )
+            
+            # ÉTAPE 3 : Clamp par hard_constraints (min/max absolus)
+            hard_constraints = self.config.get("environment", {}).get("hard_constraints", {})
+            
+            sl_min = float(hard_constraints.get("stop_loss_pct", {}).get("min", 0.005))
+            sl_max = float(hard_constraints.get("stop_loss_pct", {}).get("max", 0.20))
+            tp_min = float(hard_constraints.get("take_profit_pct", {}).get("min", 0.01))
+            tp_max = float(hard_constraints.get("take_profit_pct", {}).get("max", 0.50))
+            
+            adjusted_sl = max(min(adjusted_sl, sl_max), sl_min)
+            adjusted_tp = max(min(adjusted_tp, tp_max), tp_min)
+            
+            # ÉTAPE 4 : Clamp par tier (max_position_size_pct)
             try:
                 if isinstance(current_tier, dict):
-                    tier_cap_pct = float(current_tier.get("max_position_size_pct", 95.0)) / 100.0
+                    tier_cap_pct = float(current_tier.get("max_position_size_pct", 90.0)) / 100.0
                 else:
-                    tier_cap_pct = 0.95
+                    tier_cap_pct = 0.90
             except Exception:
-                tier_cap_pct = 0.95
-            final_pos = min(final_pos, tier_cap_pct)
+                tier_cap_pct = 0.90
+            
+            adjusted_pos = min(adjusted_pos, tier_cap_pct)
+            adjusted_pos = max(adjusted_pos, 0.01)  # Min 1%
 
             tier_name = current_tier if isinstance(current_tier, str) else getattr(current_tier, "name", str(current_tier))
             logger.info(
-                f"[DBE_DECISION] {worker_key} | Tier={tier_name} | Regime={regime} (IGNORED) | Final SL={final_sl:.2%}, TP={final_tp:.2%}, PosSize={final_pos:.2%}"
+                f"[DBE_V2_FINAL] {worker_key} | Tier={tier_name} | Regime={regime} | Final: SL={adjusted_sl:.2%}, TP={adjusted_tp:.2%}, Pos={adjusted_pos:.2%}"
             )
 
             mod = {
-                "sl_pct": final_sl,
-                "tp_pct": final_tp,
-                "position_size_pct": final_pos,
-                "risk_mode": "DISABLED_FOR_OPTUNA",
+                "sl_pct": float(adjusted_sl),
+                "tp_pct": float(adjusted_tp),
+                "position_size_pct": float(adjusted_pos),
+                "regime": regime,
+                "regime_confidence": 0.8,  # Default confidence
             }
             return mod
         except Exception as e:
             logger.error(f"Erreur dans compute_dynamic_modulation: {e}", exc_info=True)
-            return { "sl_pct": 0.02, "tp_pct": 0.04, "position_size_pct": 0.1, "risk_mode": "error" }
+            return { "sl_pct": 0.02, "tp_pct": 0.04, "position_size_pct": 0.1, "regime": "error" }
 
     def _calculate_frequency_adjustment(
         self,
