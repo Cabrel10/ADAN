@@ -102,14 +102,31 @@ TIER 3 : OPTUNA (Stratège)
 
 ---
 
-### T5 : Centraliser la Décision Finale dans PortfolioManager ⏳
+### T5 : Centraliser la Décision Finale dans PortfolioManager ✅
 
 **Objectif** :
 - Créer fonction `calculate_final_trade_parameters()`
 - Appliquer hiérarchie séquentiellement (Env → Opt → DBE → Env)
 - Centraliser la logique de décision
 
-**Statut** : ⏳ À FAIRE
+**Statut** : ✅ COMPLÉTÉ
+
+**Livrable** : `.kiro/specs/hierarchy-refactor/T5_CENTRALIZATION_PLAN.md`
+
+**Modifications Effectuées** :
+1. ✅ Implémenté `calculate_final_trade_parameters()` dans PortfolioManager
+2. ✅ Applique la hiérarchie complète (4 étapes)
+3. ✅ Logging détaillé pour chaque étape
+4. ✅ Gestion du min_trade = 11 USDT
+5. ✅ Respect des paliers et contraintes
+
+**Tests Passés** : 4/4 (100%)
+- ✅ Test 1: Hiérarchie appliquée correctement
+- ✅ Test 2: Garantie min_trade = 11 USDT
+- ✅ Test 3: Contraintes des paliers respectées
+- ✅ Test 4: Limites DBE (±15%) respectées
+
+**Commit** : `d7a0e2b` - "T5: Centraliser la décision finale dans PortfolioManager"
 
 ---
 
@@ -174,15 +191,15 @@ TIER 3 : OPTUNA (Stratège)
 T1 : Cartographie          ████████████████████ 100% ✅
 T2 : Spécification         ████████████████████ 100% ✅
 T3 : Config Refactoring    ████████████████████ 100% ✅
-T4 : DBE Refactoring       ░░░░░░░░░░░░░░░░░░░░   0% ⏳
-T5 : Centralisation        ░░░░░░░░░░░░░░░░░░░░   0% ⏳
+T4 : DBE Refactoring       ████████████████████ 100% ✅
+T5 : Centralisation        ████████████████████ 100% ✅
 T6 : Tests Hiérarchie      ░░░░░░░░░░░░░░░░░░░░   0% ⏳
 T7 : Tests Existants       ░░░░░░░░░░░░░░░░░░░░   0% ⏳
 T8 : Relancer Optuna       ░░░░░░░░░░░░░░░░░░░░   0% ⏳
 T9 : Injecter Optuna       ░░░░░░░░░░░░░░░░░░░░   0% ⏳
 T10: Entraînement Final    ░░░░░░░░░░░░░░░░░░░░   0% ⏳
 
-TOTAL : 30% ✅ | 70% ⏳
+TOTAL : 50% ✅ | 50% ⏳
 ```
 
 ---
