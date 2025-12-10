@@ -1,3 +1,39 @@
+# ============================================================================
+# ADAN TRADING BOT - Configuration Hiérarchique
+# ============================================================================
+#
+# HIÉRARCHIE DE DÉCISION (Environnement > DBE > Optuna) :
+#
+# TIER 1 : ENVIRONNEMENT (Arbitre - Contraintes Absolues)
+#   - hard_constraints : limites inviolables (min_trade=11, bornes SL/TP, etc.)
+#   - capital_tiers : paliers de capital (Micro/Small/Medium/High/Enterprise)
+#   - Applique les contraintes FINALES (clamp, rejet si < 11 USDT, etc.)
+#
+# TIER 2 : DBE (Tacticien - Modulation Légère)
+#   - regime_multipliers : multiplicateurs ±15% max par régime de marché
+#   - Ajuste légèrement les paramètres Optuna selon les conditions
+#   - Formule : adjusted = base × (1 + multiplier), où multiplier ∈ [-0.15, +0.15]
+#
+# TIER 3 : OPTUNA (Stratège - Performance Pure)
+#   - workers.wX.trading_parameters : valeurs optimisées par Optuna
+#   - Source unique de vérité pour chaque paramètre
+#   - Jamais écrasées, seulement modulées légèrement par DBE
+#
+# FLUX DE DÉCISION SÉQUENTIEL :
+# 1. Déterminer palier (Environnement)
+# 2. Charger base Optuna (Optuna)
+# 3. Appliquer modulation DBE (DBE)
+# 4. Appliquer contraintes environnement (Environnement)
+# 5. Vérifier notional ≥ 11 USDT (Environnement)
+# 6. Vérifier max_positions (Environnement)
+#
+# CONTRAINTES IMMUABLES :
+# - capital_tiers : INCHANGÉS (valeurs, intervalles, limites)
+# - min_order_value_usdt : 11.0 (JAMAIS MOINS)
+# - exposure_range : INCHANGÉS par palier
+#
+# ============================================================================
+
 action:
   action_scale: 1.0
   min_action_threshold: 0.01
@@ -417,6 +453,19 @@ data_processing:
     - 10
     rsi_window: 14
 dbe:
+  # ============================================================================
+  # TIER 2: DBE - Dynamic Behavior Engine (Modulateur Léger)
+  # ============================================================================
+  # Rôle : Adapter légèrement les paramètres Optuna selon les conditions de marché
+  # Principe : Multiplicateurs relatifs BORNÉS À ±15% MAX
+  # Formule : adjusted_param = base_param × (1 + dbe_multiplier)
+  # où dbe_multiplier ∈ [-0.15, +0.15]
+  #
+  # IMPORTANT : DBE ne remplace JAMAIS les valeurs Optuna, il les ajuste légèrement
+  # Les contraintes absolues (hard_constraints) et les paliers (capital_tiers)
+  # sont appliqués APRÈS la modulation DBE
+  # ============================================================================
+  
   aggressiveness_by_tier:
     Enterprise:
       bear:
@@ -644,6 +693,39 @@ diagnostics:
     track_calculation_methods: true
     validate_volatility_range: true
 environment:
+  # ============================================================================
+  # TIER 1: HARD CONSTRAINTS - Contraintes Absolues Inviolables
+  # ============================================================================
+  # Ces limites ne peuvent JAMAIS être contournées, peu importe la couche
+  # (Environnement > DBE > Optuna)
+  hard_constraints:
+    # Minimum de trading (jamais moins)
+    min_order_value_usdt: 11.0
+    
+    # Limites absolues de position
+    max_position_size_pct: 0.5  # 50% max du capital (global)
+    min_position_size_pct: 0.01  # 1% min du capital
+    
+    # Limites absolues de Stop Loss et Take Profit
+    stop_loss_pct:
+      min: 0.005  # 0.5% minimum
+      max: 0.20   # 20% maximum
+    take_profit_pct:
+      min: 0.01   # 1% minimum
+      max: 0.50   # 50% maximum
+    
+    # Limites absolues de risque par trade
+    max_risk_per_trade_pct: 0.02  # 2% maximum par trade
+    
+    # Limites absolues de drawdown
+    max_drawdown_pct: 0.25  # 25% maximum
+  
+  # ============================================================================
+  # TIER 2: CAPITAL TIERS - Paliers de Capital (Inchangés)
+  # ============================================================================
+  # Voir section capital_tiers ci-dessous (lignes ~219-274)
+  # Ces valeurs sont INCHANGÉES et INVIOLABLES
+  
   action_thresholds:
     1h: 0.4
     4h: 0.5
@@ -1327,6 +1409,21 @@ training:
   timesteps_per_instance: 500000
   use_custom_progress: true
 workers:
+  # ============================================================================
+  # TIER 3: WORKERS - Paramètres Optuna (Stratège)
+  # ============================================================================
+  # Rôle : Stocker les valeurs optimisées par Optuna pour chaque worker
+  # Source Unique de Vérité : trading_parameters = base Optuna (jamais modifiée)
+  #
+  # Hiérarchie d'Application :
+  # 1. Charger trading_parameters (base Optuna)
+  # 2. Appliquer modulation DBE (±15% max)
+  # 3. Appliquer contraintes environnement (hard_constraints + capital_tiers)
+  #
+  # IMPORTANT : Pas de doublons (pas de risk_management.position_size_pct,
+  # pas de trading.stop_loss_pct, pas de *_by_tier)
+  # ============================================================================
+  
   w1:
     agent_config:
       batch_size: 128
