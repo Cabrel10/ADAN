@@ -270,3 +270,26 @@ python -c "import yaml; print(yaml.safe_load(open('config/config.yaml'))['enviro
 **Dernière Mise à Jour** : 10 décembre 2025, 11:56 UTC
 **Responsable** : Kiro (Agent IA)
 **Statut** : 🔄 EN COURS - Prêt pour T4
+
+
+---
+
+## 🔄 MISE À JOUR T4 - EN COURS
+
+**Modifications Effectuées** :
+- ✅ Refactorisé `_get_tier_based_parameters()` pour lire uniquement `trading_parameters` (source unique Optuna)
+- ✅ Refactorisé `compute_dynamic_modulation()` pour appliquer multiplicateurs DBE ±15% max
+- ✅ Refactorisé `calculate_trade_parameters()` pour utiliser directement les paramètres de `compute_dynamic_modulation()`
+- ✅ Ajouté logging détaillé pour tracer chaque étape de la hiérarchie
+
+**Commits** :
+- `575d0cb` - T4: Refactoriser DBE pour modulateur relatif pur - Étape 1 (méthodes clés)
+- `6ee945a` - T4: Refactoriser calculate_trade_parameters() pour utiliser compute_dynamic_modulation()
+
+**Prochaines Étapes T4** :
+- [ ] Tester que min_trade=11 est respecté
+- [ ] Tester que paliers sont respectés
+- [ ] Vérifier aucune régression dans les tests existants
+- [ ] Valider la hiérarchie avec des scénarios concrets
+
+**Statut** : 🔄 EN COURS (50% complété)
