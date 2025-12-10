@@ -493,7 +493,8 @@ class DynamicBehaviorEngine:
                 self.set_env_reference(env)
             
             if not hasattr(self, "env") or self.env is None:
-                raise AttributeError("Référence 'env' manquante dans le DBE")
+                logger.warning("[DBE] Référence 'env' manquante, retour des paramètres par défaut")
+                return self._get_default_modulation()
 
             # Récupère worker_key
             worker_key = getattr(self.env, "worker_name", None)

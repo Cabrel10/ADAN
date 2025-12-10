@@ -76,16 +76,32 @@ class CentralLogger:
     
     def trade(self, action: str, symbol: str, quantity: float, price: float, 
               pnl: Optional[float] = None, **kwargs):
-        """Log un trade"""
+        """Log un trade et le persiste dans la base de données"""
         msg = f"[TRADE] {action} {quantity} {symbol} @ ${price:.2f}"
         if pnl is not None:
             msg += f" | PnL: ${pnl:.2f}"
         self.logger.info(msg, extra={'trade_data': kwargs})
+        
+        # Persister dans la base de données
+        try:
+            from ..performance.unified_metrics_db import UnifiedMetricsDB
+            db = UnifiedMetricsDB()
+            db.add_trade(action, symbol, quantity, price, pnl)
+        except Exception as e:
+            self.logger.debug(f"[TRADE_DB] Erreur persistance trade: {e}")
     
     def metric(self, name: str, value: float, unit: str = "", **kwargs):
-        """Log une métrique"""
+        """Log une métrique et la persiste dans la base de données"""
         msg = f"[METRIC] {name}: {value:.4f} {unit}"
         self.logger.info(msg, extra={'metric_data': kwargs})
+        
+        # Persister dans la base de données
+        try:
+            from ..performance.unified_metrics_db import UnifiedMetricsDB
+            db = UnifiedMetricsDB()
+            db.add_metric(name, value, source=kwargs.get('source', 'central_logger'))
+        except Exception as e:
+            self.logger.debug(f"[METRIC_DB] Erreur persistance métrique {name}: {e}")
     
     def error(self, message: str, exc_info: bool = False, **kwargs):
         """Log une erreur"""
@@ -100,18 +116,35 @@ class CentralLogger:
         self.logger.debug(f"[DEBUG] {message}", extra=kwargs)
     
     def sync(self, component: str, status: str, details: Dict[str, Any]):
-        """Log une synchronisation"""
+        """Log une synchronisation et la persiste dans la base de données"""
         msg = f"[SYNC] {component}: {status}"
         self.logger.info(msg, extra={'sync_data': details})
+        
+        # Persister dans la base de données
+        try:
+            from ..performance.unified_metrics_db import UnifiedMetricsDB
+            db = UnifiedMetricsDB()
+            details_str = json.dumps(details) if isinstance(details, dict) else str(details)
+            db.add_sync(component, status, details_str)
+        except Exception as e:
+            self.logger.debug(f"[SYNC_DB] Erreur persistance sync: {e}")
     
     def validation(self, check_name: str, passed: bool, details: str = ""):
-        """Log une validation"""
+        """Log une validation et la persiste dans la base de données"""
         status = "✅ PASS" if passed else "❌ FAIL"
         msg = f"[VALIDATION] {check_name}: {status}"
         if details:
             msg += f" | {details}"
         level = logging.INFO if passed else logging.WARNING
         self.logger.log(level, msg)
+        
+        # Persister dans la base de données
+        try:
+            from ..performance.unified_metrics_db import UnifiedMetricsDB
+            db = UnifiedMetricsDB()
+            db.add_validation(check_name, passed, details)
+        except Exception as e:
+            self.logger.debug(f"[VALIDATION_DB] Erreur persistance validation: {e}")
 
 
 class JSONFormatter(logging.Formatter):

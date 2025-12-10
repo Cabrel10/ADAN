@@ -6233,7 +6233,7 @@ class MultiAssetChunkedEnv(gym.Env):
                         f"[METRICS_SYNC] Step {self.current_step} | Worker {self.worker_id} | "
                         f"Sharpe={self.risk_metrics['sharpe_ratio']:.4f}, "
                         f"Sortino={self.risk_metrics['sortino_ratio']:.4f}, "
-                        f"WinRate={self.risk_metrics['win_rate']:.2%}, "
+                        f"WinRate={self.risk_metrics['win_rate']:.2f}%, "
                         f"Trades={self.risk_metrics['total_trades']}"
                     )
             else:

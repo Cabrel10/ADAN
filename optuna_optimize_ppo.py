@@ -23,7 +23,12 @@ warnings.filterwarnings('ignore')
 
 sys.path.insert(0, str(Path(__file__).parent / "src"))
 
-from adan_trading_bot.environment.multi_asset_chunked_env import MultiAssetChunkedEnv
+from adan_trading_bot.environment.multi_asset_chunked_env import (
+    MultiAssetChunkedEnv,
+)
+from adan_trading_bot.optuna_evaluation import (
+    evaluate_ppo_params_robust,
+)
 
 # Import PPO
 try:
@@ -49,7 +54,7 @@ logger = logging.getLogger(__name__)
 
 # Paramètres corrigés basés sur les meilleures valeurs Phase 1
 BEST_TRADING_PARAMS = {
-    'W1': {  # Scalper - Utiliser W4 car W1 a score -999
+    'W1': {  # Scalper - EXCELLENT (Score 51.46)
         'stop_loss_pct': 0.0253,
         'take_profit_pct': 0.0321,
         'position_size_pct': 0.1121,
@@ -57,29 +62,29 @@ BEST_TRADING_PARAMS = {
         'max_concurrent_positions': 3,
         'min_holding_period_steps': 5,
     },
-    'W2': {  # Swing Trader - TP réduit pour plus de trades
-        'stop_loss_pct': 0.035,      # 3.5% SL (réaliste)
-        'take_profit_pct': 0.06,     # 6% TP (réduit de 12.56%)
-        'position_size_pct': 0.12,   # 12% position (réduit pour sécurité)
+    'W2': {  # Swing Trader - MODÉRÉ (Amélioré)
+        'stop_loss_pct': 0.025,       # 2.5% SL (entre W1 et W3)
+        'take_profit_pct': 0.050,     # 5% TP (ratio 2.0)
+        'position_size_pct': 0.25,    # 25% position (augmenté de 12%)
         'risk_per_trade_pct': 0.015,
-        'max_concurrent_positions': 2,
-        'min_holding_period_steps': 20,
+        'max_concurrent_positions': 3,  # Augmenté de 2 à 3
+        'min_holding_period_steps': 10,  # Réduit de 20 à 10 (plus de trades)
     },
-    'W3': {  # Position Trader
-        'stop_loss_pct': 0.0744,
-        'take_profit_pct': 0.1143,
-        'position_size_pct': 0.2580,
-        'risk_per_trade_pct': 0.0232,
-        'max_concurrent_positions': 1,
-        'min_holding_period_steps': 140,
+    'W3': {  # Position Trader - AGRESSIF (RE-OPTIMISÉ - Recommandations appliquées)
+        'stop_loss_pct': 0.10,        # 10% SL (agressif, augmenté de 8%)
+        'take_profit_pct': 0.18,      # 18% TP (ratio 1.8, augmenté de 15%)
+        'position_size_pct': 0.50,    # 50% position (très agressif, augmenté de 45%)
+        'risk_per_trade_pct': 0.03,   # 3% risque par trade (augmenté de 2.5%)
+        'max_concurrent_positions': 2,  # 2 positions (diversification)
+        'min_holding_period_steps': 40,  # Réduit de 50 à 40 (plus d'opportunités)
     },
-    'W4': {  # HFT
-        'stop_loss_pct': 0.0209,
-        'take_profit_pct': 0.0394,
-        'position_size_pct': 0.0628,
-        'risk_per_trade_pct': 0.015,
-        'max_concurrent_positions': 6,
-        'min_holding_period_steps': 11,
+    'W4': {  # Day Trading - SHARPE OPTIMIZED (Complètement refondu)
+        'stop_loss_pct': 0.012,       # 1.2% SL (serré pour Sharpe)
+        'take_profit_pct': 0.020,     # 2.0% TP (ratio 1.67)
+        'position_size_pct': 0.20,    # 20% position (variable)
+        'risk_per_trade_pct': 0.012,  # 1.2% risque par trade
+        'max_concurrent_positions': 4,  # 4 positions (diversification)
+        'min_holding_period_steps': 5,  # 5 steps (court terme)
     },
 }
 
@@ -137,11 +142,19 @@ def create_env_with_trading_params(base_config: Dict, worker: str) -> MultiAsset
         'min_holding_period_steps': trading_params['min_holding_period_steps'],
     }
     
-    # Force trade config plus agressive
+    # Force trade config plus agressive pour l'évaluation
     config['trading_rules']['frequency'] = {
         'force_trade_steps': {'5m': 15, '1h': 30, '4h': 60},
-        'daily_forced_trades_limit': 200,
+        'daily_max_total': 500,  # Augmenter limite journalière
+        'daily_max_by_tf': {
+            '5m': 200,
+            '1h': 200,
+            '4h': 200,
+        },
     }
+    
+    # Augmenter le cap de trades forcés pour l'évaluation
+    config['trading_rules']['daily_max_forced_trades'] = 500
     
     env = MultiAssetChunkedEnv(config=config)
     
@@ -255,91 +268,24 @@ def calculate_metrics(portfolio_values: List[float], trades_info: List[Dict]) ->
     }
 
 
-def evaluate_ppo_params(env: MultiAssetChunkedEnv, ppo_params: Dict, 
-                        training_steps: int, eval_steps: int = 2000) -> Dict[str, float]:
-    """Entraîne un modèle PPO et évalue ses performances"""
-    
-    try:
-        # Créer modèle PPO
-        model = PPO(
-            policy="MultiInputPolicy",
-            env=env,
-            learning_rate=ppo_params['learning_rate'],
-            n_steps=ppo_params['n_steps'],
-            batch_size=ppo_params['batch_size'],
-            n_epochs=ppo_params['n_epochs'],
-            gamma=ppo_params['gamma'],
-            gae_lambda=ppo_params['gae_lambda'],
-            clip_range=ppo_params['clip_range'],
-            ent_coef=ppo_params['ent_coef'],
-            vf_coef=ppo_params['vf_coef'],
-            max_grad_norm=ppo_params['max_grad_norm'],
-            verbose=0,
-            seed=42,
-            device='auto',
-        )
-        
-        # Entraîner
-        model.learn(total_timesteps=training_steps, progress_bar=False)
-        
-        # Reset pour évaluation
-        obs = env.reset()
-        if isinstance(obs, tuple):
-            obs = obs[0]
-        
-        # Collecter métriques d'évaluation
-        portfolio_values = []
-        initial_pv = env.portfolio.equity  # Utiliser equity (Mark-to-Market)
-        portfolio_values.append(initial_pv)
-        
-        for step in range(eval_steps):
-            action, _ = model.predict(obs, deterministic=True)
-            result = env.step(action)
-            
-            if len(result) == 5:
-                obs, reward, done, truncated, info = result
-            else:
-                obs, reward, done, info = result
-                truncated = False
-            
-            # Collecter valeur portfolio (Equity = Cash + Unrealized PnL)
-            current_pv = env.portfolio.equity
-            portfolio_values.append(current_pv)
-            
-            if done or truncated:
-                # Reset et continuer
-                obs = env.reset()
-                if isinstance(obs, tuple):
-                    obs = obs[0]
-        
-        # Récupérer TOUS les trades fermés directement depuis les métriques du portfolio
-        trades_info = []
-        if hasattr(env, 'portfolio') and hasattr(env.portfolio, 'metrics'):
-            trades_info = list(env.portfolio.metrics.closed_positions)
-        elif hasattr(env, 'portfolio_manager') and hasattr(env.portfolio_manager, 'metrics'):
-             trades_info = list(env.portfolio_manager.metrics.closed_positions)
-        
-        # Calculer métriques
-        metrics = calculate_metrics(portfolio_values, trades_info)
-        
-        # Cleanup
-        del model
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
-        
-        return metrics
-        
-    except Exception as e:
-        logger.error(f"Error evaluating PPO params: {e}")
-        traceback.print_exc()
-        return {
-            'sharpe_ratio': -999,
-            'max_drawdown': 1.0,
-            'win_rate': 0.0,
-            'total_return': -1.0,
-            'total_trades': 0,
-            'profit_factor': 0.0,
-        }
+def evaluate_ppo_params(
+    env: MultiAssetChunkedEnv,
+    ppo_params: Dict,
+    training_steps: int,
+    eval_steps: int = 2000,
+) -> Dict[str, float]:
+    """
+    Wrapper pour la fonction robuste centralisée.
+
+    Utilise evaluate_ppo_params_robust pour garantir une collecte
+    fiable des métriques avec gardes-fous PPO.
+    """
+    return evaluate_ppo_params_robust(
+        env=env,
+        ppo_params=ppo_params,
+        training_steps=training_steps,
+        eval_steps=eval_steps,
+    )
 
 
 def compute_score(metrics: Dict[str, float]) -> float:
@@ -374,17 +320,18 @@ def compute_score(metrics: Dict[str, float]) -> float:
     return float(np.clip(score, -999, 100))
 
 
-def objective(trial: optuna.Trial, base_config: Dict, worker: str, 
-              training_steps: int, eval_steps: int) -> float:
+def objective(
+    trial: optuna.Trial,
+    base_config: Dict,
+    worker: str,
+    training_steps: int,
+    eval_steps: int
+) -> float:
     """Fonction objectif Optuna"""
-    
-    # Suggérer hyperparamètres
-    ppo_params = suggest_ppo_params(trial)
-    
-    logger.info(f"Trial {trial.number}: lr={ppo_params['learning_rate']:.1e}, "
-               f"steps={ppo_params['n_steps']}, batch={ppo_params['batch_size']}")
-    
+
     try:
+        # Suggérer hyperparamètres
+        ppo_params = suggest_ppo_params(trial)
         # Créer environnement
         env = create_env_with_trading_params(base_config, worker)
         

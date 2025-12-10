@@ -1,3 +1,6 @@
+action:
+  action_scale: 1.0
+  min_action_threshold: 0.01
 agent:
   algorithm: PPO
   batch_size: 64
@@ -207,7 +210,7 @@ agent:
   policy: MultiInputPolicy
   save_best_model: true
   seed: 42
-  target_kl: 0.01
+  target_kl: 0.03
   tensorflow_log_level: 3
   torch_log_level: ERROR
   verbose: 1
@@ -269,6 +272,12 @@ capital_tiers:
   min_capital: 1000.0
   name: Enterprise
   risk_per_trade_pct: 3.0
+chunk_carry_over:
+  keep_recent_avg_pnl_pct: 0.0
+  keep_unrealized_pct: 0.02
+  max_allowed_loss_pct: 0.1
+  min_steps_left_to_allow_carry: 6
+  recent_closed_window: 8
 data:
   assets:
   - BTCUSDT
@@ -408,13 +417,58 @@ data_processing:
     - 10
     rsi_window: 14
 dbe:
-  aggressiveness_decay:
-    enterprise: 0.6
-    high: 0.85
-    medium: 1.0
-    micro: 1.1
-    small: 1.03
   aggressiveness_by_tier:
+    Enterprise:
+      bear:
+        position_size_multiplier: 0.6
+        sl_multiplier: 0.7
+        tp_multiplier: 0.8
+      bull:
+        position_size_multiplier: 0.8
+        sl_multiplier: 0.9
+        tp_multiplier: 1.1
+      sideways:
+        position_size_multiplier: 1.0
+        sl_multiplier: 1.0
+        tp_multiplier: 1.0
+      volatile:
+        position_size_multiplier: 0.4
+        sl_multiplier: 0.8
+        tp_multiplier: 0.7
+    High:
+      bear:
+        position_size_multiplier: 0.7
+        sl_multiplier: 0.75
+        tp_multiplier: 0.85
+      bull:
+        position_size_multiplier: 0.9
+        sl_multiplier: 1.0
+        tp_multiplier: 1.2
+      sideways:
+        position_size_multiplier: 1.0
+        sl_multiplier: 1.0
+        tp_multiplier: 1.0
+      volatile:
+        position_size_multiplier: 0.5
+        sl_multiplier: 0.9
+        tp_multiplier: 0.8
+    Medium:
+      bear:
+        position_size_multiplier: 0.9
+        sl_multiplier: 0.8
+        tp_multiplier: 0.9
+      bull:
+        position_size_multiplier: 1.1
+        sl_multiplier: 1.1
+        tp_multiplier: 1.3
+      sideways:
+        position_size_multiplier: 1.0
+        sl_multiplier: 1.0
+        tp_multiplier: 1.0
+      volatile:
+        position_size_multiplier: 0.6
+        sl_multiplier: 1.0
+        tp_multiplier: 0.9
     Micro:
       bear:
         position_size_multiplier: 1.2
@@ -449,57 +503,12 @@ dbe:
         position_size_multiplier: 0.7
         sl_multiplier: 1.1
         tp_multiplier: 1.0
-    Medium:
-      bear:
-        position_size_multiplier: 0.9
-        sl_multiplier: 0.8
-        tp_multiplier: 0.9
-      bull:
-        position_size_multiplier: 1.1
-        sl_multiplier: 1.1
-        tp_multiplier: 1.3
-      sideways:
-        position_size_multiplier: 1.0
-        sl_multiplier: 1.0
-        tp_multiplier: 1.0
-      volatile:
-        position_size_multiplier: 0.6
-        sl_multiplier: 1.0
-        tp_multiplier: 0.9
-    High:
-      bear:
-        position_size_multiplier: 0.7
-        sl_multiplier: 0.75
-        tp_multiplier: 0.85
-      bull:
-        position_size_multiplier: 0.9
-        sl_multiplier: 1.0
-        tp_multiplier: 1.2
-      sideways:
-        position_size_multiplier: 1.0
-        sl_multiplier: 1.0
-        tp_multiplier: 1.0
-      volatile:
-        position_size_multiplier: 0.5
-        sl_multiplier: 0.9
-        tp_multiplier: 0.8
-    Enterprise:
-      bear:
-        position_size_multiplier: 0.6
-        sl_multiplier: 0.7
-        tp_multiplier: 0.8
-      bull:
-        position_size_multiplier: 0.8
-        sl_multiplier: 0.9
-        tp_multiplier: 1.1
-      sideways:
-        position_size_multiplier: 1.0
-        sl_multiplier: 1.0
-        tp_multiplier: 1.0
-      volatile:
-        position_size_multiplier: 0.4
-        sl_multiplier: 0.8
-        tp_multiplier: 0.7
+  aggressiveness_decay:
+    enterprise: 0.6
+    high: 0.85
+    medium: 1.0
+    micro: 1.1
+    small: 1.03
   default_reset_capital: 20.5
   logging:
     disable_existing_loggers: true
@@ -661,12 +670,12 @@ environment:
   frequency_validation:
     force_trade:
       enabled: true
-      max_daily_forced_trades: 10
       escalation_steps:
       - 30
       - 50
       - 75
       max_consecutive_holds: 25
+      max_daily_forced_trades: 10
       methods:
       - lower_thresholds
       - mandatory_action
@@ -1041,11 +1050,11 @@ paths:
   reports_dir: ./reports
   trained_models_dir: ./models/rl_agents
 portfolio:
+  default_position_pct: 0.7
   include_portfolio_state: true
   initial_balance: 20.5
-  portfolio_state_features: 20
   min_order_value_usdt: 11.0
-  default_position_pct: 0.7
+  portfolio_state_features: 20
 preprocessing:
   normalization:
     clip_values: true
@@ -1139,8 +1148,8 @@ reward_shaping:
   missed_penalty: -0.5
   multi_traque_bonus: 1.5
   overstay_penalty: -1.0
-  pnl_weight: 50.0
   pnl_normalization: 50.0
+  pnl_weight: 50.0
   profiles:
     Adaptive:
       duration_penalty_weight: 0.01
@@ -1320,61 +1329,46 @@ training:
 workers:
   w1:
     agent_config:
-      batch_size: 64
-      clip_range: 0.17321662073659416
-      ent_coef: 0.25313112326299025
-      gamma: 0.9766172257185153
-      learning_rate: 0.0019228192173991673
-      n_epochs: 10
-      n_steps: 1536
-      pnl_weight: 66.17
+      batch_size: 128
+      clip_range: 0.21084844859190754
+      ent_coef: 0.010970372201012518
+      gae_lambda: 0.9328383156897404
+      gamma: 0.9745456241801775
+      learning_rate: 1.0838581269344744e-05
+      max_grad_norm: 0.5164916560792168
+      n_epochs: 7
+      n_steps: 2048
+      vf_coef: 0.5159725093210579
     assets:
     - BTCUSDT
     data_split: train
-    description: Trial 26 - Sharpe 10.00 - Ultra-Conservative Stable
-    min_confidence: 0.0121
-    name: Trial26 Ultra-Stable
+    description: "✅ OPTIMIZED - Trial 1 - Score 51.46 - Ultra-Stable Scalper"
+    min_confidence: 0.6
+    name: "W1 Ultra-Stable (Scalper)"
+    position_size_pct: 0.1121
     reward_config:
-      win_rate_bonus: 1.3421466016073853
-      take_profit_bonus: 1.622947827413278
       consecutive_loss_penalty: -3.0063
-      stop_loss_penalty: -1.9435441748407962
-      overtrading_penalty: -1.069
       consistency_bonus: 1.1413
+      overtrading_penalty: -1.069
       patience_bonus: 1.4807
       pnl_weight: 85.0998512978671
+      stop_loss_penalty: -1.9435441748407962
+      take_profit_bonus: 1.622947827413278
+      win_rate_bonus: 1.3421466016073853
     risk_management:
+      position_size_pct: 0.14159863754897406
+      risk_per_trade_pct: 0.019903972812986285
       stop_loss_pct: 0.03885747982638574
       take_profit_pct: 0.03524358220837648
-      risk_per_trade_pct: 0.019903972812986285
-      position_size_pct: 0.14159863754897406
-    trading_rules:
-      frequency:
-        force_trade_steps:
-          5m: 33
-          1h: 18
-          4h: 24
-        freq_penalty_weight: 0.05
-      position_hold_min: 11
-      daily_max_forced_trades: 10
-      position_hold_max: 70
-      max_consecutive_losses: 4
-      min_trade_quality_score: 0.8984
-      max_trades_per_session:
-        5m: 20
-        1h: 15
-        4h: 10
-      max_positions:
-        total: 4
+    risk_multiplier: 0.8012145777083237
     risk_per_trade_pct_by_tier:
+      Enterprise: 0.0548
+      High: 0.064
+      Medium: 0.0731
       Micro: 0.0914
       Small: 0.0823
-      Medium: 0.0731
-      High: 0.064
-      Enterprise: 0.0548
     specialization:
       patience: 6
-      risk_mult: 1.3441
       reward_profile:
         duration_bonus: 2.0
         missed_penalty: -0.5
@@ -1386,13 +1380,9 @@ workers:
         speed_bonus: 0.0
         stop_loss_penalty: -1.617
         take_profit_bonus: 3.2846
+      risk_mult: 1.3441
       timeframe: 4h
       tracking_periods:
-        5m:
-          grace_period: 2
-          max_tracking_steps: 42
-          min_tracking_steps: 1
-          optimal_duration: 12
         1h:
           grace_period: 1
           max_tracking_steps: 47
@@ -1403,74 +1393,90 @@ workers:
           max_tracking_steps: 70
           min_tracking_steps: 1
           optimal_duration: 40
+        5m:
+          grace_period: 2
+          max_tracking_steps: 42
+          min_tracking_steps: 1
+          optimal_duration: 12
     stop_loss_pct_by_tier:
+      Enterprise: 0.0883973356558337
+      High: 0.0883973356558337
+      Medium: 0.0883973356558337
       Micro: 0.0883973356558337
       Small: 0.0883973356558337
-      Medium: 0.0883973356558337
-      High: 0.0883973356558337
-      Enterprise: 0.0883973356558337
     take_profit_pct_by_tier:
+      Enterprise: 0.12220566795734734
+      High: 0.12220566795734734
+      Medium: 0.12220566795734734
       Micro: 0.12220566795734734
       Small: 0.12220566795734734
-      Medium: 0.12220566795734734
-      High: 0.12220566795734734
-      Enterprise: 0.12220566795734734
     timeframes:
     - 5m
     - 1h
     - 4h
-    trading_mode: spot
-    training_mode: full
     trading:
       stop_loss_pct: 0.10117711563917646
       take_profit_pct: 0.08553709510801683
-    position_size_pct: 0.1086898631933796
-    risk_multiplier: 0.8012145777083237
+    trading_mode: spot
+    trading_parameters:
+      max_concurrent_positions: 3
+      min_holding_period_steps: 5
+      position_size_pct: 0.1121
+      risk_per_trade_pct: 0.01
+      stop_loss_pct: 0.0253
+      take_profit_pct: 0.0321
+    trading_rules:
+      daily_max_forced_trades: 10
+      frequency:
+        force_trade_steps:
+          1h: 18
+          4h: 24
+          5m: 33
+        freq_penalty_weight: 0.05
+      max_consecutive_losses: 4
+      max_positions:
+        total: 4
+      max_trades_per_session:
+        1h: 15
+        4h: 10
+        5m: 20
+      min_trade_quality_score: 0.8984
+      position_hold_max: 70
+      position_hold_min: 11
+    training_mode: full
   w2:
     agent_config:
       batch_size: 64
-      clip_range: 0.10129007293597962
-      dbe_aggressiveness_decay: 0.910242
-      dbe_trend_threshold: 0.026738
-      dbe_volatility_guard: 0.313574
-      dbe_volatility_threshold: 0.038238
-      ent_coef: 0.27799390788907935
-      gamma: 0.9676539182074299
-      initial_position_size: 0.34460346761634025
-      learning_rate: 0.008084796279354382
-      n_epochs: 12
-      n_steps: 2048
-      pnl_weight: 77.46584218536219
+      clip_range: 0.2516337775011062
+      ent_coef: 0.012868975786679728
+      gae_lambda: 0.9511102652474991
+      gamma: 0.9903706810126471
+      learning_rate: 1.6173512248439632e-05
+      max_grad_norm: 0.5512548096461941
+      n_epochs: 9
+      n_steps: 1024
+      vf_coef: 0.621948009123721
     assets:
     - BTCUSDT
     data_split: train
-    description: 'OPTIMAL Trial #305 - Equilibre parfait'
-    min_confidence: 0.01
-    name: Moderate Optimized
+    description: "✅ OPTIMIZED - Trial 15 - Score 34.79 - Moderate Swing Trader"
+    min_confidence: 0.6
+    name: "W2 Moderate Optimized (Swing)"
+    position_size_pct: 0.25
     reward_config:
       drawdown_penalty: 0.4
+      pnl_weight: 96.40385709344584
       profit_factor_bonus: 0.3
       sharpe_ratio_bonus: 0.2
-      win_rate_bonus: 1.0341368350024904
-      pnl_weight: 96.40385709344584
       stop_loss_penalty: -1.5237843121836676
       take_profit_bonus: 4.328263076608351
+      win_rate_bonus: 1.0341368350024904
     risk_management:
+      position_size_pct: 0.27209383908141693
+      risk_per_trade_pct: 0.017135075385833358
       stop_loss_pct: 0.04703154479370312
       take_profit_pct: 0.17480670394168155
-      risk_per_trade_pct: 0.017135075385833358
-      position_size_pct: 0.27209383908141693
-    trading_rules:
-      frequency:
-        force_trade_steps:
-          5m: 39
-          1h: 33
-          4h: 22
-        freq_penalty_weight: 0.05
-        daily_max_forced_trades: 10
-      max_positions:
-        total: 2
-      position_hold_min: 26
+    risk_multiplier: 0.8063627791962789
     risk_per_trade_pct_by_tier:
       Enterprise: 0.6
       High: 0.8
@@ -1509,58 +1515,62 @@ workers:
     - 5m
     - 1h
     - 4h
-    trading_mode: spot
-    training_mode: full
     trading:
       stop_loss_pct: 0.07838422657101739
       take_profit_pct: 0.11849204218837435
-    position_size_pct: 0.05745700549293788
-    risk_multiplier: 0.8063627791962789
+    trading_mode: spot
+    trading_parameters:
+      max_concurrent_positions: 3
+      min_holding_period_steps: 10
+      position_size_pct: 0.25
+      risk_per_trade_pct: 0.015
+      stop_loss_pct: 0.025
+      take_profit_pct: 0.05
+    trading_rules:
+      frequency:
+        daily_max_forced_trades: 10
+        force_trade_steps:
+          1h: 33
+          4h: 22
+          5m: 39
+        freq_penalty_weight: 0.05
+      max_positions:
+        total: 2
+      position_hold_min: 26
+    training_mode: full
   w3:
     agent_config:
-      batch_size: 32
-      clip_range: 0.2118880146017352
-      dbe_aggressiveness_decay: 0.921564
-      dbe_trend_threshold: 0.067395
-      dbe_volatility_guard: 0.217261
-      dbe_volatility_threshold: 0.04803
-      ent_coef: 0.2646716190042746
-      gamma: 0.9720232687756147
-      initial_position_size: 0.1186481738677556
-      learning_rate: 0.0027098900048612724
-      n_epochs: 12
-      n_steps: 1536
-      pnl_weight: 97.78886028011463
+      batch_size: 64
+      clip_range: 0.25558529442048455
+      ent_coef: 0.01911122901556083
+      gae_lambda: 0.9644910540809394
+      gamma: 0.9915241842142017
+      learning_rate: 0.00019135050567284858
+      max_grad_norm: 0.5522588418833745
+      n_epochs: 14
+      n_steps: 1024
+      vf_coef: 0.7592144646973444
     assets:
     - BTCUSDT
     data_split: train
-    description: 'OPTIMAL Trial #151 - Profit 3.14'
-    min_confidence: 0.01
-    name: Aggressive Optimized
+    description: "⚠️ OPTIMIZED - Trial 6 - Score 8.80 - Aggressive Position Trader (RE-OPTIMIZE RECOMMENDED)"
+    min_confidence: 0.6
+    name: "W3 Aggressive Optimized (Position)"
+    position_size_pct: 0.45
     reward_config:
       drawdown_penalty: 0.19397282317018047
+      pnl_weight: 96.40385709344584
       profit_factor_bonus: 0.4
       sharpe_ratio_bonus: 0.20289024927946636
-      win_rate_bonus: 1.0341368350024904
-      pnl_weight: 96.40385709344584
       stop_loss_penalty: -1.5237843121836676
       take_profit_bonus: 4.328263076608351
+      win_rate_bonus: 1.0341368350024904
     risk_management:
+      position_size_pct: 0.3416145155592091
+      risk_per_trade_pct: 0.03202230023486417
       stop_loss_pct: 0.05406585285177397
       take_profit_pct: 0.273235229154987
-      risk_per_trade_pct: 0.03202230023486417
-      position_size_pct: 0.3416145155592091
-    trading_rules:
-      frequency:
-        force_trade_steps:
-          5m: 27
-          1h: 30
-          4h: 9
-        freq_penalty_weight: 0.05
-        daily_max_forced_trades: 10
-      max_positions:
-        total: 1
-      position_hold_min: 147
+    risk_multiplier: 0.8063627791962789
     risk_per_trade_pct_by_tier:
       Enterprise: 1.0
       High: 1.2
@@ -1595,80 +1605,91 @@ workers:
     - 5m
     - 1h
     - 4h
-    trading_mode: spot
-    training_mode: full
     trading:
       stop_loss_pct: 0.05498424198669284
       take_profit_pct: 0.09835333186208438
-    position_size_pct: 0.05745700549293788
-    risk_multiplier: 0.8063627791962789
-  w4:
-    agent_config:
-      batch_size: 64
-      clip_range: 0.3560904691912592
-      dbe_aggressiveness_decay: 0.983855
-      dbe_trend_threshold: 0.020012
-      dbe_volatility_guard: 0.142334
-      dbe_volatility_threshold: 0.045415
-      ent_coef: 0.16905638253548888
-      gamma: 0.9663706229834996
-      initial_position_size: 0.19018553191030663
-      learning_rate: 0.00991848785523481
-      n_epochs: 30
-      n_steps: 2048
-      pnl_weight: 91.20710746775038
-    reward_config:
-      drawdown_penalty: 0.19397282317018047
-      profit_factor_bonus: 0.4
-      sharpe_ratio_bonus: 0.20289024927946636
-      win_rate_bonus: 1.0341368350024904
-      pnl_weight: 96.40385709344584
-      stop_loss_penalty: -1.5237843121836676
-      take_profit_bonus: 4.328263076608351
-    risk_management:
-      stop_loss_pct: 0.008849343056814276
-      take_profit_pct: 0.03683618801477559
-      risk_per_trade_pct: 0.008999669076221791
-      position_size_pct: 0.1451700562185014
-    risk_per_trade_pct_by_tier:
-      Micro: 0.025
-      Small: 0.02
-      Medium: 0.015
-      High: 0.012
-      Enterprise: 0.01
+    trading_mode: spot
+    trading_parameters:
+      max_concurrent_positions: 1
+      min_holding_period_steps: 140
+      position_size_pct: 0.258
+      risk_per_trade_pct: 0.0232
+      stop_loss_pct: 0.0744
+      take_profit_pct: 0.1143
     trading_rules:
       frequency:
+        daily_max_forced_trades: 10
         force_trade_steps:
+          1h: 30
+          4h: 9
           5m: 27
-          1h: 15
-          4h: 19
-        freq_penalty_weight: 1.1309727879060552
+        freq_penalty_weight: 0.05
       max_positions:
-        total: 5
-      position_hold_min: 3
+        total: 1
+      position_hold_min: 147
+    training_mode: full
+  w4:
+    agent_config:
+      batch_size: 128
+      clip_range: 0.2
+      ent_coef: 0.01
+      gae_lambda: 0.95
+      gamma: 0.98
+      learning_rate: 0.00005
+      max_grad_norm: 0.6
+      n_epochs: 10
+      n_steps: 1024
+      vf_coef: 0.7
     assets:
     - BTCUSDT
     data_split: train
-    description: Optimized for Sharpe Ratio
-    name: Sharpe Optimized
-    min_confidence: 0.01
+    description: "⭐ OPTIMIZED - Trial 5 - Score 79.29 - Sharpe Optimized Day Trader (BEST WORKER)"
+    min_confidence: 0.6
+    name: "W4 Sharpe Optimized (Day Trading)"
+    position_size_pct: 0.2
+    reward_config:
+      drawdown_penalty: 0.19397282317018047
+      pnl_weight: 96.40385709344584
+      profit_factor_bonus: 0.4
+      sharpe_ratio_bonus: 0.20289024927946636
+      stop_loss_penalty: -1.5237843121836676
+      take_profit_bonus: 4.328263076608351
+      win_rate_bonus: 1.0341368350024904
+    risk_management:
+      position_size_pct: 0.1451700562185014
+      risk_per_trade_pct: 0.008999669076221791
+      stop_loss_pct: 0.008849343056814276
+      take_profit_pct: 0.03683618801477559
+    risk_multiplier: 0.8063627791962789
+    risk_per_trade_pct_by_tier:
+      Enterprise: 0.01
+      High: 0.012
+      Medium: 0.015
+      Micro: 0.025
+      Small: 0.02
     timeframes:
     - 5m
     - 1h
     - 4h
-    trading_mode: spot
-    training_mode: full
     trading:
       stop_loss_pct: 0.0884034972972207
       take_profit_pct: 0.06838831784981789
-    position_size_pct: 0.05745700549293788
-    risk_multiplier: 0.8063627791962789
-chunk_carry_over:
-  keep_unrealized_pct: 0.02
-  recent_closed_window: 8
-  keep_recent_avg_pnl_pct: 0.0
-  max_allowed_loss_pct: 0.1
-  min_steps_left_to_allow_carry: 6
-action:
-  min_action_threshold: 0.01
-  action_scale: 1.0
+    trading_mode: spot
+    trading_parameters:
+      max_concurrent_positions: 4
+      min_holding_period_steps: 5
+      position_size_pct: 0.2
+      risk_per_trade_pct: 0.012
+      stop_loss_pct: 0.012
+      take_profit_pct: 0.02
+    trading_rules:
+      frequency:
+        force_trade_steps:
+          1h: 15
+          4h: 19
+          5m: 27
+        freq_penalty_weight: 1.1309727879060552
+      max_positions:
+        total: 5
+      position_hold_min: 3
+    training_mode: full

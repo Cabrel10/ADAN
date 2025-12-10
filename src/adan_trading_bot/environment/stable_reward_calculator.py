@@ -158,6 +158,15 @@ class StableRewardCalculator:
         # 8. Clip to [-1.0, 1.0]
         total_reward = np.clip(total_reward, -1.0, 1.0)
         
+        # 🔧 CRITICAL FIX: Ensure all values are finite (no NaN/Inf)
+        total_reward = np.nan_to_num(total_reward, nan=0.0, posinf=1.0, neginf=-1.0)
+        pnl_component = np.nan_to_num(pnl_component, nan=0.0, posinf=1.0, neginf=-1.0)
+        sharpe_component = np.nan_to_num(sharpe_component, nan=0.0, posinf=1.0, neginf=-1.0)
+        drawdown_penalty = np.nan_to_num(drawdown_penalty, nan=0.0, posinf=1.0, neginf=-1.0)
+        frequency_penalty = np.nan_to_num(frequency_penalty, nan=0.0, posinf=1.0, neginf=-1.0)
+        invalid_sell_penalty = np.nan_to_num(invalid_sell_penalty, nan=0.0, posinf=1.0, neginf=-1.0)
+        consistency_bonus = np.nan_to_num(consistency_bonus, nan=0.0, posinf=1.0, neginf=-1.0)
+        
         return {
             'pnl_component': float(pnl_component),
             'sharpe_component': float(sharpe_component),

@@ -16,6 +16,8 @@ from stable_baselines3 import PPO
 from stable_baselines3.common.vec_env import DummyVecEnv, VecNormalize
 from stable_baselines3.common.callbacks import CheckpointCallback, BaseCallback
 
+from adan_trading_bot.utils.ppo_safety import PpoStdSafetyCallback
+
 try:
     import plotly.graph_objects as go
 except ImportError:
@@ -78,8 +80,10 @@ class AdaptiveRiskCallback(BaseCallback):
 
     def _on_step(self) -> bool:
         infos = self.locals.get("infos", [{}])
+        if infos is None:
+            infos = [{}]
         for i in range(len(infos)):
-            info = infos[i]
+            info = infos[i] if i < len(infos) else {}
             current_drawdown = info.get("portfolio", {}).get("max_dd", 0.0)
 
             risk_params = get_adaptive_risk(
@@ -89,7 +93,9 @@ class AdaptiveRiskCallback(BaseCallback):
                 target_cfg=self.target_cfg,
                 current_drawdown=current_drawdown
             )
-            self.training_env.env_method('set_global_risk', indices=[i], **risk_params)
+            # ✅ BUG FIX #2: Vérifier que env_method existe
+            if hasattr(self.training_env, 'env_method'):
+                self.training_env.env_method('set_global_risk', indices=[i], **risk_params)
 
             # Log a sample of the risk params
             if self.num_timesteps % 1000 == 0:
@@ -332,29 +338,35 @@ class MetricsMonitor(BaseCallback):
                     env_data = environments[worker_id]
                     if "TIMESTAMP" in env_data and len(env_data["TIMESTAMP"]) > 0:
                         # Calculate day from timestamp (assuming milliseconds)
-                        timestamp = env_data["TIMESTAMP"].iloc[-1] if hasattr(env_data["TIMESTAMP"], 'iloc') else env_data["TIMESTAMP"][-1]
+                        timestamp = (
+                            env_data["TIMESTAMP"].iloc[-1]
+                            if hasattr(env_data["TIMESTAMP"], 'iloc')
+                            else env_data["TIMESTAMP"][-1]
+                        )
                         current_day = int(timestamp // (24 * 60 * 60 * 1000))
 
-                    # Check for trade information in recent metrics
-                    recent_trades = metrics.get("recent_trades", [])
-                    if recent_trades:
-                        last_trade = recent_trades[-1] if isinstance(recent_trades, list) else recent_trades
-                        if isinstance(last_trade, dict):
-                            trade_info = {
-                                "trade_closed": last_trade.get("closed", False),
-                                "trade_opened": last_trade.get("opened", False),
-                                "trade_pnl": last_trade.get("pnl", 0.0)
-                            }
+                # Build trade_info from metrics (synchronized with
+                # get_metrics_summary())
+                total_trades = metrics.get("total_trades", 0)
+                if total_trades > 0:
+                    trade_info = {
+                        "trade_closed": total_trades > 0,
+                        "trade_opened": False,
+                        "trade_pnl": current_pnl / max(1, total_trades),
+                    }
 
                 # Update tier tracker
                 self.tier_trackers[worker_id].update(
                     self.step_count, current_balance, current_pnl
                 )
 
-                # Update daily tracker
-                return_value = metrics.get("last_return", 0.0)
+                # Update daily tracker with current balance change as return
+                balance_change = (
+                    (current_balance - self.config["portfolio"]["initial_balance"])
+                    / max(self.config["portfolio"]["initial_balance"], 1e-8)
+                )
                 self.daily_trackers[worker_id].update(
-                    current_day, current_balance, trade_info, return_value
+                    current_day, current_balance, trade_info, balance_change
                 )
 
                 # Get daily performance summary
@@ -367,7 +379,7 @@ class MetricsMonitor(BaseCallback):
                     "pnl": current_pnl,
                     "sharpe_ratio": metrics.get("sharpe_ratio", 0.0),
                     "drawdown": metrics.get("max_drawdown", 0.0),
-                    "trade_count": metrics.get("executed_trades_closed", 0),
+                    "trade_count": metrics.get("total_trades", 0),
                     "win_rate": metrics.get("win_rate", 0.0),
                     "tier": self.tier_trackers[worker_id].current_tier,
                     "timestamp": time.time() - self.start_time,
@@ -377,7 +389,6 @@ class MetricsMonitor(BaseCallback):
 
                 self.portfolio_curves[worker_id].append(worker_data)
 
-                # Update aggregated metrics
                 # Update aggregated metrics
                 self.worker_metrics[worker_id]["total_steps"] = self.step_count
                 self.worker_metrics[worker_id]["portfolio_values"].append(
@@ -391,7 +402,7 @@ class MetricsMonitor(BaseCallback):
                     metrics.get("max_drawdown", 0.0)
                 )
                 self.worker_metrics[worker_id]["trade_counts"].append(
-                    metrics.get("executed_trades_closed", 0)
+                    metrics.get("total_trades", 0)
                 )
                 self.worker_metrics[worker_id]["win_rates"].append(
                     metrics.get("win_rate", 0.0)
@@ -743,6 +754,15 @@ def train_worker(worker_id: str, worker_idx: int, config: dict, resume: bool, ch
             log_interval=max(1000, config["training"]["checkpointing"]["save_freq"] // 10),
         )
         worker_callbacks.append(worker_metrics_monitor)
+
+        # PPO numerical safety: clamp policy log_std and monitor std at each rollout
+        ppo_safety_cb = PpoStdSafetyCallback(
+            min_log_std=-5.0,
+            max_log_std=2.0,
+            std_warn_threshold=100.0,
+            verbose=1,
+        )
+        worker_callbacks.append(ppo_safety_cb)
         
         # Device
         device = 'cuda' if torch.cuda.is_available() else 'cpu'
@@ -849,6 +869,8 @@ def main(
     numeric_level = getattr(logging, log_level.upper(), None)
     if isinstance(numeric_level, int):
         logging.getLogger("adan_trading_bot").setLevel(numeric_level)
+    
+    processes = []  # ✅ BUG FIX #1: Initialiser processes avant try
     
     try:
         # Load Config

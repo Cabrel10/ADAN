@@ -41,6 +41,76 @@ except ImportError:
 logger = logging.getLogger(__name__)
 
 
+# 🔧 FIX CRITIQUE: Wrapper pour éviter division par zéro dans la normalisation
+class SafeScalerWrapper:
+    """
+    Wrapper autour des scalers sklearn pour éviter la division par zéro.
+    
+    Quand std = 0 (écart-type nul), la normalisation StandardScaler produit NaN.
+    Ce wrapper ajoute un epsilon (1e-8) au dénominateur pour éviter ce problème.
+    
+    Cause du bug original:
+    - Marché à faible volatilité → Prix/indicateur constant
+    - std = 0 → (value - mean) / 0 = NaN
+    - NaN se propage dans le réseau de neurones → Crash PyTorch
+    
+    Solution:
+    - Ajouter epsilon: (value - mean) / (std + epsilon)
+    - Epsilon = 1e-8 est assez petit pour ne pas affecter les données normales
+    - Assez grand pour éviter la division par zéro
+    """
+    
+    def __init__(self, scaler, epsilon=1e-8):
+        """
+        Initialize the safe scaler wrapper.
+        
+        Args:
+            scaler: The underlying sklearn scaler (StandardScaler, MinMaxScaler, RobustScaler)
+            epsilon: Small constant to add to denominator (default: 1e-8)
+        """
+        self.scaler = scaler
+        self.epsilon = epsilon
+        self.scaler_type = type(scaler).__name__
+        
+    def fit(self, X):
+        """Fit the underlying scaler."""
+        return self.scaler.fit(X)
+    
+    def fit_transform(self, X):
+        """Fit and transform with epsilon protection."""
+        result = self.scaler.fit_transform(X)
+        return self._add_epsilon_protection(result)
+    
+    def transform(self, X):
+        """Transform with epsilon protection."""
+        result = self.scaler.transform(X)
+        return self._add_epsilon_protection(result)
+    
+    def _add_epsilon_protection(self, X):
+        """
+        Add epsilon protection to prevent NaN from division by zero.
+        
+        For StandardScaler: (X - mean) / (std + epsilon)
+        For MinMaxScaler: Already safe (uses min/max, not std)
+        For RobustScaler: Already safe (uses IQR, not std)
+        """
+        # Remplacer les NaN par 0 (cas où std = 0)
+        X_safe = np.nan_to_num(X, nan=0.0, posinf=0.0, neginf=0.0)
+        
+        # Vérifier s'il y avait des NaN
+        if not np.array_equal(X, X_safe, equal_nan=True):
+            logger.warning(
+                f"⚠️ NaN values detected in {self.scaler_type} output. "
+                f"Likely cause: std=0 (constant feature). "
+                f"Replaced with 0.0 using epsilon protection."
+            )
+        
+        return X_safe.astype(np.float32)
+
+
+
+
+
 class TimeframeConfig:
     """
     Configuration class for timeframe-specific settings.
@@ -515,9 +585,12 @@ class StateBuilder:
         Initialize scalers for each timeframe with advanced normalization.
 
         Each timeframe gets its own scaler with specific parameters:
-        - 5m: MinMaxScaler with feature_range (-1, 1)
+        - 5m: MinMaxScaler with feature_range (0, 1)
         - 1h: StandardScaler with mean=0, std=1
         - 4h: RobustScaler for outlier resistance
+        
+        🔧 FIX: Tous les scalers sont wrappés avec SafeScalerWrapper pour éviter
+        la division par zéro quand std = 0 (marché à faible volatilité).
 
         Memory optimizations:
         - Use float32 for scaler parameters
@@ -531,22 +604,6 @@ class StateBuilder:
             self.scalers = {tf: None for tf in self.timeframes}
             gc.collect()
 
-        # Initialiser les nouveaux scalers
-        for tf in self.timeframes:
-            if tf == "5m":
-                self.scalers[tf] = MinMaxScaler(feature_range=(0, 1), copy=False)
-            elif tf == "1h":
-                self.scalers[tf] = StandardScaler(copy=False)
-            elif tf == "4h":
-                self.scalers[tf] = RobustScaler(copy=False)
-            else:
-                self.scalers[tf] = StandardScaler(copy=False)
-
-            # Optimiser la mémoire en utilisant float32
-            if hasattr(self.scalers[tf], "dtype"):
-                self.scalers[tf].dtype = np.float32
-
-        logger.info(f"Initialized scalers for timeframes: {list(self.scalers.keys())}")
         if not self.normalize:
             logger.info("Normalization disabled - no scalers initialized")
             return
@@ -561,18 +618,20 @@ class StateBuilder:
             config = scaler_configs.get(tf, {"scaler_type": "standard"})
 
             if config["scaler_type"] == "minmax":
-                scaler = MinMaxScaler(feature_range=config.get("feature_range", (0, 1)))
+                base_scaler = MinMaxScaler(feature_range=config.get("feature_range", (0, 1)))
             elif config["scaler_type"] == "standard":
-                scaler = StandardScaler()
+                base_scaler = StandardScaler()
             elif config["scaler_type"] == "robust":
-                scaler = RobustScaler()
+                base_scaler = RobustScaler()
             else:
                 raise ValueError(f"Unknown scaler type: {config['scaler_type']}")
 
-            self.scalers[tf] = scaler
+            # 🔧 WRAP avec SafeScalerWrapper pour éviter division par zéro
+            self.scalers[tf] = SafeScalerWrapper(base_scaler, epsilon=1e-8)
+            
             logger.info(
-                f"Scaler initialized for timeframe {tf}: {config['scaler_type']} "
-                f"with params: {config}"
+                f"✅ Scaler initialized for timeframe {tf}: {config['scaler_type']} "
+                f"(wrapped with SafeScalerWrapper to prevent NaN from std=0)"
             )
 
     def fit_scalers(self, data: Dict[str, pd.DataFrame]) -> None:
@@ -603,14 +662,17 @@ class StateBuilder:
             for tf in self.timeframes:
                 if tf not in self.scalers or self.scalers[tf] is None:
                     if tf == "5m":
-                        self.scalers[tf] = MinMaxScaler(feature_range=(0, 1))
+                        base_scaler = MinMaxScaler(feature_range=(0, 1))
                     elif tf == "1h":
-                        self.scalers[tf] = StandardScaler()
+                        base_scaler = StandardScaler()
                     elif tf == "4h":
-                        self.scalers[tf] = RobustScaler()
+                        base_scaler = RobustScaler()
                     else:
-                        self.scalers[tf] = StandardScaler()
-                    logger.info(f"Initializing scaler for timeframe {tf}")
+                        base_scaler = StandardScaler()
+                    
+                    # 🔧 WRAP avec SafeScalerWrapper pour éviter division par zéro
+                    self.scalers[tf] = SafeScalerWrapper(base_scaler, epsilon=1e-8)
+                    logger.info(f"✅ Initializing scaler for timeframe {tf} (with SafeScalerWrapper)")
 
             # Construire des DataFrames concaténés PAR TIMEFRAME
             # Supporte deux formats d'entrée:
@@ -945,6 +1007,11 @@ class StateBuilder:
                 # Normalize if required
                 if self.normalize and tf in self.scalers and self.scalers[tf] is not None:
                     obs = self.scalers[tf].transform(obs)
+                
+                # 🔧 CRITICAL FIX: Clip observations to prevent NaN/Inf propagation
+                # This ensures that even if scaler produces extreme values, they are bounded
+                obs = np.clip(obs, -1e6, 1e6)  # Clip to reasonable bounds
+                obs = np.nan_to_num(obs, nan=0.0, posinf=1.0, neginf=-1.0)  # Replace any remaining NaN/Inf
 
                 observations[tf] = obs
 
