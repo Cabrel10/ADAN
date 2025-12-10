@@ -4,7 +4,7 @@
 
 **Objectif** : Restructurer la hiérarchie **Environnement → DBE → Optuna** en respectant strictement les contraintes immuables (paliers, min_trade=11, intervalles d'exposition).
 
-**Statut** : 🔄 **EN COURS** (T1-T3 complétées, T4-T10 à faire)
+**Statut** : ✅ **HIÉRARCHIE CENTRALISÉE ET VALIDÉE** (T1-T5 complétées, T6-T10 à faire)
 
 ---
 
@@ -291,22 +291,35 @@ python -c "import yaml; print(yaml.safe_load(open('config/config.yaml'))['enviro
 
 ---
 
-## 🔄 MISE À JOUR T4 - EN COURS
+## ✅ VALIDATION COMPLÈTE
 
-**Modifications Effectuées** :
-- ✅ Refactorisé `_get_tier_based_parameters()` pour lire uniquement `trading_parameters` (source unique Optuna)
-- ✅ Refactorisé `compute_dynamic_modulation()` pour appliquer multiplicateurs DBE ±15% max
-- ✅ Refactorisé `calculate_trade_parameters()` pour utiliser directement les paramètres de `compute_dynamic_modulation()`
-- ✅ Ajouté logging détaillé pour tracer chaque étape de la hiérarchie
+**Fichier** : `.kiro/specs/hierarchy-refactor/VALIDATION_REPORT.md`
+
+**Tests Passés** : 10/10 (100%) ✅
+
+### Suite 1 : Fonction Centralisée (4/4)
+- ✅ test_hierarchy_applied_correctly
+- ✅ test_min_trade_guarantee
+- ✅ test_tier_constraints
+- ✅ test_dbe_bounds
+
+### Suite 2 : DBE Hierarchy (6/6)
+- ✅ test_optuna_base_preserved
+- ✅ test_dbe_modulation_not_replacement
+- ✅ test_dbe_adjustment_bounded_15_percent
+- ✅ test_min_trade_11_usdt_respected
+- ✅ test_capital_tiers_unchanged
+- ✅ test_hierarchy_sequence
+
+**Principes Validés** :
+- ✅ Optuna préservé (source unique)
+- ✅ DBE modulateur relatif (±15% max)
+- ✅ Min trade 11 USDT (toujours garanti)
+- ✅ Paliers respectés (inchangés)
+- ✅ Hiérarchie séquentielle (Env → Opt → DBE → Env)
 
 **Commits** :
-- `575d0cb` - T4: Refactoriser DBE pour modulateur relatif pur - Étape 1 (méthodes clés)
-- `6ee945a` - T4: Refactoriser calculate_trade_parameters() pour utiliser compute_dynamic_modulation()
-
-**Prochaines Étapes T4** :
-- [ ] Tester que min_trade=11 est respecté
-- [ ] Tester que paliers sont respectés
-- [ ] Vérifier aucune régression dans les tests existants
-- [ ] Valider la hiérarchie avec des scénarios concrets
-
-**Statut** : 🔄 EN COURS (50% complété)
+- `d7a0e2b` - T5: Centraliser la décision finale dans PortfolioManager
+- `dde8986` - T5 COMPLÉTÉ: Mettre à jour PROGRESS_SUMMARY
+- `a8b038c` - T5: Ajouter résumé d'exécution
+- `67457cd` - VALIDATION COMPLÈTE: Hiérarchie centralisée validée (10/10 tests)
