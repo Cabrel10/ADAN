@@ -457,6 +457,155 @@ class PortfolioManager:
             logger_name="portfolio_manager",
         )
 
+    def calculate_final_trade_parameters(
+        self,
+        worker_id: int,
+        capital: float,
+        market_regime: str,
+        current_step: int,
+    ) -> Optional[Dict[str, float]]:
+        """
+        Applique la hiérarchie complète pour calculer les paramètres finaux de trading.
+        
+        Hiérarchie :
+        1. TIER 1 (Environnement) : Lire paliers et hard_constraints
+        2. TIER 3 (Optuna) : Lire trading_parameters du worker
+        3. TIER 2 (DBE) : Appliquer multiplicateurs ±15% selon régime
+        4. TIER 1 (Environnement) : Appliquer contraintes finales
+        
+        Args:
+            worker_id: ID du worker (1, 2, 3, 4)
+            capital: Capital actuel du portefeuille
+            market_regime: Régime de marché (bull, bear, sideways, volatile)
+            current_step: Étape actuelle de l'entraînement
+        
+        Returns:
+            Dict avec clés : position_size_pct, stop_loss_pct, take_profit_pct, 
+                             risk_per_trade_pct, notional_usdt, tier_name
+            None si le trade est impossible
+        """
+        try:
+            # ========== ÉTAPE 1 : LIRE PALIERS ET HARD CONSTRAINTS (ENVIRONNEMENT) ==========
+            capital_tiers = self.config.get('capital_tiers', [])
+            tier_config = None
+            tier_name = 'Unknown'
+            max_position_pct = 0.1
+            
+            for tier in capital_tiers:
+                min_cap = tier.get('min_capital', 0)
+                max_cap = tier.get('max_capital', float('inf'))
+                if max_cap is None:
+                    max_cap = float('inf')
+                if min_cap <= capital < max_cap:
+                    tier_config = tier
+                    tier_name = tier.get('name', 'Unknown')
+                    max_position_pct = tier.get('max_position_size_pct', 90) / 100.0
+                    break
+            
+            hard_constraints = self.config.get('environment', {}).get('hard_constraints', {})
+            min_trade = hard_constraints.get('min_order_value_usdt', 11.0)
+            sl_bounds = hard_constraints.get('stop_loss_pct', {'min': 0.005, 'max': 0.20})
+            tp_bounds = hard_constraints.get('take_profit_pct', {'min': 0.01, 'max': 0.50})
+            
+            self.log_info(
+                f"[TIER 1] Environnement: Palier={tier_name}, MaxPos={max_position_pct*100:.0f}%, MinTrade={min_trade} USDT"
+            )
+            
+            # ========== ÉTAPE 2 : LIRE VALEURS OPTUNA (STRATÈGE) ==========
+            worker_key = f'w{worker_id}'
+            worker_config = self.config.get('workers', {}).get(worker_key, {})
+            trading_params = worker_config.get('trading_parameters', {})
+            
+            base_position_pct = trading_params.get('position_size_pct', 0.1)
+            base_sl_pct = trading_params.get('stop_loss_pct', 0.02)
+            base_tp_pct = trading_params.get('take_profit_pct', 0.05)
+            base_risk_pct = trading_params.get('risk_per_trade_pct', 0.01)
+            
+            self.log_info(
+                f"[TIER 3] Optuna ({worker_key}): Pos={base_position_pct*100:.2f}%, SL={base_sl_pct*100:.2f}%, TP={base_tp_pct*100:.2f}%"
+            )
+            
+            # ========== ÉTAPE 3 : APPLIQUER DBE (TACTICIEN) ==========
+            regime_params = self.config.get('dbe', {}).get('regime_parameters', {}).get(market_regime, {})
+            
+            pos_mult = regime_params.get('position_size_multiplier', 1.0)
+            sl_mult = regime_params.get('sl_multiplier', 1.0)
+            tp_mult = regime_params.get('tp_multiplier', 1.0)
+            
+            # Convertir en ajustements relatifs et borner à ±15%
+            pos_adj = min(max(pos_mult - 1.0, -0.15), 0.15)
+            sl_adj = min(max(sl_mult - 1.0, -0.15), 0.15)
+            tp_adj = min(max(tp_mult - 1.0, -0.15), 0.15)
+            
+            self.log_info(
+                f"[TIER 2] DBE ({market_regime}): Pos×{pos_mult:.2f}, SL×{sl_mult:.2f}, TP×{tp_mult:.2f}"
+            )
+            self.log_info(
+                f"[TIER 2] DBE ajusté: Pos={pos_adj:+.1%}, SL={sl_adj:+.1%} (borné), TP={tp_adj:+.1%} (borné)"
+            )
+            
+            # Appliquer ajustements
+            adjusted_position_pct = base_position_pct * (1 + pos_adj)
+            adjusted_sl_pct = base_sl_pct * (1 + sl_adj)
+            adjusted_tp_pct = base_tp_pct * (1 + tp_adj)
+            
+            self.log_info(
+                f"[TIER 2] Après DBE: Pos={adjusted_position_pct*100:.2f}%, SL={adjusted_sl_pct*100:.2f}%, TP={adjusted_tp_pct*100:.2f}%"
+            )
+            
+            # ========== ÉTAPE 4 : APPLIQUER CONTRAINTES FINALES (ENVIRONNEMENT) ==========
+            # Clamp SL/TP par hard_constraints
+            final_sl_pct = max(min(adjusted_sl_pct, sl_bounds.get('max', 0.20)), sl_bounds.get('min', 0.005))
+            final_tp_pct = max(min(adjusted_tp_pct, tp_bounds.get('max', 0.50)), tp_bounds.get('min', 0.01))
+            
+            # Clamp position par palier
+            final_position_pct = min(adjusted_position_pct, max_position_pct)
+            
+            self.log_info(
+                f"[TIER 1] Après Env: Pos={final_position_pct*100:.2f}% (≤{max_position_pct*100:.0f}%), SL={final_sl_pct*100:.2f}%, TP={final_tp_pct*100:.2f}%"
+            )
+            
+            # ========== VÉRIFIER NOTIONAL ≥ MIN_TRADE ==========
+            notional = capital * final_position_pct
+            
+            if notional < min_trade:
+                # Ajuster position pour atteindre min_trade
+                final_position_pct = min_trade / capital
+                if final_position_pct > max_position_pct:
+                    # Trade impossible, rejeter
+                    self.log_info(
+                        f"[FINAL] Notional={notional:.2f} USDT < {min_trade} USDT. "
+                        f"Ajustement impossible (position requise {final_position_pct*100:.2f}% > max {max_position_pct*100:.0f}%). ❌ REJETÉ"
+                    )
+                    return None
+                else:
+                    self.log_info(
+                        f"[FINAL] Notional={notional:.2f} USDT < {min_trade} USDT. "
+                        f"Ajustement position à {final_position_pct*100:.2f}% pour atteindre {min_trade} USDT"
+                    )
+                    notional = min_trade
+            else:
+                self.log_info(
+                    f"[FINAL] Notional={notional:.2f} USDT ≥ {min_trade} USDT ✅"
+                )
+            
+            # ========== RETOURNER RÉSULTAT ==========
+            return {
+                'position_size_pct': final_position_pct,
+                'stop_loss_pct': final_sl_pct,
+                'take_profit_pct': final_tp_pct,
+                'risk_per_trade_pct': base_risk_pct,
+                'notional_usdt': notional,
+                'tier_name': tier_name,
+                'market_regime': market_regime,
+                'worker_id': worker_id,
+                'step': current_step,
+            }
+            
+        except Exception as e:
+            logger.error(f"Erreur dans calculate_final_trade_parameters: {e}", exc_info=True)
+            return None
+
     @staticmethod
     def _normalize_timestamp(timestamp: Optional[Any]) -> Optional[datetime]:
         """Convertit différents formats de timestamps en datetime natif."""
