@@ -1336,7 +1336,7 @@ training:
   num_instances: 4
   progress_bar: true
   save_freq: 5000
-  timesteps_per_instance: 350000
+  timesteps_per_instance: 500000
   use_custom_progress: true
 workers:
   w1:

@@ -1,0 +1,28 @@
+metrics:
+  drawdown: 0.08129494463280418
+  profit_factor: 1.6162397907653627
+  sharpe: 28.074111476356983
+  total_return: 2.3039782139672926
+  trades: 357
+  win_rate: 0.5938375350140056
+phase: Phase 2 - PPO Hyperparams
+ppo_parameters:
+  batch_size: 64
+  clip_range: 0.18926022587145405
+  ent_coef: 0.00731498526212002
+  gae_lambda: 0.9657355396079869
+  gamma: 0.9796077083072322
+  learning_rate: 1.0580000882650805e-05
+  max_grad_norm: 0.6394943838310455
+  n_epochs: 5
+  n_steps: 1024
+  vf_coef: 0.5499877290066507
+score: 42.80288803248485
+trading_parameters:
+  max_concurrent_positions: 4
+  min_holding_period_steps: 5
+  position_size_pct: 0.2
+  risk_per_trade_pct: 0.012
+  stop_loss_pct: 0.012
+  take_profit_pct: 0.02
+worker: W4

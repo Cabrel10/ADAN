@@ -1671,6 +1671,10 @@ class DynamicBehaviorEngine:
                 # Fallback: just log to decision_history
                 self.decision_history.append(snapshot)
 
+            # Définir aggressivity par défaut si non défini
+            if 'aggressivity' not in locals():
+                aggressivity = 1.0
+
             return {
                 "feasible": True,
                 "position_size_pct": position_pct,
