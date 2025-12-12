@@ -1,0 +1,4 @@
+# file: /home/morningstar/Documents/trading/bot/src/adan_trading_bot/common/logging_utils.py
+# hypothesis_version: 6.138.3
+
+[0.1, 0.2, 0.3, 0.5, 1.0, 2.0, 5.0, 10.0, 300.0, 1000.0, 1000, ' | ', 'by_level', 'cache_duration', 'critical', 'debug', 'default_sample_rate', 'error', 'filter_rate', 'filtered', 'info', 'smart_logger', 'testing', 'total_attempted', 'total_filtered', 'total_logged', 'training', 'validation', 'warning', 'worker_id']

@@ -1,0 +1,4 @@
+# file: /home/morningstar/Documents/trading/bot/src/adan_trading_bot/utils/log_utils.py
+# hypothesis_version: 6.138.3
+
+[100, 1024, '%Y%m%d_%H%M%S', '*', '.gz', 'adan_trading_bot.log', 'backup_count', 'compress_backups', 'json_log_file', 'level', 'log_dir', 'log_file', 'logs', 'max_log_size', 'message', 'r', 'rb', 'rt', 'timestamp', 'utf-8', 'wb']

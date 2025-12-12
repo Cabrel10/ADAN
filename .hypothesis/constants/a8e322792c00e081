@@ -1,0 +1,4 @@
+# file: /home/morningstar/Documents/trading/bot/src/adan_trading_bot/dashboard/sections/positions.py
+# hypothesis_version: 6.138.3
+
+['  Context: ', '#', 'Current', 'Entry', 'LONG', 'P&L', 'Pair', 'SL', 'Side', 'Size (BTC)', 'TP', 'Time', 'bold cyan', 'bold white', 'bold yellow', 'cyan', 'dim cyan', 'dim green', 'dim magenta', 'dim white', 'dim yellow', 'green', 'red', 'right', '📈', '📉', '🔻', '🚀']

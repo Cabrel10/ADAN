@@ -1,0 +1,4 @@
+# file: /home/morningstar/Documents/trading/bot/src/adan_trading_bot/dashboard/real_collector.py
+# hypothesis_version: 6.138.3
+
+[0.0, 100, 'inf', 'profit_factor', 'total_trades', 'win_rate']

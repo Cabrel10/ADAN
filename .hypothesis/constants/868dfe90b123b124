@@ -1,0 +1,4 @@
+# file: /home/morningstar/Documents/trading/bot/src/adan_trading_bot/risk/pareto_risk_detector.py
+# hypothesis_version: 6.138.3
+
+[0.0, 0.5, 0.75, 0.92, 1.0, 2.0, 5.0, 100, 'EXTREME', 'Enterprise', 'HIGH_VOL', 'High', 'Medium', 'Micro', 'NORMAL', 'Small', 'kurtosis', 'min_safe_mult', 'multiplier', 'n_samples', 'regime', 'tier']

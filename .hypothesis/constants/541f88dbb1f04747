@@ -1,0 +1,4 @@
+# file: /home/morningstar/Documents/trading/bot/src/adan_trading_bot/dashboard/colors.py
+# hypothesis_version: 6.138.3
+
+[-2.0, -0.5, 0.0, 0.6, 0.7, 0.8, 0.9, 1.0, 2.0, 3.0, '#001a00', '#001a1a', '#0033cc', '#0066ff', '#00b86f', '#00cc00', '#00d084', '#0a0a0a', '#1a0000', '#808080', '#cc0000', '#ff0000', '#ff3333', '#ff6b6b', '#ff9900', '#ffcc00', '#ffd700', 'BUY', 'SELL', 'breakeven', 'confidence_high', 'confidence_low', 'confidence_moderate', 'confidence_very_high', 'confidence_very_low', 'loss_large', 'loss_small', 'neutral', 'profit_large', 'profit_small', 'risk_critical', 'risk_high', 'risk_low', 'risk_medium', 'signal_buy', 'signal_hold', 'signal_sell', 'status_error', 'status_ok', 'status_warning']

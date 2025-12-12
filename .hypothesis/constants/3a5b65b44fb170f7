@@ -1,0 +1,4 @@
+# file: /home/morningstar/Documents/trading/bot/src/adan_trading_bot/patches/gugu_march_excellence_rewards.py
+# hypothesis_version: 6.138.3
+
+[-0.1, 0.0, 0.01, 0.1, 0.2, 0.3, 0.4, 0.5, 1.0, 1.15, 1.5, 1.8, 2.0, 6.0, 50.0, '1h', '4h', '5m', '__main__', 'base_penalty', 'chunk_penalty', 'confluence', 'confluence_bonus', 'consistency', 'consistency_reward', 'enabled', 'excellence_bonuses', 'frequency', 'increase_factor', 'macd_histogram', 'max_multiplier', 'max_streak_bonus', 'min_streak', 'min_trades_for_bonus', 'profit_factor', 'reward_shaping', 'rsi', 'sharpe_excellence', 'sharpe_threshold', 'start_chunk_index', 'streak_bonus_active', 'streak_multiplier', 'system_enabled', 'trading_rules', 'winning_streak', 'winning_streak_bonus']

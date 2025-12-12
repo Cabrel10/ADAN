@@ -1,0 +1,4 @@
+# file: /home/morningstar/Documents/trading/bot/src/adan_trading_bot/data_processing/state_builder.py
+# hypothesis_version: 6.138.3
+
+[-1000000.0, -1.0, 0.0, 1e-08, 1.0, 1000000.0, 100, 1024, 5600, 6300, '1h', '4h', '5m', '=', 'CCI_20_0.015', 'CLOSE', 'EMA_100', 'EMA_20', 'EMA_5', 'EMA_50', 'HIGH', 'ICHIMOKU_9_26_52', 'LOW', 'MACD_12_26_9', 'MACD_HIST_12_26_9', 'MFI_14', 'OPEN', 'PSAR_0.02_0.2', 'ROC_9', 'RSI_14', 'SMA_200', 'STOCHd_14_3_3', 'STOCHk_14_3_3', 'SUPERTREND_14_2.0', 'SUPERTREND_14_3.0', 'TimeframeConfig', 'VOLUME', '_performance_metrics', 'aggressive_cleanup', 'clear_cache', 'constant', 'current_chunk_data', 'disable_caching', 'errors_count', 'feature_range', 'features', 'force_gc', 'gc_collections', 'initial_memory_mb', 'memory_monitoring', 'memory_peak_mb', 'minmax', 'normalize', 'observation', 'portfolio_state', 'prod_scalers', 'rb', 'robust', 'scaler_type', 'scalers', 'standard', 'timeframe', 'warnings_count', 'window_size']

@@ -1,0 +1,4 @@
+# file: /home/morningstar/Documents/trading/bot/src/adan_trading_bot/dashboard/sections/header.py
+# hypothesis_version: 6.138.3
+
+[' │ ', 'Capital: ', 'P&L: ', 'Portfolio: ', 'Positions: ', 'Runtime: ', 'Win Rate: ', 'bold cyan', 'bold green', 'bold magenta', 'bold yellow', 'cyan', 'dim white']

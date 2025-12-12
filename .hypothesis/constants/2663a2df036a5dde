@@ -1,0 +1,4 @@
+# file: /home/morningstar/Documents/trading/bot/src/adan_trading_bot/common/central_logger.py
+# hypothesis_version: 6.138.3
+
+['%Y%m%d', '%Y-%m-%d %H:%M:%S', 'ADAN_CENTRAL', 'central_logger', 'function', 'level', 'line', 'logger', 'logs/central', 'message', 'metric_data', 'source', 'sync_data', 'timestamp', 'trade_data', '✅ PASS', '❌ FAIL']

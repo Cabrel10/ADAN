@@ -1,0 +1,4 @@
+# file: /home/morningstar/Documents/trading/bot/src/adan_trading_bot/utils/smart_logger.py
+# hypothesis_version: 6.138.3
+
+[0.1, 5.0, 100, '\n5. Statistiques:', 'CRITICAL', 'DEBUG', 'ERROR', 'INFO', 'Message dupliqué', 'SmartLogger', 'WARNING', '__main__', 'cached_warnings', 'completed', 'debug_sample_rate', 'dedup_window', 'error', 'failed', 'logger_name', 'loss', 'portfolio', 'position', 'profit', 'started', 'success', 'test_smart_logger', 'total_workers', 'trade', 'warnings', 'worker_id']

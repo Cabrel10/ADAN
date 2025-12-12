@@ -1,0 +1,4 @@
+# file: /home/morningstar/Documents/trading/bot/src/adan_trading_bot/dashboard/layout.py
+# hypothesis_version: 6.138.3
+
+[120, 'decision_matrix', 'header', 'health', 'left', 'main', 'performance', 'positions', 'right', 'trades']

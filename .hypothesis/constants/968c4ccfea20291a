@@ -1,0 +1,4 @@
+# file: /home/morningstar/Documents/trading/bot/src/adan_trading_bot/utils/visualization.py
+# hypothesis_version: 6.138.3
+
+[0.01, 0.03, 0.3, 0.7, 0.8, 1.02, 100, 800, '#1f77b4', '#ff7f0e', 'Achat', 'Action', 'Benchmark', 'Densité', 'Décisions de trading', 'Fréquence', 'Portefeuille', 'Prix', 'Périodes', 'Rendement', 'Temps', 'Valeur', 'Vente', 'bottom', 'dash', 'figure.figsize', 'font.size', 'ggplot', 'green', 'h', 'line', 'lines', 'lines+markers', 'markers', 'paper', 'plotly_white', 'portfolio_value', 'purple', 'red', 'reports', 'results', 'returns_distribution', 'right', 'seaborn-v0_8', 'trading_actions', 'training_metrics', 'training_report.html', 'triangle-down', 'triangle-up', 'w', 'x', 'x unified', 'y']

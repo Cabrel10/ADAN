@@ -1,0 +1,4 @@
+# file: /home/morningstar/Documents/trading/bot/src/adan_trading_bot/dashboard/sections/decision_matrix.py
+# hypothesis_version: 6.138.3
+
+[' | ', '+', 'ADX', 'Confidence', 'Driver', 'Horizon', 'Metric', 'RSI', 'Regime', 'Signal', 'Trend', 'Value', 'Volatility', 'Volume', 'Workers', 'bold cyan', 'bold white', 'cyan', 'green', 'red']

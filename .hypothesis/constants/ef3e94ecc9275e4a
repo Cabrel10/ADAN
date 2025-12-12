@@ -1,0 +1,4 @@
+# file: /home/morningstar/Documents/trading/bot/src/adan_trading_bot/dashboard/logger.py
+# hypothesis_version: 6.138.3
+
+['ALERT', 'CRITICAL', 'ERROR', 'INFO', 'SYSTEM_SHUTDOWN', 'SYSTEM_STARTUP', 'TRADE_ENTRY', 'TRADE_EXIT', 'WARNING', 'alerts_logged', 'close_reason', 'config', 'duration_seconds', 'entry_confidence', 'entry_price', 'event_type', 'exit_price', 'logs/dashboard', 'market_price', 'market_regime', 'message', 'pair', 'realized_pnl_pct', 'realized_pnl_usd', 'rsi', 'runtime_seconds', 'severity', 'side', 'signal_strength', 'size_btc', 'stop_loss', 'take_profit', 'timestamp', 'trade_entries', 'trade_exits', 'volatility']

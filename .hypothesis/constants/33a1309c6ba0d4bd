@@ -1,0 +1,4 @@
+# file: /home/morningstar/Documents/trading/bot/src/adan_trading_bot/dashboard/sections/closed_trades.py
+# hypothesis_version: 6.138.3
+
+['#', 'Conf', 'Duration', 'Entry', 'Exit', 'Out', 'P&L', 'Reason', 'Size (BTC)', 'bold white', 'bold yellow', 'center', 'dim cyan', 'dim white', 'green', 'left', 'right']
