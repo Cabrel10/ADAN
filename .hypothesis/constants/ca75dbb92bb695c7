@@ -1,0 +1,4 @@
+# file: /home/morningstar/Documents/trading/bot/src/adan_trading_bot/indicators/calculator.py
+# hypothesis_version: 6.138.3
+
+[1e-10, 1.0, 50.0, 100.0, 100, 'adx', 'atr', 'atr_percent', 'close', 'high', 'low', 'open', 'rsi', 'volume']

@@ -1,0 +1,37 @@
+{
+  "timestamp": "2025-12-13T15:03:04.049059",
+  "model_stress": {
+    "cpu_percent": 13.1,
+    "memory_percent": 71.0,
+    "memory_available_gb": 3.2905311584472656,
+    "memory_used_gb": 8.046165466308594,
+    "disk_percent": 98.0,
+    "process_count": 348,
+    "status": "DISK_FULL",
+    "gpu_available": false
+  },
+  "position_management": {
+    "trades_opened": 0,
+    "trades_closed": 0,
+    "trades_with_tp_sl": 0,
+    "average_hold_time": 0,
+    "status": "OK"
+  },
+  "indicator_transmission": {
+    "indicators_detected": [],
+    "timeframes_detected": [],
+    "observation_shape_valid": false,
+    "status": "MISSING_TIMEFRAMES"
+  },
+  "model_confusion": {
+    "worker_signals_consistent": true,
+    "signal_variance": 0.22222222222222224,
+    "signal_distribution": {
+      "BUY": 0,
+      "SELL": 0,
+      "HOLD": 1
+    },
+    "status": "OK"
+  },
+  "overall_status": "NEEDS_ATTENTION"
+}

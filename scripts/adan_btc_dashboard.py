@@ -8,10 +8,9 @@ Usage:
     python scripts/adan_btc_dashboard.py [options]
     
 Options:
-    --mock          Use mock data collector (default)
-    --real          Use real data collector (requires ADAN system)
-    --refresh RATE  Refresh rate in seconds (default: 2.0)
+    --refresh RATE  Refresh rate in seconds (default: 60.0)
     --once          Run once and exit (for testing)
+    --mock          Use mock data collector (for testing only)
     --help          Show this help message
 """
 
@@ -24,6 +23,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
 from rich.console import Console
 from adan_trading_bot.dashboard import AdanBtcDashboard
+from adan_trading_bot.dashboard.real_collector import RealDataCollector
 from adan_trading_bot.dashboard.mock_collector import MockDataCollector
 
 
@@ -34,38 +34,31 @@ def parse_arguments():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-    # Run with mock data (default)
+    # Run with real data (default)
     python scripts/adan_btc_dashboard.py
     
     # Run with custom refresh rate
-    python scripts/adan_btc_dashboard.py --refresh 1.0
+    python scripts/adan_btc_dashboard.py --refresh 30.0
     
     # Run once for testing
     python scripts/adan_btc_dashboard.py --once
     
-    # Use real data collector (requires ADAN system)
-    python scripts/adan_btc_dashboard.py --real
+    # Use mock data for testing
+    python scripts/adan_btc_dashboard.py --mock
 """
     )
     
     parser.add_argument(
         "--mock",
         action="store_true",
-        default=True,
-        help="Use mock data collector (default)"
-    )
-    
-    parser.add_argument(
-        "--real",
-        action="store_true",
-        help="Use real data collector (requires ADAN system)"
+        help="Use mock data collector (for testing only)"
     )
     
     parser.add_argument(
         "--refresh",
         type=float,
-        default=2.0,
-        help="Refresh rate in seconds (default: 2.0)"
+        default=60.0,
+        help="Refresh rate in seconds (default: 60.0 for real-time market sync)"
     )
     
     parser.add_argument(
@@ -86,20 +79,12 @@ Examples:
 
 def create_data_collector(args):
     """Create appropriate data collector based on arguments"""
-    if args.real:
-        # Try to import and create real data collector
-        try:
-            # This would be implemented in Phase 5
-            from adan_trading_bot.dashboard.real_collector import RealDataCollector
-            return RealDataCollector()
-        except ImportError:
-            console = Console()
-            console.print("[red]❌ Real data collector not available yet[/]")
-            console.print("[yellow]📊 Falling back to mock data collector[/]")
-            return MockDataCollector(seed=args.seed)
-    else:
-        # Use mock data collector
+    if args.mock:
+        # Use mock data collector for testing
         return MockDataCollector(seed=args.seed)
+    else:
+        # Use real data collector (default)
+        return RealDataCollector()
 
 
 def main():
@@ -118,6 +103,8 @@ def main():
     # Create data collector
     try:
         data_collector = create_data_collector(args)
+        collector_type = "Mock Data" if args.mock else "Real Data (Live)"
+        console.print(f"[cyan]📊 Using {collector_type} Collector[/]")
     except Exception as e:
         console.print(f"[red]❌ Failed to create data collector: {e}[/]")
         sys.exit(1)

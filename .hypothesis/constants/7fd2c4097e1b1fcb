@@ -1,0 +1,4 @@
+# file: /home/morningstar/Documents/trading/bot/src/adan_trading_bot/validation/data_validator.py
+# hypothesis_version: 6.138.3
+
+[0.0, 5.0, 10.0, 100.0, 100, 1000, 1000000, '1h', '5m', 'BTC/USDT', 'adx', 'apiKey', 'atr', 'calculated_values', 'close', 'data_age_seconds', 'data_timestamp', 'defaultType', 'deviations', 'enableRateLimit', 'halt', 'high', 'low', 'message', 'ms', 'open', 'options', 'pass', 'reference_values', 'rsi', 'secret', 'spot', 'status', 'thresholds', 'timestamp', 'volume', 'w', 'warning']

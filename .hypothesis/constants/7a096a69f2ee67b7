@@ -1,0 +1,4 @@
+# file: /home/morningstar/Documents/trading/bot/src/adan_trading_bot/observation/builder.py
+# hypothesis_version: 6.138.3
+
+[0.2, 0.5, 1.0, 5.0, 50.0, 100.0, 100, 'adx', 'atr', 'atr_percent', 'bearish', 'bullish', 'close', 'current_stats', 'data_timestamp', 'halt', 'high_20', 'indicators', 'low_20', 'ranging', 'rsi', 'sma_20', 'sma_50', 'timestamp', 'validation_message', 'validation_status', 'volatility', 'warning']
