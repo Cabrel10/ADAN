@@ -26,10 +26,38 @@ class UnifiedMetricsDB:
         return cls._instance
     
     def __init__(self, db_path: str = "metrics.db"):
-        """Initialiser la base de données une seule fois"""
-        if self._initialized:
+        """Initialiser la base de données (singleton) et gérer un éventuel changement de fichier.
+
+        Comportement:
+        - Première initialisation: crée la connexion sur ``db_path`` et les tables nécessaires.
+        - Appels suivants avec le *même* ``db_path``: ne font rien (singleton classique).
+        - Appels suivants avec un **autre** ``db_path``: ferment proprement l'ancienne connexion,
+          reconfigurent la base vers le nouveau fichier et recréent les tables.
+
+        Cela permet aux tests (ex: ``test_foundations.db``) d'utiliser un fichier dédié tout en
+        conservant une instance unique dans le processus.
+        """
+
+        # Si l'instance a déjà été initialisée, vérifier si le chemin demandé est différent
+        if getattr(self, "_initialized", False):
+            new_path = Path(db_path)
+            if new_path != getattr(self, "db_path", new_path):
+                # Changement explicite de fichier DB: reconfigurer proprement
+                lock = getattr(self, "_lock", threading.Lock())
+                with lock:
+                    conn = getattr(self, "conn", None)
+                    if conn is not None:
+                        conn.close()
+                    self.db_path = new_path
+                    self.conn = sqlite3.connect(str(self.db_path), check_same_thread=False)
+                    self.cursor = self.conn.cursor()
+                    # (Re)créer les tables sur ce nouveau fichier
+                    self._create_tables()
+                    # S'assurer que le lock est bien défini pour les appels suivants
+                    self._lock = lock
             return
-        
+
+        # Première initialisation du singleton
         self._initialized = True
         self.db_path = Path(db_path)
         self.conn = sqlite3.connect(str(self.db_path), check_same_thread=False)

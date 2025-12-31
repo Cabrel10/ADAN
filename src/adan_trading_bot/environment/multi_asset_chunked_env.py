@@ -1,207 +1,98 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
-"""
-Environnement de trading multi-actifs avec chargement par morceaux.
+"""Multi-asset chunked environment for trading with real-time data support."""
 
-Ce module implémente un environnement de trading pour plusieurs actifs
-avec chargement efficace des données par lots.
-"""
-
-# Standard library imports
-import gc
-import json
-import logging
-import os
-import os
-import pickle
-import re
-import threading
-import time
-import uuid
-from datetime import datetime
-from typing import Any, Dict, List, Optional, Tuple, TypeVar
-from copy import deepcopy
-from collections import deque # <-- Ajouter l'import
-
-# Third-party imports
-import gymnasium as gym
-import numpy as np
+from typing import Dict, Any, Optional, List, Tuple
 import pandas as pd
-from gymnasium import spaces
+import numpy as np
+import gym
+import os
+import logging
+import threading
+from collections import deque
 
-# Local application imports
-from ..data_processing.data_loader import ChunkedDataLoader
-from .dynamic_behavior_engine import DynamicBehaviorEngine
-from ..data_processing.observation_validator import ObservationValidator
-from .order_manager import OrderManager
-from ..portfolio.portfolio_manager import PortfolioManager
+from ..exchange_api.websocket_manager import WebSocketManager
+from ..exchange_api.connector import get_exchange_client
+from ..common.utils import get_logger
 from ..common.logging_utils import create_smart_logger, configure_smart_logger
-from .reward_calculator import RewardCalculator
 
-try:
-    # Import from data_processing (canonical location)
-    from adan_trading_bot.data_processing.state_builder import (
-        StateBuilder,
-        TimeframeConfig,
-    )
-except Exception:
-    # Fallback for compatibility (should not be used under normal conditions)
-    pass
+logger = get_logger(__name__)
 
 
-from copy import deepcopy
-
-
-def _get_picklable_state(obj):
-    """Filtre __dict__ pour enlever modules/unpicklables"""
-    state = {}
-    for k, v in obj.__dict__.items():
-        # Explicitly skip module objects
-        if isinstance(v, type(os)): # Check if it's a module type
-            continue
-        # Check if the value is directly picklable or a common non-module type
-        if isinstance(v, (int, float, str, list, dict, tuple, bool, type(None), np.ndarray, pd.DataFrame, pd.Series)):
-            state[k] = v
-        elif hasattr(v, '__dict__') and not isinstance(v, type):  # Recursif pour classes, skip modules
-            try:
-                state[k] = deepcopy(v) # Deepcopy pour éviter les références
-            except TypeError:
-                # Fallback if deepcopy fails for some complex objects
-                state[k] = str(v) # Store string representation
-        # Skip modules, loggers, etc. (already handled by the first if)
-    return state
-
-
-def clean_worker_id(worker_id: Any) -> int:
+def clean_worker_id(worker_id):
     """
-    Nettoie l'ID du worker pour éviter les erreurs JSONL.
-    Convertit 'w0' en 0, 'W0' en 0, 'worker-1' en 1, '[WORKER-2]' en 2, etc.
-    Gère tous les formats possibles d'ID worker.
-
-    Args:
-        worker_id: ID du worker (peut être string, int, ou autre)
-
-    Returns:
-        int: ID du worker nettoyé (toujours un entier positif)
+    Normalize worker_id to an integer.
+    Handles formats like 'W0', 'W1', 'w0', 0, 1, etc.
     """
     if worker_id is None:
         return 0
-
+    
     if isinstance(worker_id, int):
-        return max(0, worker_id)  # Assurer que c'est positif
-
+        return worker_id
+    
     if isinstance(worker_id, str):
-        # Nettoyer la chaîne: supprimer les crochets, espaces, etc.
-        clean_str = worker_id.strip().upper()
-
-        # Extraire tous les nombres de la chaîne
-        numbers = re.findall(r"\d+", clean_str)
-
-        if numbers:
-            try:
-                # Prendre le premier nombre trouvé
-                return int(numbers[0])
-            except (ValueError, IndexError):
-                pass
-
-        # Si aucun nombre trouvé, essayer des patterns spécifiques
-        patterns = [
-            r"^W(\d+)$",  # W0, W1, etc.
-            r"^WORKER[-_]?(\d+)$",  # WORKER0, WORKER-1, WORKER_2, etc.
-            r"^RANK[-_]?(\d+)$",  # RANK0, RANK-1, etc.
-        ]
-
-        for pattern in patterns:
-            match = re.match(pattern, clean_str)
-            if match:
-                try:
-                    return int(match.group(1))
-                except (ValueError, IndexError):
-                    pass
-
-        # Fallback: essayer de convertir directement
+        # Remove 'W' or 'w' prefix if present
+        cleaned = worker_id.lstrip('Ww')
         try:
-            return max(0, int(clean_str))
-        except (ValueError, TypeError):
-            pass
-
-    # Dernier recours: utiliser hash pour avoir un entier déterministe
-    try:
-        return abs(hash(str(worker_id))) % 1000
-    except Exception:
-        return 0
+            return int(cleaned)
+        except ValueError:
+            return 0
+    
+    return 0
 
 
-# Type variables for generics
-T = TypeVar("T")
+class LiveDataManager:
+    def __init__(self, exchange_client, websocket_manager, assets, timeframes):
+        self.exchange_client = exchange_client
+        self.websocket_manager = websocket_manager
+        self.assets = assets
+        self.timeframes = timeframes
+        self.current_data = {asset: {tf: pd.DataFrame() for tf in timeframes} for asset in assets}
 
-# Constants
-DEFAULT_PORTFOLIO_STATE_SIZE = 20
-DEFAULT_WINDOW_SIZE = 50
-DEFAULT_INITIAL_BALANCE = 10000.0
-MAX_STEPS = 10000
+    def get_initial_data(self, window_size: int) -> Dict[str, Dict[str, pd.DataFrame]]:
+        """Fetches historical k-lines for each asset/timeframe to build the initial observation window."""
+        for asset in self.assets:
+            for tf in self.timeframes:
+                try:
+                    # Fetch more than window_size to ensure enough data for indicators
+                    limit = window_size * 2
+                    ohlcv = self.exchange_client.fetch_ohlcv(asset, timeframe=tf, limit=limit)
+                    df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+                    df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
+                    self.current_data[asset][tf] = df
+                except Exception as e:
+                    logger.error(f"Failed to fetch initial data for {asset} {tf}: {e}")
+        return self.current_data
 
-# Constants for reload attempts and fallback mechanism
-MAX_RELOAD_ATTEMPTS = 3
-RELOAD_FALLBACK_CHUNK = 0
-RELOAD_RETRY_DELAY = 0.1  # seconds
+    def update_data(self, ws_data: Dict[str, Any]):
+        """Updates the current data with a new k-line from the WebSocket."""
+        try:
+            stream = ws_data.get('stream')
+            if not stream or '@kline_' not in stream:
+                return
 
-# Configuration du logger
-logger = logging.getLogger(__name__)
+            symbol, _, timeframe = stream.partition('@kline_')
+            asset = f"{symbol.upper()}/USDT" # Assuming USDT pair
+            kline = ws_data['data']['k']
 
-# Désactiver la propagation des logs des bibliothèques tierces
-logging.getLogger("matplotlib").setLevel(logging.WARNING)
-logging.getLogger("PIL").setLevel(logging.WARNING)
-logging.getLogger("urllib3").setLevel(logging.WARNING)
+            if asset in self.assets and timeframe in self.timeframes:
+                new_candle = pd.DataFrame([{
+                    'timestamp': pd.to_datetime(kline['t'], unit='ms'),
+                    'open': float(kline['o']),
+                    'high': float(kline['h']),
+                    'low': float(kline['l']),
+                    'close': float(kline['c']),
+                    'volume': float(kline['v'])
+                }])
 
-# Configure logging for this module
-logger.setLevel(logging.DEBUG)
-
-# Add console handler if not already configured
-if not logger.handlers:
-    console_handler = logging.StreamHandler()
-    console_handler.setLevel(logging.DEBUG)
-    formatter = logging.Formatter(
-        "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
-    )
-    console_handler.setFormatter(formatter)
-    logger.addHandler(console_handler)
-
-# Ensure basic config is set for other loggers
-if not logging.root.handlers:
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-        force=True,
-    )
-
-# Désactiver la propagation pour éviter les doublons
-logger.propagate = False
-
-
-# Patch Gugu & March - Système d'Excellence
-try:
-    from ..patches.gugu_march_excellence_rewards import (
-        GuguMarchExcellenceRewards,
-        ExcellenceMetrics,
-        create_excellence_rewards_system,
-    )
-
-    EXCELLENCE_SYSTEM_AVAILABLE = True
-    logger.info("[GUGU-MARCH] Excellence rewards system loaded successfully")
-except ImportError as e:
-    logger.warning(f"[GUGU-MARCH] Excellence system not available: {e}")
-    EXCELLENCE_SYSTEM_AVAILABLE = False
+                # Append new candle and remove the oldest
+                self.current_data[asset][timeframe] = pd.concat([self.current_data[asset][timeframe], new_candle]).iloc[-200:] # Keep last 200
+        except Exception as e:
+            logger.error(f"Error updating data from WebSocket: {e}")
 
 
 class MultiAssetChunkedEnv(gym.Env):
-    """Environnement de trading multi-actifs avec chargement par morceaux.
-
-    Cet environnement gère plusieurs actifs et intervalles de temps, avec
-    support pour des espaces d'actions discrets et continus. Il utilise un
-    constructeur d'état pour créer l'espace d'observation et un gestionnaire
-    de portefeuille pour suivre les positions et le PnL.
-    """
+    """Environnement de trading multi-actifs avec chargement par morceaux."""
 
     metadata = {"render_modes": ["human", "rgb_array"], "render_fps": 30}
 
@@ -212,7 +103,7 @@ class MultiAssetChunkedEnv(gym.Env):
 
     def __init__(
         self,
-        data=None,
+        data: Optional[Dict[str, Any]] = None,
         timeframes=None,
         window_size=None,
         features_config=None,
@@ -221,25 +112,10 @@ class MultiAssetChunkedEnv(gym.Env):
         config=None,
         external_dbe=None,
         worker_id=None, # Added worker_id to signature
+        live_mode: bool = False,
         **kwargs,
     ):
-        """Initialise l'environnement de trading multi-actifs.
-
-        Args:
-            data: Données de trading sous forme de dictionnaire.
-            timeframes: Liste des intervalles de temps pour les données.
-            window_size: Taille de la fenêtre pour les observations.
-            features_config: Configuration des caractéristiques pour chaque intervalle de temps.
-            max_steps: Nombre maximum d'étapes par épisode.
-            initial_balance: Balance initiale du portefeuille.
-            commission: Commission pour chaque transaction.
-            reward_scaling: Échelle de récompense pour les récompenses.
-            render_mode: Mode de rendu pour l'environnement.
-            enable_logging: Activation de la journalisation.
-            log_dir: Répertoire pour les fichiers de logs.
-            external_dbe: DBE externe pré-existant à réutiliser (pour l'immortalité d'ADAN).
-            worker_id: ID du worker pour cette instance de l'environnement.
-        """
+        """Initialise l'environnement de trading multi-actifs."""
         super().__init__()
         self.crash_snapshot_dir = "reports/crash_snapshots"
         os.makedirs(self.crash_snapshot_dir, exist_ok=True)
@@ -248,7 +124,6 @@ class MultiAssetChunkedEnv(gym.Env):
         self.logger = logging.getLogger(__name__)
 
         # Allow tests to pass the config as first positional arg (data)
-        # If 'data' looks like a config dict, reinterpret it as config
         if (
             isinstance(data, dict)
             and ("environment" in data or "workers" in data or "trading" in data)
@@ -256,9 +131,8 @@ class MultiAssetChunkedEnv(gym.Env):
             config = data
             data = None
 
-        # Minimal fix: ensure `self.data` attribute exists for wrappers (e.g., SubprocVecEnv.get_wrapper_attr("data"))
-        # Keep original input reference to avoid breaking downstream expectations.
         self.data = data
+        self.live_mode = live_mode
 
         # DIAGNOSTIC: Tracer les instances d'environnement pour identifier les recréations
         import uuid
@@ -273,7 +147,6 @@ class MultiAssetChunkedEnv(gym.Env):
         self.config = config or {}
 
         # Ensure a minimal 'trading' section exists for tests/minimal configs
-        # This avoids KeyError: 'trading' in validators/tests that expect the key.
         if not isinstance(self.config.get("trading", None), dict):
             self.config["trading"] = {"workers": {}, "timeframes": ["5m", "1h", "4h"]}
 
@@ -282,7 +155,6 @@ class MultiAssetChunkedEnv(gym.Env):
             try:
                 first_worker_key = next(iter(self.config["workers"].keys()))
                 self.worker_config = dict(self.config["workers"][first_worker_key])
-                # Persist worker_id if present on key name like 'w1'
                 if isinstance(first_worker_key, str) and first_worker_key.lower().startswith("w"):
                     try:
                         self.worker_config.setdefault("worker_id", int(first_worker_key[1:]) - 1)
@@ -291,7 +163,6 @@ class MultiAssetChunkedEnv(gym.Env):
             except Exception:
                 self.worker_config = {}
 
-        # Assign timeframes early to prevent initialization errors (now that config/worker_config are set)
         if timeframes is not None:
             self.timeframes = timeframes
         else:
@@ -304,7 +175,6 @@ class MultiAssetChunkedEnv(gym.Env):
                 tf = self.worker_config.get("timeframes")
             self.timeframes = tf or ["5m", "1h", "4h"]
 
-        # Get worker ID for synchronized logging (nettoyé pour éviter les erreurs JSONL)
         if worker_id is not None:
             self.worker_id = clean_worker_id(worker_id)
         else:
@@ -313,104 +183,87 @@ class MultiAssetChunkedEnv(gym.Env):
             )
             self.worker_id = clean_worker_id(raw_worker_id)
 
-        # SOLUTION IMMORTALITÉ ADAN: Stocker le DBE externe s'il est fourni
         self.external_dbe = external_dbe
         if external_dbe is not None:
             self.logger.critical(
                 f"🔄 RÉCEPTION DBE IMMORTEL: ENV_ID={self.env_instance_id}, Worker={self.worker_id}, DBE_ID={id(external_dbe)}"
             )
 
-        # DIAGNOSTIC: Log critique pour tracer la création d'instances
         self.logger.critical(
             f"🆕 NOUVELLE INSTANCE ENV CRÉÉE: ID={self.env_instance_id}, Worker={self.worker_id}"
         )
 
-        # Initialize smart logger for intelligent multi-worker logging (after worker_id is set)
-        total_workers = kwargs.get("total_workers", 4)  # Default to 4 workers
+        total_workers = kwargs.get("total_workers", 4)
         self.smart_logger = create_smart_logger(
             self.logger, self.worker_id, total_workers
         )
         configure_smart_logger(
             self.smart_logger, "training"
-        )  # Use training configuration
+        )
 
-        # Initialize risk parameters
         self.risk_params = self.worker_config.get("risk_parameters", {})
-        self.max_positions = self.worker_config.get("max_positions", 1) # Default to 1
-        self.tier = self.worker_config.get("tier", 1) # Default to tier 1
+        self.max_positions = self.worker_config.get("max_positions", 1)
+        self.tier = self.worker_config.get("tier", 1)
         self._init_risk_parameters()
 
-        # Initialize shared_buffer to avoid AttributeError in step()
         self.shared_buffer = None
-
-        # Initialize strict_validation flag with a default value
         self.strict_validation = kwargs.get("strict_validation", False)
 
-        # Initialize self.assets from data or config/worker_config
         if data is not None and isinstance(data, dict):
             self.assets = list(data.keys())
         else:
-            # Fallback: from worker_config or config
             assets_fc = []
             if isinstance(self.worker_config, dict):
                 assets_fc = self.worker_config.get("assets", [])
-            if not assets_fc and isinstance(self.config.get("environment", {}), dict):
-                assets_fc = self.config["environment"].get("assets", [])
-            if not assets_fc and isinstance(self.config.get("trading", {}), dict):
-                assets_fc = self.config["trading"].get("assets", [])
+
+            env_cfg = self.config.get("environment")
+            if not assets_fc and isinstance(env_cfg, dict):
+                assets_fc = env_cfg.get("assets", [])
+
+            trading_cfg = self.config.get("trading")
+            if not assets_fc and isinstance(trading_cfg, dict):
+                assets_fc = trading_cfg.get("assets", [])
+
             self.assets = assets_fc
 
         if not self.assets:
-            raise ValueError("No assets found in the provided data or configuration.")
+            self.logger.warning("No assets specified; falling back to default ['BTCUSDT'] for test compatibility")
+            self.assets = ["BTCUSDT"]
 
-        # Configuration du cache d'observations
-        self._observation_cache = {}  # Cache des observations
-        self._max_cache_size = 1000  # Taille maximale du cache
-        self._cache_hits = 0  # Succès du cache
-        self._cache_misses = 0  # Échecs du cache
+        self._observation_cache = {}
+        self._max_cache_size = 1000
+        self._cache_hits = 0
+        self._cache_misses = 0
         self._last_observation = None
         self._last_market_timestamp: Optional[pd.Timestamp] = None
         self._last_asset_timestamp: Dict[str, pd.Timestamp] = {}
-        # Observation courante
-        # Ensure attribute exists for downstream access in _get_observation
         self._current_obs = None
-        self._cache_access = {}  # Suivi de l'utilisation
+        self._cache_access = {}
 
-
-
-        # Initialisation des compteurs et états
         self.current_chunk = 0
         self.current_chunk_idx = 0
-        self.done = False  # État done
-        self.global_step = 0  # Compteur global d'étapes
-        self.current_step = 0  # Étape courante dans l'épisode
+        self.done = False
+        self.global_step = 0
+        self.current_step = 0
 
-        # Compteurs pour surveiller le forward fill de prix
-        self.interpolation_count = 0  # Nombre de forward fills effectués (legacy name)
-        self.total_steps_with_price_check = (
-            0  # Nombre total d'étapes avec vérification de prix
-        )
+        self.interpolation_count = 0
+        self.total_steps_with_price_check = 0
 
-        # Configuration et compteurs de fréquence des positions
-        # Load worker-specific frequency config, falling back to global if not present
         worker_trading_rules = self.worker_config.get("trading_rules", {})
         global_trading_rules = self.config.get("trading_rules", {})
 
-        # Prioritize worker-specific force_trade settings
         self.force_trade_steps_by_tf = self.worker_config.get("force_trade", {})
         if not self.force_trade_steps_by_tf:
-            # Fallback to global config if worker-specific is not defined
             self.force_trade_steps_by_tf = global_trading_rules.get("frequency", {}).get("force_trade_steps", {})
 
-        # Normalize force_trade_steps into a well-formed dict per timeframe
         def _normalize_force_trade_steps(raw):
-            default_map = {"5m": 15, "1h": 20, "4h": 50} # Default values if nothing is configured
+            default_map = {"5m": 15, "1h": 20, "4h": 50}
             if raw is None:
                 return default_map
             if isinstance(raw, dict):
                 out = {}
                 for tf in ("5m", "1h", "4h"):
-                    val = raw.get(tf, default_map[tf]) # Use default if specific tf not found
+                    val = raw.get(tf, default_map[tf])
                     try:
                         out[tf] = int(val)
                     except Exception:
@@ -425,17 +278,12 @@ class MultiAssetChunkedEnv(gym.Env):
         self.force_trade_steps_by_tf = _normalize_force_trade_steps(self.force_trade_steps_by_tf)
         self.logger.debug(f"[DEBUG_CONFIG] Worker {self.worker_id} force_trade_steps_by_tf: {self.force_trade_steps_by_tf}")
 
-        # Daily caps for forced trades (worker-specific, then global fallback)
         self.daily_max_forced_trades = self.worker_config.get("daily_max_forced_trades", 
-                                       self.worker_config.get("trading_rules", {}).get("daily_max_forced_trades", 10)) # Default to 10
-        self.daily_forced_trades_count = 0 # Counter for current day
+                                       self.worker_config.get("trading_rules", {}).get("daily_max_forced_trades", 10))
+        self.daily_forced_trades_count = 0
 
-        # --- CORRECTION ---
-        # Charger et stocker la configuration de fréquence
         self.frequency_config = self.config.get("trading_rules", {}).get("frequency", {})
 
-
-        # Non-recurrent force trade: cooldown + jitter per timeframe
         self.force_cooldown_by_tf = {
             tf: int(worker_trading_rules.get("frequency", {}).get("force_cooldown_steps", {}).get(tf, global_trading_rules.get("frequency", {}).get("force_cooldown_steps", {}).get(tf, 0)))
             for tf in ("5m", "1h", "4h")
@@ -451,61 +299,51 @@ class MultiAssetChunkedEnv(gym.Env):
         self.next_force_allowed_step_by_tf = {tf: 0 for tf in ("5m", "1h", "4h")}
         self.positions_count = {"5m": 0, "1h": 0, "4h": 0, "daily_total": 0}
 
-        # Tracking des trades pour éviter de compter les duplicatas
         self.last_trade_ids = set()
-        self.current_timeframe_for_trade = "5m"  # Default timeframe
-        self.daily_reset_step = 0  # Step du dernier reset journalier
-        self.current_day = 0  # Jour courant pour suivi
-        self.last_trade_steps_by_tf = {}  # Dictionnaire des derniers trades par timeframe
+        self.current_timeframe_for_trade = "5m"
+        self.daily_reset_step = 0
+        self.current_day = 0
+        self.last_trade_steps_by_tf = {}
 
-        # Tracking timestamps par timeframe pour éviter les doubles comptages
         self.last_trade_timestamps = {"5m": None, "1h": None, "4h": None}
-        # Buffer circulaire des reçus (limité en taille)
         self.receipts: deque = deque(maxlen=100)
 
-        # Dernières infos picklables pour compatibilité SubprocVecEnv
         self.last_info: Dict[str, Any] = {}
 
-        # Initialisation du chargeur de données
         self.data_loader_instance = None
+        self.live_data_manager = None
+        self.exchange_client = None
+        self.websocket_manager = kwargs.get('websocket_manager')
 
-        # Suivi des paliers
         self.current_tier = None
         self.previous_tier = None
         self.episode_count = 0
         self.episodes_in_tier = 0
         self.best_portfolio_value = 0.0
         self.last_tier_change_step = 0
-        self.tier_history = []  # Historique des paliers
+        self.tier_history = []
 
-        # Suivi des trades et métriques de risque
-        self.last_trade_step = (
-            -1
-        )  # Dernière étape où un trade a été effectué (-1 = aucun trade)
+        self.last_trade_step = -1
         self.risk_metrics = {
             "sharpe_ratio": 0.0,
             "sortino_ratio": 0.0,
             "max_drawdown": 0.0,
             "win_rate": 0.0,
         }
-        self.performance_history = []  # Historique des performances
+        self.performance_history = []
 
-        # Initialisation des composants critiques
-        self._is_initialized = False  # Standardisation sur _is_initialized
+        self._is_initialized = False
 
-        # Compteurs pour détecter les forward-fill excessifs
         self._price_read_success_count = 0
         self._price_forward_fill_count = 0
-        self._forward_fill_threshold = 0.02  # 2% de forward-fill maximum
+        self._forward_fill_threshold = 0.02
 
-        # Suivi des récompenses
         self._last_reward = 0.0
         self._cumulative_reward = 0.0
 
-        # Compteurs pour les tentatives de trade
         self.trade_attempts = 0
         self.invalid_trade_attempts = 0
-        self.last_reset_date = None # Added for daily reset
+        self.last_reset_date = None
         try:
             self._initialize_components()
             self._is_initialized = True

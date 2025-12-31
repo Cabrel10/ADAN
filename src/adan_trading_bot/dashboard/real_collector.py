@@ -2,6 +2,7 @@
 Real data collector for ADAN Dashboard
 
 Integrates with existing ADAN components to fetch live trading data.
+Uses REAL Binance market data via CCXT API.
 """
 
 from typing import List, Optional
@@ -9,6 +10,10 @@ from datetime import datetime, timedelta
 from pathlib import Path
 import logging
 import json
+import os
+import time
+import ccxt
+import pandas as pd
 
 from .data_collector import DataCollector
 from .models import (
@@ -33,7 +38,7 @@ class RealDataCollector(DataCollector):
     - Portfolio manager for positions and capital
     - Metrics database for closed trades
     - ADAN engine for current signal
-    - Exchange API for market context
+    - Exchange API for REAL market context (Binance)
     - System monitors for health status
     """
     
@@ -46,22 +51,49 @@ class RealDataCollector(DataCollector):
         self.exchange_api = None
         self.system_monitor = None
         self._connected = False
+        self.exchange = None
+        self.last_market_fetch = 0
+        self.market_cache_duration = 30  # Cache market data for 30 seconds
+        self._cached_market_data = None
     
     def connect(self) -> bool:
         """
-        Connect to ADAN system components.
+        Connect to ADAN system components and Binance API.
         
-        For the dashboard, this means verifying we can read the state file.
+        For the dashboard, this means:
+        1. Verifying we can read the state file
+        2. Connecting to Binance testnet for REAL market data
         """
         try:
+            # Check state file
             state_file = Path("/mnt/new_data/t10_training/phase2_results/paper_trading_state.json")
             if not state_file.exists():
                 logger.warning(f"⚠️ State file not found at {state_file}")
-                # We still return True because the file might be created later by the monitor
-                # and we don't want to crash.
+            
+            # Connect to Binance testnet for REAL market data
+            try:
+                api_key = os.environ.get('BINANCE_TESTNET_API_KEY', 
+                    'xi25VzYYVtrCUzzW42tPsO0NbE7SfGg2IWQmlwIzoOfKK4xqvXWEtpsmgGg9jcrg')
+                secret_key = os.environ.get('BINANCE_TESTNET_SECRET_KEY',
+                    'rYzFY1Tz24ORMD0IHbZELmXxRrh0QvgjOp2vo5UAxRXResusubHJ3FVM37xmGBRe')
+                
+                self.exchange = ccxt.binance({
+                    'apiKey': api_key,
+                    'secret': secret_key,
+                    'sandbox': True,
+                    'enableRateLimit': True,
+                    'timeout': 10000,
+                })
+                
+                # Test connection
+                server_time = self.exchange.fetch_time()
+                logger.info(f"✅ Connected to Binance testnet at {datetime.fromtimestamp(server_time/1000)}")
+            except Exception as e:
+                logger.warning(f"⚠️ Could not connect to Binance: {e}")
+                self.exchange = None
             
             self._connected = True
-            logger.info("✅ Connected to ADAN system (File Mode)")
+            logger.info("✅ Connected to ADAN system (File + Real Market Data Mode)")
             return True
             
         except Exception as e:
@@ -174,8 +206,118 @@ class RealDataCollector(DataCollector):
             timestamp=datetime.fromisoformat(s_data.get('timestamp', datetime.now().isoformat()))
         )
 
+    def _fetch_real_market_data(self) -> Optional[dict]:
+        """Fetch REAL market data from Binance"""
+        if not self.exchange:
+            return None
+        
+        try:
+            # Fetch OHLCV data
+            ohlcv = self.exchange.fetch_ohlcv('BTC/USDT', '5m', limit=100)
+            df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+            df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
+            df = df.set_index('timestamp')
+            
+            latest = df.iloc[-1]
+            close = df['close']
+            high = df['high']
+            low = df['low']
+            
+            # Calculate indicators
+            from ..indicators.calculator import IndicatorCalculator
+            rsi = IndicatorCalculator.calculate_rsi(close)
+            atr = IndicatorCalculator.calculate_atr(high, low, close)
+            adx = IndicatorCalculator.calculate_adx(high, low, close)
+            
+            # Determine market regime
+            if rsi > 70:
+                regime = "Overbought"
+            elif rsi < 30:
+                regime = "Oversold"
+            elif adx > 40:
+                regime = "Strong Trend"
+            elif adx > 25:
+                regime = "Moderate Trend"
+            else:
+                regime = "Ranging"
+            
+            # Fetch order book for spread
+            order_book = self.exchange.fetch_order_book('BTC/USDT', limit=5)
+            best_bid = order_book['bids'][0][0] if order_book['bids'] else latest['close']
+            best_ask = order_book['asks'][0][0] if order_book['asks'] else latest['close']
+            
+            # Measure API latency
+            start_time = time.time()
+            self.exchange.fetch_time()
+            api_latency = (time.time() - start_time) * 1000
+            
+            return {
+                'price': float(latest['close']),
+                'volatility_atr': float(atr),
+                'rsi': float(rsi),
+                'adx': float(adx),
+                'trend_strength': "Strong" if adx > 40 else "Moderate" if adx > 25 else "Weak",
+                'market_regime': regime,
+                'volume_change': 0.0,
+                'timestamp': datetime.now(),
+                'api_latency_ms': api_latency,
+                'best_bid': float(best_bid),
+                'best_ask': float(best_ask),
+            }
+        except Exception as e:
+            logger.warning(f"⚠️ Could not fetch real market data: {e}")
+            return None
+    
     def get_market_context(self) -> Optional[MarketContext]:
-        """Get market context from shared file"""
+        """Get market context from ADAN monitor state file (priorité) ou Binance data"""
+        # 🔧 PRIORITÉ 1: Utiliser les données du monitor ADAN
+        try:
+            state_file = Path("/mnt/new_data/t10_training/phase2_results/paper_trading_state.json")
+            if state_file.exists():
+                with open(state_file, 'r') as f:
+                    adan_state = json.load(f)
+                
+                market_data = adan_state.get('market', {})
+                if market_data:
+                    logger.debug("✅ Utilisation des données du monitor ADAN")
+                    return MarketContext(
+                        price=market_data.get('price', 0.0),
+                        volatility_atr=market_data.get('volatility_atr', 0.0),
+                        rsi=market_data.get('rsi', 50),
+                        adx=market_data.get('adx', 25),
+                        trend_strength=market_data.get('trend_strength', 'Unknown'),
+                        market_regime=market_data.get('market_regime', 'Unknown'),
+                        volume_change=market_data.get('volume_change', 0.0),
+                        timestamp=datetime.now()
+                    )
+        except Exception as e:
+            logger.debug(f"⚠️ Impossible de lire le fichier ADAN: {e}")
+        
+        # 🔧 PRIORITÉ 2: Fallback sur données Binance temps réel
+        current_time = time.time()
+        if (self._cached_market_data is None or 
+            current_time - self.last_market_fetch > self.market_cache_duration):
+            
+            real_data = self._fetch_real_market_data()
+            if real_data:
+                self._cached_market_data = real_data
+                self.last_market_fetch = current_time
+        
+        if self._cached_market_data:
+            m_data = self._cached_market_data
+            logger.debug("⚠️ Utilisation des données Binance (fallback)")
+            return MarketContext(
+                price=m_data.get('price', 0.0),
+                volatility_atr=m_data.get('volatility_atr', 0.0),
+                rsi=m_data.get('rsi', 50),
+                adx=m_data.get('adx', 25),
+                trend_strength=m_data.get('trend_strength', 'Unknown'),
+                market_regime=m_data.get('market_regime', 'Unknown'),
+                volume_change=m_data.get('volume_change', 0.0),
+                timestamp=m_data.get('timestamp', datetime.now())
+            )
+        
+        # Fallback to file-based data
         state = self._load_state_from_file()
         if not state: return None
         
@@ -192,12 +334,18 @@ class RealDataCollector(DataCollector):
         )
 
     def get_system_health(self) -> dict:
-        """Get system health from shared file (returns dict for renderer)"""
+        """Get system health from shared file + REAL API metrics (returns dict for renderer)"""
         state = self._load_state_from_file()
+        
+        # Get real API latency if available
+        api_latency = 0.0
+        if self._cached_market_data:
+            api_latency = self._cached_market_data.get('api_latency_ms', 0.0)
+        
         if not state:
             return {
-                "api_status": True,
-                "api_latency_ms": 0,
+                "api_status": self.exchange is not None,
+                "api_latency_ms": api_latency,
                 "feed_status": True,
                 "feed_lag_ms": 0,
                 "model_status": True,
@@ -208,13 +356,13 @@ class RealDataCollector(DataCollector):
                 "memory_total_gb": 4.0,
                 "threads": 1,
                 "uptime_percent": 100.0,
-                "alerts": [],
+                "alerts": ["State file not available"] if not state else [],
             }
         
         sys_data = state.get('system', {})
         return {
-            "api_status": sys_data.get('api_status', 'OK') == 'OK',
-            "api_latency_ms": 50,
+            "api_status": (sys_data.get('api_status', 'OK') == 'OK') and (self.exchange is not None),
+            "api_latency_ms": api_latency,
             "feed_status": sys_data.get('feed_status', 'OK') == 'OK',
             "feed_lag_ms": 100,
             "model_status": sys_data.get('model_status', 'OK') == 'OK',

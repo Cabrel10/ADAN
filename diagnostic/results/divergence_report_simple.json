@@ -1,0 +1,13 @@
+{
+  "timestamp": "2025-12-25T00:15:21.662202",
+  "divergence_absolute": 64.19222259521484,
+  "divergence_relative": 0.727590024471283,
+  "status": "CRITICAL",
+  "features_shape": "(100, 16)",
+  "data_file": "/home/morningstar/Documents/trading/bot/data/processed/indicators/train/BTCUSDT/4h.parquet",
+  "interpretation": {
+    "current_method": "Sliding window normalization (paper_trading_monitor.py)",
+    "correct_method": "Running mean/std from training set (VecNormalize)",
+    "problem": "The model was trained with one normalization method but receives data normalized differently in production"
+  }
+}

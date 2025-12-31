@@ -1,0 +1,4 @@
+# file: /home/morningstar/Documents/trading/bot/src/adan_trading_bot/environment/stable_reward_calculator.py
+# hypothesis_version: 6.138.3
+
+[-1.0, 0.0, 1e-06, 0.05, 0.1, 0.2, 0.25, 0.3, 0.5, 0.6, 1.0, 100.0, 100, 'consistency_bonus', 'drawdown_penalty', 'frequency_penalty', 'invalid_sell_penalty', 'mean_return', 'peak_value', 'pnl_component', 'returns_count', 'sharpe_component', 'std_return', 'total_reward']

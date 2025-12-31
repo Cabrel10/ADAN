@@ -1,0 +1,4 @@
+# file: /home/morningstar/Documents/trading/bot/src/adan_trading_bot/agent/feature_extractors.py
+# hypothesis_version: 6.138.3
+
+[-1000000.0, -100000.0, -0.5, 0.0, 0.1, 0.2, 100000.0, 1000000.0, 128, 256, 512, '-inf', 'activation', 'avg', 'bias', 'channel_groups', 'conv_layers', 'dilation', 'dropout', 'fan_out', 'groups', 'image_features', 'indicators', 'indices', 'kernel_size', 'leaky_relu', 'max', 'out_channels', 'padding', 'pool_kernel', 'pool_stride', 'pooling', 'portfolio_state', 'price', 'relu', 'stride', 'vector_features', 'vector_features_dim', 'volume']

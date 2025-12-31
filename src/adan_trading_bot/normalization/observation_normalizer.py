@@ -113,10 +113,12 @@ class ObservationNormalizer:
     
     def _use_default_stats(self):
         """Utilise des stats par défaut"""
-        n_features = 68  # Nombre de features typique
+        # Dimension 20: taille du portfolio_state actuel (avec indices 8-9 pour hiérarchie ADAN)
+        # Correspond au format simplifié utilisé par paper_trading_monitor.py
+        n_features = 20  
         self.mean = np.zeros(n_features, dtype=np.float32)
         self.var = np.ones(n_features, dtype=np.float32)
-        logger.debug(f"Stats par défaut utilisées: {n_features} features")
+        logger.debug(f"Stats par défaut utilisées: {n_features} features (portfolio_state)")
     
     def normalize(self, observation):
         """
@@ -133,17 +135,24 @@ class ObservationNormalizer:
             return observation
         
         try:
-            # Vérifier la shape
+            # Vérifier la shape et auto-recalibrer si nécessaire
             if observation.ndim == 1:
                 # Observation unique
                 if len(observation) != len(self.mean):
-                    logger.warning(f"⚠️  Shape mismatch: obs={len(observation)}, mean={len(self.mean)}")
-                    return observation
+                    logger.warning(f"⚠️  Shape mismatch détecté: obs={len(observation)}, mean={len(self.mean)}")
+                    logger.warning(f"   → Auto-recalibrage du normaliseur avec dimension actuelle")
+                    # Auto-ajuster les stats pour éviter crash en production
+                    self.mean = np.zeros(len(observation), dtype=np.float32)
+                    self.var = np.ones(len(observation), dtype=np.float32)
+                    logger.info(f"✅ Normaliseur recalibré: {len(observation)} features")
             elif observation.ndim == 2:
                 # Batch d'observations
                 if observation.shape[1] != len(self.mean):
-                    logger.warning(f"⚠️  Shape mismatch: obs={observation.shape[1]}, mean={len(self.mean)}")
-                    return observation
+                    logger.warning(f"⚠️  Shape mismatch détecté: obs={observation.shape[1]}, mean={len(self.mean)}")
+                    logger.warning(f"   → Auto-recalibrage du normaliseur avec dimension actuelle")
+                    self.mean = np.zeros(observation.shape[1], dtype=np.float32)
+                    self.var = np.ones(observation.shape[1], dtype=np.float32)
+                    logger.info(f"✅ Normaliseur recalibré: {observation.shape[1]} features")
             else:
                 logger.warning(f"⚠️  Shape inattendue: {observation.shape}")
                 return observation

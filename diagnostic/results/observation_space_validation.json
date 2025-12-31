@@ -1,0 +1,65 @@
+{
+  "timestamp": "1766616487.585745",
+  "dummy_env": "Dict('1h': Box(-inf, inf, (10, 15), float32), '4h': Box(-inf, inf, (5, 15), float32), '5m': Box(-inf, inf, (20, 15), float32), 'portfolio_state': Box(-inf, inf, (20,), float32))",
+  "expected_structure": {
+    "5m": {
+      "shape": [
+        20,
+        15
+      ],
+      "dtype": "float32"
+    },
+    "1h": {
+      "shape": [
+        10,
+        15
+      ],
+      "dtype": "float32"
+    },
+    "4h": {
+      "shape": [
+        5,
+        15
+      ],
+      "dtype": "float32"
+    },
+    "portfolio_state": {
+      "shape": [
+        20
+      ],
+      "dtype": "float32"
+    }
+  },
+  "keys_match": true,
+  "details": {
+    "1h": {
+      "status": "MATCH",
+      "dummy_shape": "(10, 15)",
+      "expected_shape": "(10, 15)",
+      "dummy_dtype": "float32",
+      "expected_dtype": "float32"
+    },
+    "4h": {
+      "status": "MATCH",
+      "dummy_shape": "(5, 15)",
+      "expected_shape": "(5, 15)",
+      "dummy_dtype": "float32",
+      "expected_dtype": "float32"
+    },
+    "5m": {
+      "status": "MATCH",
+      "dummy_shape": "(20, 15)",
+      "expected_shape": "(20, 15)",
+      "dummy_dtype": "float32",
+      "expected_dtype": "float32"
+    },
+    "portfolio_state": {
+      "status": "MATCH",
+      "dummy_shape": "(20,)",
+      "expected_shape": "(20,)",
+      "dummy_dtype": "float32",
+      "expected_dtype": "float32"
+    }
+  },
+  "action_space": "MATCH"
+}

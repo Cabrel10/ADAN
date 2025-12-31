@@ -30,35 +30,38 @@ from adan_trading_bot.dashboard.mock_collector import MockDataCollector
 def parse_arguments():
     """Parse command line arguments"""
     parser = argparse.ArgumentParser(
-        description="ADAN BTC/USDT Terminal Dashboard",
+        description="ADAN BTC/USDT Terminal Dashboard - Real Market Data",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-    # Run with real data (default)
+    # Run with REAL data from Binance testnet (default)
     python scripts/adan_btc_dashboard.py
     
-    # Run with custom refresh rate
+    # Run with custom refresh rate (real data)
     python scripts/adan_btc_dashboard.py --refresh 30.0
     
-    # Run once for testing
+    # Run once for testing (real data)
     python scripts/adan_btc_dashboard.py --once
     
-    # Use mock data for testing
+    # Use mock data for testing (fallback only)
     python scripts/adan_btc_dashboard.py --mock
+    
+    # Run with mock data and custom refresh
+    python scripts/adan_btc_dashboard.py --mock --refresh 5.0
 """
     )
     
     parser.add_argument(
         "--mock",
         action="store_true",
-        help="Use mock data collector (for testing only)"
+        help="Use mock data collector (for testing only). Default is REAL data from Binance testnet."
     )
     
     parser.add_argument(
         "--refresh",
         type=float,
-        default=60.0,
-        help="Refresh rate in seconds (default: 60.0 for real-time market sync)"
+        default=30.0,
+        help="Refresh rate in seconds (default: 30.0 for real-time market data from Binance)"
     )
     
     parser.add_argument(
@@ -92,6 +95,10 @@ def main():
     args = parse_arguments()
     console = Console()
     
+    # Print header
+    console.print("\n[bold cyan]🔴 ADAN BTC/USDT Dashboard - Real Market Data[/bold cyan]")
+    console.print("[cyan]📡 Data Source: Binance Testnet (LIVE)[/cyan]\n")
+    
     # Validate arguments
     if args.refresh <= 0:
         console.print("[red]❌ Refresh rate must be positive[/]")
@@ -103,8 +110,13 @@ def main():
     # Create data collector
     try:
         data_collector = create_data_collector(args)
-        collector_type = "Mock Data" if args.mock else "Real Data (Live)"
-        console.print(f"[cyan]📊 Using {collector_type} Collector[/]")
+        if args.mock:
+            collector_type = "Mock Data (Testing)"
+            console.print(f"[yellow]⚠️  Using {collector_type} Collector[/]")
+        else:
+            collector_type = "Real Data (Live Binance)"
+            console.print(f"[green]✅ Using {collector_type} Collector[/]")
+            console.print(f"[cyan]   Refresh Rate: {args.refresh}s[/cyan]")
     except Exception as e:
         console.print(f"[red]❌ Failed to create data collector: {e}[/]")
         sys.exit(1)
@@ -125,10 +137,13 @@ def main():
         if args.once:
             console.print("[cyan]📊 Running dashboard once...[/]\n")
             dashboard.run_once()
+            console.print("\n[green]✅ Dashboard completed[/]")
         else:
+            console.print("[cyan]📊 Starting live dashboard...[/]")
+            console.print("[yellow]Press Ctrl+C to exit[/]\n")
             dashboard.run()
     except KeyboardInterrupt:
-        console.print("\n[yellow]👋 Dashboard interrupted by user[/]")
+        console.print("\n[yellow]👋 Dashboard stopped by user[/]")
     except Exception as e:
         console.print(f"\n[red]❌ Dashboard error: {e}[/]")
         sys.exit(1)

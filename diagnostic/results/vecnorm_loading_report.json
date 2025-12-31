@@ -1,0 +1,18 @@
+{
+    "w1": {
+        "path": "checkpoints/final/w1_vecnormalize.pkl",
+        "status": "NOT_FOUND"
+    },
+    "w2": {
+        "path": "checkpoints/final/w2_vecnormalize.pkl",
+        "status": "NOT_FOUND"
+    },
+    "w3": {
+        "path": "checkpoints/final/w3_vecnormalize.pkl",
+        "status": "NOT_FOUND"
+    },
+    "w4": {
+        "path": "checkpoints/final/w4_vecnormalize.pkl",
+        "status": "NOT_FOUND"
+    }
+}

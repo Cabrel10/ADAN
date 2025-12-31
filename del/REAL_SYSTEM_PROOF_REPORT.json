@@ -1,0 +1,49 @@
+{
+  "timestamp": "2025-12-16T18:50:43.766902",
+  "network_ping": [
+    {
+      "host": "Google DNS",
+      "latency_ms": 850.68,
+      "status": "\u2705 OK"
+    },
+    {
+      "host": "Cloudflare DNS",
+      "latency_ms": 1310.28,
+      "status": "\u2705 OK"
+    },
+    {
+      "host": "Binance API",
+      "latency_ms": 870.11,
+      "status": "\u2705 OK"
+    }
+  ],
+  "timeout_tests": [
+    {
+      "test": "Fast request (0s delay)",
+      "timeout": "5s",
+      "elapsed_ms": 2734.92,
+      "status": "\u2705 OK"
+    },
+    {
+      "test": "Slow request (10s delay, 2s timeout)",
+      "timeout": "2s",
+      "elapsed_ms": 4061.87,
+      "status": "\u2705 Timeout OK"
+    }
+  ],
+  "market_data": [
+    {
+      "symbol": "BTCUSDT",
+      "timestamp": null,
+      "status": "\u274c 'binance' object has no attribute 'get_klines'"
+    }
+  ],
+  "market_state": [
+    {
+      "indicator": "All",
+      "value": null,
+      "status": "\u274c name 'df' is not defined"
+    }
+  ],
+  "overall_status": "\u26a0\ufe0f  PARTIAL OPERATIONAL"
+}

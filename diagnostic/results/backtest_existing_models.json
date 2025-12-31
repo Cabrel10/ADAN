@@ -1,0 +1,44 @@
+{
+  "timestamp": "2025-12-25T09:33:34.208508",
+  "test": "backtest_existing_models",
+  "models_tested": 4,
+  "results": {
+    "w1": {
+      "iterations": 100,
+      "action_mean": 0.01664987927302718,
+      "action_std": 3.136432802110883e-05,
+      "action_min": 0.016588924452662468,
+      "action_max": 0.016690580174326897,
+      "valid": true
+    },
+    "w2": {
+      "iterations": 100,
+      "action_mean": -0.0008551599126076326,
+      "action_std": 1.7277036368212017e-06,
+      "action_min": -0.0008574779494665563,
+      "action_max": -0.0008521078270860016,
+      "valid": true
+    },
+    "w3": {
+      "iterations": 100,
+      "action_mean": 0.06107167761772871,
+      "action_std": 0.0010229980227265225,
+      "action_min": 0.05930529907345772,
+      "action_max": 0.0624692477285862,
+      "valid": true
+    },
+    "w4": {
+      "iterations": 100,
+      "action_mean": 0.04754890270531178,
+      "action_std": 4.250307550766195e-05,
+      "action_min": 0.04747308790683746,
+      "action_max": 0.047606125473976135,
+      "valid": true
+    }
+  },
+  "summary": {
+    "total_workers": 4,
+    "workers_tested": 4,
+    "all_valid": true
+  }
+}

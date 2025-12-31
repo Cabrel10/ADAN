@@ -1,0 +1,4 @@
+# file: /home/morningstar/Documents/trading/bot/src/adan_trading_bot/normalization/observation_normalizer.py
+# hypothesis_version: 6.138.3
+
+[1e-08, 2.0, 100, 10000, 'drift_detected', 'drifts', 'is_loaded', 'max_distance', 'mean', 'n_features_drifted', 'n_observations', 'r', 'rb', 'reason', 'threshold', 'total_drifts', 'var']

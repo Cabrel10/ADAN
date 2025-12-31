@@ -6,8 +6,10 @@ Gère l'initialisation des clients d'exchange et la connexion aux APIs.
 import ccxt
 import os
 import time
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, List
+
 from ..common.utils import get_logger
+from .websocket_manager import WebSocketManager
 
 logger = get_logger(__name__)
 
@@ -115,6 +117,42 @@ def get_exchange_client(config: Dict[str, Any]) -> ccxt.Exchange:
     except Exception as e:
         logger.error(f"Erreur lors de l'initialisation du client d'exchange CCXT pour '{exchange_id}': {e}")
         raise ExchangeConnectionError(f"Erreur d'initialisation CCXT pour {exchange_id}.") from e
+
+
+def get_websocket_manager(config: Dict[str, Any], subscriptions: List[str]) -> Optional[WebSocketManager]:
+    """
+    Crée et configure un WebSocketManager pour l'exchange spécifié.
+
+    Args:
+        config: Configuration complète du système.
+        subscriptions: Liste des streams auxquels s'abonner.
+
+    Returns:
+        Une instance de WebSocketManager, ou None en cas d'erreur.
+    """
+    exchange_config = config.get('exchange', {})
+    paper_config = config.get('paper_trading', {})
+    exchange_id = paper_config.get('exchange_id', exchange_config.get('default'))
+    use_testnet = paper_config.get('use_testnet', False)
+
+    if not exchange_id:
+        logger.error("exchange_id non trouvé dans la configuration.")
+        return None
+
+    env = 'testnet' if use_testnet else 'live'
+    ws_url = exchange_config.get(exchange_id, {}).get(env, {}).get('ws_url')
+
+    if not ws_url:
+        logger.error(f"URL WebSocket non trouvée pour {exchange_id} en mode {env}.")
+        return None
+
+    try:
+        ws_manager = WebSocketManager(ws_url=ws_url, subscriptions=subscriptions)
+        logger.info(f"WebSocketManager créé pour {exchange_id} ({env}) sur l'URL: {ws_url}")
+        return ws_manager
+    except Exception as e:
+        logger.error(f"Erreur lors de la création du WebSocketManager: {e}")
+        return None
 
 
 def test_exchange_connection(exchange: ccxt.Exchange) -> Dict[str, Any]:

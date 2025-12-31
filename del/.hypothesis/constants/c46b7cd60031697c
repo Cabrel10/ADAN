@@ -1,0 +1,4 @@
+# file: /home/morningstar/Documents/trading/bot/src/adan_trading_bot/environment/trade_frequency_controller.py
+# hypothesis_version: 6.138.3
+
+[-999, '1h', '4h', '5m', 'asset_cooldowns', 'daily_limit', 'daily_trade_count', 'last_trade_step']

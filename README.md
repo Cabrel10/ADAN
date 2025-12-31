@@ -1,206 +1,215 @@
-# 🤖 ADAN Trading Bot - Adaptive Dynamic Agent Network
+# ADAN – Adaptive Dynamic Agent Network
 
-**Status**: ✅ **PRODUCTION READY** | Training in progress with Optuna-optimized hyperparameters
+**Version** : 0.1.0 | **Statut** : Production-Ready (avec corrections critiques en cours)
 
-## 🎯 Overview
+## 1. Vue d'ensemble
 
-ADAN is an advanced multi-agent reinforcement learning trading system featuring:
-- **4 Independent Workers** (W1-W4) with specialized trading strategies
-- **Optuna Hyperparameter Optimization** (80 trials completed)
-- **Dynamic Behavior Engine (DBE)** for market regime adaptation
-- **Unified Metrics System** for real-time performance tracking
-- **Parallel Training** with 1M steps per worker (~4M total)
+ADAN est un système de trading algorithmique multi-agents basé sur **PPO (Proximal Policy Optimization)** de Stable-Baselines3. Le projet implémente :
 
-## 📊 Current Status
+- **4 workers spécialisés** (W1, W2, W3, W4) avec des profils de risque distincts
+- **Optimisation Optuna** pour les hyperparamètres (unique source valide)
+- **Gestion des paliers de capital** (Micro → Enterprise) définis dans `config/trading.yaml`
+- **Pipeline d'observation unifié** (entraînement ↔ inférence) avec normalisation VecNormalize
+- **Paper trading** avec suivi en temps réel et validation des décisions
 
-### ✅ Completed Milestones
-- [x] Optuna optimization: 80 trials (20 per worker)
-- [x] Environment correction: MultiAssetChunkedEnv consistency
-- [x] Bug fixes: PortfolioManager, add_trade() method
-- [x] Hyperparameter loading: config.yaml updated
-- [x] Training launch: 4 workers running in parallel
-- [x] System validation: Stable and error-free
-
-### 🏆 Best Hyperparameters (Optuna Results)
-
-| Worker | Type | Score | Sharpe | Drawdown | Win Rate | Trades |
-|--------|------|-------|--------|----------|----------|--------|
-| **W1** | Ultra-Conservative | 3.9291 | 3.4397 | 6.66% | 51.68% | 556 |
-| **W2** | Balanced | **3.9905** | **3.5168** | 16.12% | 51.63% | 258 |
-| **W3** | Aggressive | 2.2877 | 2.0431 | 21.63% | 45.34% | 256 |
-| **W4** | Hybrid | 3.6370 | 3.2432 | 18.55% | 50.14% | 430 |
-
-**Winner**: W2 (Balanced) with best Sharpe ratio of 3.5168
-
-### 📈 Training Progress
-- **Status**: 🟢 ACTIVE
-- **Processes**: 9 active (1 main + 4 workers + 4 auxiliary)
-- **Log Size**: 328MB
-- **Objective**: 1M steps per worker (~4M total)
-- **Disk Space**: 28GB available
-
-## 🏗️ Architecture
-
-### Workers
-- **W1 (Ultra-Conservative)**: Low risk, high Sharpe (3.44)
-- **W2 (Balanced)**: Optimal risk-reward, best overall (3.52)
-- **W3 (Aggressive)**: High risk, high returns
-- **W4 (Hybrid)**: Mixed strategy, good Sharpe (3.24)
-
-### Key Components
-- **MultiAssetChunkedEnv**: Training environment with chunked data
-- **Dynamic Behavior Engine**: Market regime detection and adaptation
-- **Portfolio Manager**: Risk management and position sizing
-- **Unified Metrics**: Real-time performance tracking
-- **Central Logger**: Synchronized logging across workers
-
-## 🚀 Quick Start
-
-### Prerequisites
-```bash
-python >= 3.11
-conda environment: trading_env
-```
-
-### Launch Training
-```bash
-# With Optuna-optimized parameters
-python scripts/train_parallel_agents.py --config config/config.yaml --log-level INFO --steps 1000000
-
-# Monitor training
-bash check_training.sh
-```
-
-### Run Optuna Optimization
-```bash
-# Optimize single worker (20 trials)
-python optuna_optimize_worker.py --worker W1 --trials 20
-
-# All workers
-for w in W1 W2 W3 W4; do
-  python optuna_optimize_worker.py --worker $w --trials 20
-done
-```
-
-## 📁 Project Structure
+## 2. Structure du projet
 
 ```
-.
-├── src/adan_trading_bot/
-│   ├── environment/          # Trading environments
-│   ├── model/               # RL models and ensemble
-│   ├── portfolio/           # Portfolio management
-│   ├── performance/         # Metrics and tracking
-│   └── common/              # Utilities and logging
-├── scripts/
-│   ├── train_parallel_agents.py    # Main training script
-│   └── terminal_dashboard.py       # Live monitoring
-├── config/
-│   └── config.yaml          # Configuration with Optuna params
-├── tests/                   # Test suite
-└── optuna_results/          # Optuna optimization results
+ADAN/
+├── config/                    # Configurations centrales
+│   ├── config.yaml           # Config principale (agent, features, training)
+│   ├── trading.yaml          # Paliers de capital et règles de trading
+│   ├── training.yaml         # Paramètres d'entraînement
+│   └── workers.yaml          # Configuration des workers
+├── configs/                   # Templates de configuration (swing, scalper, etc.)
+├── src/adan_trading_bot/      # Code source
+│   ├── environment/          # Environnements d'entraînement (MultiAssetChunkedEnv)
+│   ├── normalization/        # Pipeline de normalisation (VecNormalize)
+│   ├── observation/          # Construction des observations
+│   ├── agent/                # Logique des agents
+│   ├── training/             # Boucles d'entraînement
+│   ├── live_trading/         # Exécution live
+│   ├── portfolio/            # Gestion du portefeuille
+│   ├── risk_management/      # DBE (Dynamic Boundary Enforcement)
+│   └── [autres modules]      # Indicateurs, validation, monitoring, etc.
+├── scripts/                   # Scripts d'orchestration
+│   ├── train_parallel_agents.py      # Entraînement multi-workers
+│   ├── paper_trading_monitor.py      # Paper trading (à corriger)
+│   ├── optimize_hyperparams.py       # Optuna (unique source valide)
+│   └── [autres scripts]              # Monitoring, diagnostic, etc.
+├── tests/                     # Batteries de tests (pytest)
+├── models/                    # Modèles sauvegardés (8 workers)
+│   └── worker_*/
+│       ├── model.zip         # Modèle PPO
+│       └── vecnormalize.pkl  # Statistiques de normalisation (CRITIQUE)
+├── optuna_results/           # Études Optuna et résultats
+├── historical_data/          # Données historiques préchargées
+├── data/                     # Datasets additionnels
+├── results/                  # Résultats d'expériences
+├── api/                      # API REST (optionnel)
+├── bot_pres/                 # Packaging et présentation
+├── del/                      # Archives du nettoyage stratégique
+├── README.md                 # Ce fichier
+├── README_MODIFICATIONS.md   # Synthèse du nettoyage
+├── README_CORRECTIONS.md     # Correctifs critiques à implémenter
+├── requirements.txt          # Dépendances Python
+├── pyproject.toml            # Configuration du projet
+└── setup.py                  # Installation du package
 ```
 
-## 🔧 Configuration
+## 3. Concepts clés
 
-Hyperparameters are automatically loaded from Optuna results:
+### 3.1 Workers et profils de risque
+
+| Worker | Timeframe | Profil | Objectif |
+|--------|-----------|--------|----------|
+| **W1** | 4h | Ultra-stable | Sharpe > 0.5, DD < 15% |
+| **W2** | 1h | Modéré | Profit factor > 1.0, Sharpe > 0.3 |
+| **W3** | 5m | Agressif | Trades fréquents, DD < 25% |
+| **W4** | Multi | Optimisé Sharpe | Sharpe > 1.0, DD < 10% |
+
+### 3.2 Normalisation et covariate shift
+
+**Problème** : Si les observations ne sont pas normalisées de manière cohérente entre l'entraînement et l'inférence, le modèle reçoit des distributions différentes et ses performances se dégradent.
+
+**Solution** : 
+1. Pendant l'entraînement : `VecNormalize` accumule les statistiques (mean, var) et les sauvegarde dans `models/worker_*/vecnormalize.pkl`
+2. Pendant l'inférence : Charger ces statistiques via `VecNormalize.load(..., training=False)` et les appliquer aux observations
+
+**État actuel** : 
+- ✅ Entraînement : VecNormalize est utilisé correctement
+- ⚠️ Paper trading : Normalisation manuelle (fenêtre glissante) – **À corriger** (voir `README_CORRECTIONS.md`)
+
+### 3.3 Paliers de capital
+
+Définis dans `config/trading.yaml`, les paliers contrôlent la taille des positions et le risque :
+
 ```yaml
-workers:
-  w1:
-    risk_management:
-      stop_loss_pct: 0.0389
-      take_profit_pct: 0.0352
-  w2:
-    risk_management:
-      stop_loss_pct: 0.0470
-      take_profit_pct: 0.1748
-  # ... w3, w4
+capital_tiers:
+  - name: Micro Capital
+    min_capital: 11.0
+    max_capital: 30.0
+    max_position_size_pct: 90
+    max_drawdown_pct: 50.0
+    
+  - name: Small Capital
+    min_capital: 30.0
+    max_capital: 100.0
+    max_position_size_pct: 70
+    max_drawdown_pct: 4.0
+    
+  # ... (Medium, High, Enterprise)
 ```
 
-## 📊 Monitoring
+**Règle** : Ne jamais modifier ces paliers manuellement. Ils sont la source de vérité pour la gestion du risque.
 
-### Real-time Dashboard
+### 3.4 Optimisation Optuna
+
+**Unique source valide** : `scripts/optimize_hyperparams.py`
+
+- Optimise les hyperparamètres PPO pour chaque worker
+- Valide les trials avec des seuils stricts (Sharpe, DD, trades)
+- Sauvegarde les résultats dans `optuna_results/`
+- Les hyperparamètres validés sont injectés dans `config/config.yaml` avant l'entraînement
+
+**Règle** : Seuls les trials `COMPLETE` avec métriques valides doivent être utilisés.
+
+## 4. Workflows principaux
+
+### 4.1 Entraînement
+
 ```bash
-python scripts/terminal_dashboard.py
+# 1. Optimiser les hyperparamètres (Optuna)
+python scripts/optimize_hyperparams.py --worker W1 --trials 50
+
+# 2. Injecter les meilleurs hyperparamètres dans config.yaml
+# (fait automatiquement par optimize_hyperparams.py)
+
+# 3. Entraîner les workers
+python scripts/train_parallel_agents.py --config config/config.yaml --steps 1000000
+
+# Résultat : models/worker_*/model.zip + models/worker_*/vecnormalize.pkl
 ```
 
-### Training Status
+### 4.2 Paper trading
+
 ```bash
-bash check_training.sh
+# Lancer le monitor (à corriger pour utiliser VecNormalize)
+python scripts/paper_trading_monitor.py --config config/config.yaml
+
+# Résultat : Décisions d'achat/vente en temps réel (simulation)
 ```
 
-### Logs Location
+### 4.3 Validation
+
+```bash
+# Tests unitaires
+pytest tests/
+
+# Validation de cohérence (entraînement ↔ inférence)
+python scripts/validate_observation_spaces.py
 ```
-/mnt/new_data/adan_logs/training_final_*.log
+
+## 5. Points de vigilance
+
+### 5.1 Fichiers critiques à ne pas supprimer
+
+- `models/worker_*/model.zip` : Modèles PPO entraînés (8 workers)
+- `models/worker_*/vecnormalize.pkl` : Statistiques de normalisation (CRITIQUE pour l'inférence)
+- `optuna_results/` : Historique des optimisations
+- `config/trading.yaml` : Paliers de capital (source de vérité)
+
+### 5.2 Dépendances compilées localement
+
+- **ta-lib** : Compilée localement, ne pas supprimer
+- Vérifier que `requirements.txt` et `setup.py` sont à jour
+
+### 5.3 Règles de gouvernance
+
+1. **Optuna** : Seul `scripts/optimize_hyperparams.py` peut modifier les hyperparamètres
+2. **Paliers** : Ne jamais modifier `config/trading.yaml` manuellement
+3. **Normalisation** : Toujours utiliser `VecNormalize.load()` en inférence
+4. **Tests** : Valider tout changement avec `pytest tests/`
+
+## 6. Documentation complémentaire
+
+- **`README_MODIFICATIONS.md`** : Synthèse du nettoyage stratégique (fichiers archivés, structure finale)
+- **`README_CORRECTIONS.md`** : Correctifs critiques à implémenter (normalisation paper trading, pipeline unifié, validations out-of-sample)
+- **`del/README.md`** : Inventaire des artefacts archivés (216 fichiers, 782 MB)
+
+## 7. Commandes rapides
+
+```bash
+# Installation
+pip install -r requirements.txt
+python setup.py develop
+
+# Entraînement
+python scripts/train_parallel_agents.py --config config/config.yaml --steps 1000000
+
+# Paper trading
+python scripts/paper_trading_monitor.py --config config/config.yaml
+
+# Tests
+pytest tests/ -v
+
+# Monitoring
+tensorboard --logdir=logs/
 ```
 
-## 🎓 Key Features
+## 8. État du projet
 
-### Optuna Optimization
-- 80 trials across 4 workers
-- Automatic hyperparameter tuning
-- Best parameters saved to YAML
-- Reproducible results
-
-### Multi-Worker Training
-- Independent agents with separate portfolios
-- Parallel execution for efficiency
-- Unified metrics collection
-- No race conditions or conflicts
-
-### Dynamic Behavior Engine
-- Market regime detection (trending, sideways, volatile)
-- Adaptive risk parameters
-- ±10% adjustment capability
-- Confidence-based decisions
-
-### Risk Management
-- Position sizing based on capital tiers
-- Stop-loss and take-profit optimization
-- Drawdown protection
-- Frequency gating
-
-## 🔍 Recent Fixes
-
-### Environment Correction
-- Changed from RealisticTradingEnv to MultiAssetChunkedEnv
-- Ensures consistency between Optuna and training
-- Eliminates hyperparameter divergence
-
-### Bug Fixes
-- Added `close_all_positions()` to PortfolioManager
-- Fixed `add_trade()` bug in Optuna optimization
-- Removed duplicate method definitions
-
-## 📈 Next Steps
-
-1. **Complete Training**: Let 1M steps per worker finish (~4M total)
-2. **Analyze Results**: Compare worker performance
-3. **Create Ensemble**: Combine 4 models with optimal weights
-4. **Backtesting**: Validate on out-of-sample data
-5. **Live Trading**: Deploy to production
-
-## 📝 Documentation
-
-- `OPTUNA_TRAINING_LAUNCH_COMPLETE.md` - Training launch details
-- `ENVIRONMENT_CORRECTION_FINAL.md` - Environment fixes
-- `WORKER_PERFORMANCE_REPORT.md` - Worker metrics
-- `DBE_CORRECT_ROLE.md` - Dynamic Behavior Engine explanation
-
-## 🤝 Contributing
-
-This is an active research project. All changes should:
-1. Pass existing tests
-2. Include documentation
-3. Be committed with clear messages
-4. Maintain worker independence
-
-## 📄 License
-
-Proprietary - ADAN Trading System
+| Aspect | Statut | Notes |
+|--------|--------|-------|
+| **Entraînement** | ✅ Fonctionnel | VecNormalize utilisé correctement |
+| **Paper trading** | ⚠️ À corriger | Normalisation manuelle – voir `README_CORRECTIONS.md` |
+| **Optuna** | ✅ Fonctionnel | Validation stricte des trials |
+| **Paliers de capital** | ✅ Définis | `config/trading.yaml` |
+| **Tests** | ✅ Présents | Batteries complètes dans `tests/` |
+| **Documentation** | ✅ À jour | README, corrections, modifications |
 
 ---
 
-**Last Updated**: December 7, 2025
-**Training Status**: 🟢 ACTIVE
-**Next Milestone**: Complete 4M steps training cycle
+**Dernière mise à jour** : 24 décembre 2025  
+**Nettoyage stratégique** : Terminé (216 fichiers archivés dans `del/`)  
+**Prochaines étapes** : Implémenter les correctifs de `README_CORRECTIONS.md`

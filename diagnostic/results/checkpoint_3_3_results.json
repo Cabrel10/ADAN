@@ -1,0 +1,192 @@
+{
+  "timestamp": "2025-12-25T08:42:39.619469",
+  "checkpoint": "3.3",
+  "test": "decision_analysis",
+  "analysis": {
+    "worker_statistics": {
+      "w1": {
+        "num_decisions": 5,
+        "action_mean": 0.017141242772340776,
+        "action_std": 0.24669988778703417,
+        "action_min": -0.5351364612579346,
+        "action_max": 1.0,
+        "action_median": -0.011955730617046356,
+        "action_q25": -0.07685142010450363,
+        "action_q75": 0.07472074031829834
+      },
+      "w2": {
+        "num_decisions": 5,
+        "action_mean": 0.0007601538300514221,
+        "action_std": 0.3481619706462212,
+        "action_min": -1.0,
+        "action_max": 1.0,
+        "action_median": 0.0626341700553894,
+        "action_q25": -0.18679749965667725,
+        "action_q75": 0.19742876291275024
+      },
+      "w3": {
+        "num_decisions": 5,
+        "action_mean": 0.06013753563165665,
+        "action_std": 0.6920641669290059,
+        "action_min": -1.0,
+        "action_max": 1.0,
+        "action_median": 0.01944185048341751,
+        "action_q25": -0.494802325963974,
+        "action_q75": 0.5899301767349243
+      },
+      "w4": {
+        "num_decisions": 5,
+        "action_mean": 0.046427447283640504,
+        "action_std": 0.4257765327483848,
+        "action_min": -0.9595897197723389,
+        "action_max": 1.0,
+        "action_median": 0.04108433797955513,
+        "action_q25": -0.11854690313339233,
+        "action_q75": 0.31879565119743347
+      }
+    },
+    "coherence_checks": {
+      "w1": {
+        "not_frozen": {
+          "passed": true,
+          "value": 0.24669988778703417,
+          "threshold": 0.01,
+          "description": "\u00c9cart-type > 0.01 (pas fig\u00e9)"
+        },
+        "not_random": {
+          "passed": true,
+          "value": 0.24669988778703417,
+          "threshold": 0.5,
+          "description": "\u00c9cart-type < 0.5 (pas al\u00e9atoire)"
+        },
+        "valid_mean": {
+          "passed": true,
+          "value": 0.017141242772340776,
+          "threshold": "[-1, 1]",
+          "description": "Mean dans [-1, 1]"
+        },
+        "valid_range": {
+          "passed": true,
+          "value": "[-0.5351, 1.0000]",
+          "threshold": "[-1.1, 1.1]",
+          "description": "Range dans [-1.1, 1.1]"
+        }
+      },
+      "w2": {
+        "not_frozen": {
+          "passed": true,
+          "value": 0.3481619706462212,
+          "threshold": 0.01,
+          "description": "\u00c9cart-type > 0.01 (pas fig\u00e9)"
+        },
+        "not_random": {
+          "passed": true,
+          "value": 0.3481619706462212,
+          "threshold": 0.5,
+          "description": "\u00c9cart-type < 0.5 (pas al\u00e9atoire)"
+        },
+        "valid_mean": {
+          "passed": true,
+          "value": 0.0007601538300514221,
+          "threshold": "[-1, 1]",
+          "description": "Mean dans [-1, 1]"
+        },
+        "valid_range": {
+          "passed": true,
+          "value": "[-1.0000, 1.0000]",
+          "threshold": "[-1.1, 1.1]",
+          "description": "Range dans [-1.1, 1.1]"
+        }
+      },
+      "w3": {
+        "not_frozen": {
+          "passed": true,
+          "value": 0.6920641669290059,
+          "threshold": 0.01,
+          "description": "\u00c9cart-type > 0.01 (pas fig\u00e9)"
+        },
+        "not_random": {
+          "passed": false,
+          "value": 0.6920641669290059,
+          "threshold": 0.5,
+          "description": "\u00c9cart-type < 0.5 (pas al\u00e9atoire)"
+        },
+        "valid_mean": {
+          "passed": true,
+          "value": 0.06013753563165665,
+          "threshold": "[-1, 1]",
+          "description": "Mean dans [-1, 1]"
+        },
+        "valid_range": {
+          "passed": true,
+          "value": "[-1.0000, 1.0000]",
+          "threshold": "[-1.1, 1.1]",
+          "description": "Range dans [-1.1, 1.1]"
+        }
+      },
+      "w4": {
+        "not_frozen": {
+          "passed": true,
+          "value": 0.4257765327483848,
+          "threshold": 0.01,
+          "description": "\u00c9cart-type > 0.01 (pas fig\u00e9)"
+        },
+        "not_random": {
+          "passed": true,
+          "value": 0.4257765327483848,
+          "threshold": 0.5,
+          "description": "\u00c9cart-type < 0.5 (pas al\u00e9atoire)"
+        },
+        "valid_mean": {
+          "passed": true,
+          "value": 0.046427447283640504,
+          "threshold": "[-1, 1]",
+          "description": "Mean dans [-1, 1]"
+        },
+        "valid_range": {
+          "passed": true,
+          "value": "[-0.9596, 1.0000]",
+          "threshold": "[-1.1, 1.1]",
+          "description": "Range dans [-1.1, 1.1]"
+        }
+      }
+    },
+    "all_coherence_passed": false,
+    "worker_comparison": {
+      "means": {
+        "values": {
+          "w1": 0.017141242772340776,
+          "w2": 0.0007601538300514221,
+          "w3": 0.06013753563165665,
+          "w4": 0.046427447283640504
+        },
+        "std": 0.023417200853161808,
+        "range": 0.05937738180160523,
+        "interpretation": "\u00c9cart-type des moyennes entre workers"
+      },
+      "stds": {
+        "values": {
+          "w1": 0.24669988778703417,
+          "w2": 0.3481619706462212,
+          "w3": 0.6920641669290059,
+          "w4": 0.4257765327483848
+        },
+        "mean": 0.42817563952766147,
+        "range": 0.4453642791419717,
+        "interpretation": "Variabilit\u00e9 des \u00e9carts-types entre workers"
+      },
+      "coherence_between_workers": {
+        "passed": true,
+        "value": 0.023417200853161808,
+        "threshold": 0.2,
+        "description": "\u00c9cart-type des moyennes < 0.2"
+      }
+    }
+  },
+  "summary": {
+    "total_decisions_analyzed": 5,
+    "workers_analyzed": 4,
+    "all_coherence_checks_passed": false,
+    "workers_coherent": true
+  }
+}

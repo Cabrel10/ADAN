@@ -1,0 +1,138 @@
+{
+  "timestamp": "2025-12-25T08:45:25.538109",
+  "checkpoint": "3.4",
+  "test": "state_serialization",
+  "original_state": {
+    "timestamp": "2025-12-25T08:45:25.537329",
+    "phase": "Phase 3",
+    "checkpoint": "3.4",
+    "system_status": "OPERATIONAL",
+    "portfolio": {
+      "cash": 10000.0,
+      "positions": {
+        "BTC/USDT": {
+          "side": "BUY",
+          "entry_price": 42500.0,
+          "quantity": 0.1,
+          "current_price": 43000.0,
+          "pnl": 50.0,
+          "pnl_pct": 0.12
+        }
+      },
+      "total_value": 14300.0,
+      "total_pnl": 300.0,
+      "total_pnl_pct": 3.0
+    },
+    "models": {
+      "w1": {
+        "status": "LOADED",
+        "predictions": 100,
+        "avg_confidence": 0.85
+      },
+      "w2": {
+        "status": "LOADED",
+        "predictions": 100,
+        "avg_confidence": 0.82
+      },
+      "w3": {
+        "status": "LOADED",
+        "predictions": 100,
+        "avg_confidence": 0.88
+      },
+      "w4": {
+        "status": "LOADED",
+        "predictions": 100,
+        "avg_confidence": 0.8
+      }
+    },
+    "statistics": {
+      "total_iterations": 100,
+      "successful_iterations": 100,
+      "failed_iterations": 0,
+      "success_rate": 1.0,
+      "avg_execution_time": 0.247,
+      "total_execution_time": 24.75
+    },
+    "normalization": {
+      "vecnormalize_loaded": true,
+      "training_mode": false,
+      "num_workers": 4,
+      "divergence_check": "PASSED"
+    },
+    "validation": {
+      "observation_spaces_match": true,
+      "action_ranges_valid": true,
+      "data_integrity": "OK"
+    }
+  },
+  "deserialized_state": {
+    "timestamp": "2025-12-25T08:45:25.537329",
+    "phase": "Phase 3",
+    "checkpoint": "3.4",
+    "system_status": "OPERATIONAL",
+    "portfolio": {
+      "cash": 10000.0,
+      "positions": {
+        "BTC/USDT": {
+          "side": "BUY",
+          "entry_price": 42500.0,
+          "quantity": 0.1,
+          "current_price": 43000.0,
+          "pnl": 50.0,
+          "pnl_pct": 0.12
+        }
+      },
+      "total_value": 14300.0,
+      "total_pnl": 300.0,
+      "total_pnl_pct": 3.0
+    },
+    "models": {
+      "w1": {
+        "status": "LOADED",
+        "predictions": 100,
+        "avg_confidence": 0.85
+      },
+      "w2": {
+        "status": "LOADED",
+        "predictions": 100,
+        "avg_confidence": 0.82
+      },
+      "w3": {
+        "status": "LOADED",
+        "predictions": 100,
+        "avg_confidence": 0.88
+      },
+      "w4": {
+        "status": "LOADED",
+        "predictions": 100,
+        "avg_confidence": 0.8
+      }
+    },
+    "statistics": {
+      "total_iterations": 100,
+      "successful_iterations": 100,
+      "failed_iterations": 0,
+      "success_rate": 1.0,
+      "avg_execution_time": 0.247,
+      "total_execution_time": 24.75
+    },
+    "normalization": {
+      "vecnormalize_loaded": true,
+      "training_mode": false,
+      "num_workers": 4,
+      "divergence_check": "PASSED"
+    },
+    "validation": {
+      "observation_spaces_match": true,
+      "action_ranges_valid": true,
+      "data_integrity": "OK"
+    }
+  },
+  "summary": {
+    "serialization_successful": true,
+    "deserialization_successful": true,
+    "validation_passed": true,
+    "round_trip_successful": true,
+    "state_integrity": "OK"
+  }
+}

@@ -1,0 +1,4 @@
+# file: /home/morningstar/Documents/trading/bot/src/adan_trading_bot/environment/market_friction.py
+# hypothesis_version: 6.138.3
+
+[0.0, 1e-05, 0.0008, 0.0009, 0.001, 0.01, 0.1, 0.5, 0.75, 1.0, 1.5, 2.0, 5.0, 50.0, 200.0, 10000.0, 1000000000.0, 1000, 10000, 'VIP0', 'VIP1', 'VIP2', 'buy', 'maker', 'taker']
