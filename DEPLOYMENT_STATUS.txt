@@ -1,0 +1,268 @@
+================================================================================
+STATUT DE DÉPLOIEMENT - ADAN TRADING BOT
+================================================================================
+
+Date: 2 janvier 2026
+Statut Global: ✅ PHASE 1 COMPLÉTÉE - PRÊT POUR PHASE 2
+
+================================================================================
+PHASE 1: MIGRATION DES MODÈLES (✅ COMPLÉTÉE)
+================================================================================
+
+✅ Fichiers Copiés:
+   - models/w1/w1_model_final.zip (2.81 MB)
+   - models/w1/vecnormalize.pkl (28 KB)
+   - models/w2/w2_model_final.zip (2.81 MB)
+   - models/w2/vecnormalize.pkl (28 KB)
+   - models/w3/w3_model_final.zip (2.81 MB)
+   - models/w3/vecnormalize.pkl (28 KB)
+   - models/w4/w4_model_final.zip (2.81 MB)
+   - models/w4/vecnormalize.pkl (28 KB)
+   - models/ensemble/adan_ensemble_config.json (3 KB)
+
+✅ Vérifications:
+   - Archives ZIP valides
+   - Fichiers pickle valides
+   - Configuration ensemble chargée
+   - Poids équilibrés (≈25% chacun)
+   - Espace disque suffisant (7.15 GB)
+
+Source: /mnt/new_data/t10_training/checkpoints/final/
+
+================================================================================
+PHASE 2: SCRIPTS DE DÉPLOIEMENT (✅ CRÉÉS)
+================================================================================
+
+✅ Fichiers Créés:
+
+1. check_deployment.py
+   - Vérifie les fichiers critiques
+   - Valide les archives ZIP
+   - Valide les fichiers pickle
+   - Affiche les poids ADAN
+   - Vérifie l'espace disque
+
+2. start.sh
+   - Script de démarrage du bot
+   - Gère l'environnement virtuel
+   - Redirige les logs
+   - Affiche le PID du processus
+
+3. test_local_deployment.sh
+   - Test complet du déploiement local
+   - Vérifie l'intégrité des fichiers
+   - Valide les archives ZIP
+   - Valide les fichiers pickle
+
+4. test_without_external_disk.sh
+   - Simule un environnement sans /mnt/new_data
+   - Teste le bot en mode autonome
+   - Génère des logs de test
+   - Analyse les résultats
+
+5. .env.example
+   - Template de configuration
+   - Variables d'environnement
+   - Clés API
+   - Configuration Telegram
+
+6. DEPLOYMENT_GUIDE.md
+   - Guide complet de déploiement
+   - Instructions étape par étape
+   - Commandes systemd
+   - Troubleshooting
+
+7. MIGRATION_SUMMARY.md
+   - Résumé de la migration
+   - Fichiers copiés
+   - Prochaines étapes
+   - Checklist pré-déploiement
+
+8. SERVER_DEPLOYMENT_CHECKLIST.md
+   - Checklist complète
+   - Préparation serveur
+   - Installation
+   - Configuration
+   - Tests post-déploiement
+
+9. QUICK_REFERENCE.md
+   - Commandes essentielles
+   - Structure des fichiers
+   - Troubleshooting rapide
+   - Chronologie typique
+
+================================================================================
+PHASE 3: TEST LOCAL (⏳ À FAIRE)
+================================================================================
+
+Prochaines Actions:
+
+1. Tester le bot sans accès à /mnt/new_data
+   bash test_without_external_disk.sh
+
+2. Vérifier que tous les modèles se chargent
+   - w1 ✓
+   - w2 ✓
+   - w3 ✓
+   - w4 ✓
+   - ADAN ✓
+
+3. Vérifier que les trades s'exécutent
+   tail -f logs/bot.log
+
+4. Vérifier les performances
+   - CPU < 50%
+   - Mémoire < 500 MB
+   - Latence API < 1s
+
+================================================================================
+PHASE 4: DÉPLOIEMENT SERVEUR (⏳ À FAIRE)
+================================================================================
+
+Étapes:
+
+1. Créer l'archive de déploiement
+   tar -czf adan_bot_deploy.tar.gz --exclude='.git' --exclude='__pycache__' --exclude='*.pyc' --exclude='logs/*' --exclude='.env' .
+
+2. Transférer vers le serveur
+   scp adan_bot_deploy.tar.gz user@serveur:/home/user/
+
+3. Installer sur le serveur
+   - Extraire l'archive
+   - Créer l'environnement virtuel
+   - Installer les dépendances
+   - Configurer les variables d'environnement
+
+4. Configurer le service systemd
+   - Créer /etc/systemd/system/adan-bot.service
+   - Activer le redémarrage automatique
+   - Configurer les logs
+
+5. Démarrer le service
+   sudo systemctl start adan-bot
+
+================================================================================
+PHASE 5: MONITORING 24/7 (⏳ À FAIRE)
+================================================================================
+
+À Configurer:
+
+1. Alertes Telegram
+   - Erreurs critiques
+   - Redémarrages du bot
+   - Rapports de performance
+
+2. Monitoring
+   - Uptime du bot
+   - Latence API
+   - Nombre de trades
+   - Profit/Perte
+
+3. Logs
+   - Rotation des logs
+   - Archivage
+   - Centralisation
+
+================================================================================
+FICHIERS CRITIQUES
+================================================================================
+
+✅ Modèles (11.5 MB total):
+   - models/w1/w1_model_final.zip
+   - models/w2/w2_model_final.zip
+   - models/w3/w3_model_final.zip
+   - models/w4/w4_model_final.zip
+
+✅ Normalisateurs (112 KB total):
+   - models/w1/vecnormalize.pkl
+   - models/w2/vecnormalize.pkl
+   - models/w3/vecnormalize.pkl
+   - models/w4/vecnormalize.pkl
+
+✅ Configuration:
+   - models/ensemble/adan_ensemble_config.json
+   - config/config.yaml
+
+✅ Scripts:
+   - scripts/paper_trading_monitor.py
+   - check_deployment.py
+   - start.sh
+
+================================================================================
+POIDS ADAN ENSEMBLE
+================================================================================
+
+w1: 0.249 (24.9%)
+w2: 0.250 (25.0%)
+w3: 0.251 (25.1%)
+w4: 0.250 (25.0%)
+
+Interprétation: Les 4 workers ont des poids quasi-identiques, ce qui indique
+une performance équilibrée et une bonne fusion d'ensemble.
+
+================================================================================
+COMMANDES ESSENTIELLES
+================================================================================
+
+Vérification:
+  python3 check_deployment.py
+  bash test_local_deployment.sh
+  bash test_without_external_disk.sh
+
+Démarrage:
+  ./start.sh
+
+Logs:
+  tail -f logs/bot.log
+
+Monitoring:
+  ps aux | grep paper_trading_monitor
+  top -p $(pgrep -f paper_trading_monitor)
+
+================================================================================
+PROCHAINES ÉTAPES
+================================================================================
+
+1. ✅ FAIT: Migration des modèles
+2. ✅ FAIT: Création des scripts de déploiement
+3. ⏳ TODO: Test local sans /mnt/new_data
+4. ⏳ TODO: Déploiement serveur
+5. ⏳ TODO: Configuration monitoring
+6. ⏳ TODO: Rapports de performance
+
+================================================================================
+RESSOURCES
+================================================================================
+
+Documentation:
+  - DEPLOYMENT_GUIDE.md
+  - MIGRATION_SUMMARY.md
+  - SERVER_DEPLOYMENT_CHECKLIST.md
+  - QUICK_REFERENCE.md
+
+Scripts:
+  - check_deployment.py
+  - start.sh
+  - test_local_deployment.sh
+  - test_without_external_disk.sh
+
+Configuration:
+  - .env.example
+  - config/config.yaml
+  - models/ensemble/adan_ensemble_config.json
+
+================================================================================
+CONTACT ET SUPPORT
+================================================================================
+
+En cas de problème:
+1. Consulter les logs: tail -f logs/bot.log
+2. Exécuter la vérification: python3 check_deployment.py
+3. Consulter la documentation: DEPLOYMENT_GUIDE.md
+4. Vérifier la connectivité réseau et API
+
+================================================================================
+Dernière mise à jour: 2 janvier 2026
+Version: 1.0
+Statut: ✅ PHASE 1 COMPLÉTÉE - PRÊT POUR PHASE 2
+================================================================================

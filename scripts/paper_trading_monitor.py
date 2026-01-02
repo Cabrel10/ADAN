@@ -186,10 +186,21 @@ class RealPaperTradingMonitor:
         # User requested single asset (BTC) to match training context
         self.pairs = ['BTC/USDT']
         
-        # 🔧 NORMALISATION - Initialiser le normaliseur et détecteur de dérive
-        self.normalizer = ObservationNormalizer()
+        # 🔧 NORMALISATION - Charger le normalisateur portfolio d'urgence
+        portfolio_norm_path = Path("models/portfolio_normalizer.json")
+        if portfolio_norm_path.exists():
+            try:
+                import json
+                with open(portfolio_norm_path, 'r') as f:
+                    norm_data = json.load(f)
+                self.normalizer = norm_data
+                logger.info("✅ Normalisateur portfolio chargé depuis models/portfolio_normalizer.json")
+            except Exception as e:
+                logger.warning(f"⚠️ Erreur chargement normalisateur: {e}")
+                self.normalizer = None
+        else:
+            logger.warning("⚠️ Normalisateur portfolio non trouvé - Utilisation directe des données")
         self.drift_detector = DriftDetector(window_size=100, threshold=2.0)
-        logger.info(f"✅ Normaliseur initialisé: {self.normalizer.is_loaded}")
         logger.info(f"✅ Détecteur de dérive initialisé")
         
         # 🔧 DATA INTEGRITY - Initialize new indicator calculator, validator, and observation builder
@@ -246,72 +257,48 @@ class RealPaperTradingMonitor:
 
     def initialize_worker_environments(self):
         """
-        Charge les environnements VecNormalize pour chaque worker.
+        Charge STRICTEMENT les environnements VecNormalize depuis models/ local.
         
-        CORRECTION CRITIQUE : Cette méthode résout le problème de covariate shift
-        identifié dans le diagnostic (divergence de 72.76%).
-        
-        En chargeant les statistiques de normalisation (mean, var) utilisées durant
-        l'entraînement, on garantit que les observations en production sont normalisées
-        EXACTEMENT de la même manière qu'à l'entraînement.
-        
-        Date de correction : 2024-12-25
-        Diagnostic reference : diagnostic/results/divergence_report_simple.json
+        ISOLATION CRITIQUE: Pas de fallback vers /mnt/new_data ou autre chemin.
+        Le dossier models/ est 100% autonome et déplaçable.
         """
         from stable_baselines3.common.vec_env import DummyVecEnv, VecNormalize
         from src.adan_trading_bot.environment import TradingEnvDummy
         
-        logger.info("🔧 Initialisation des environnements de normalisation...")
+        logger.info("🔧 Initialisation STRICTE des environnements locaux (models/)...")
+        
+        base_path = Path("models")  # Chemin fixe et autonome
         
         for worker_id in self.worker_ids:
             try:
-                # Créer un environnement dummy pour le wrapper VecNormalize
+                # Chemin strict - pas de fallback
+                vecnorm_path = base_path / worker_id / "vecnormalize.pkl"
+                
+                if not vecnorm_path.exists():
+                    logger.error(f"❌ CRITIQUE: Normalisateur manquant pour {worker_id}")
+                    logger.error(f"   Attendu: {vecnorm_path.resolve()}")
+                    sys.exit(1)  # Arrêt immédiat - pas de demi-mesure
+                
+                logger.info(f"   Chargement {worker_id} : {vecnorm_path}")
+                
+                # Créer un environnement dummy
                 dummy_env = DummyVecEnv([lambda: TradingEnvDummy()])
                 
-                # Déterminer le chemin du fichier vecnormalize.pkl
-                # OPTION 1 : Répertoire principal
-                vecnorm_path_main = Path(f"models/{worker_id}/vecnormalize.pkl")
-                
-                # OPTION 2 : Répertoire secondaire (si utilisé)
-                vecnorm_path_secondary = Path(f"/mnt/new_data/t10_training/checkpoints/final/{worker_id}_vecnormalize.pkl")
-                
-                # Choisir le chemin existant
-                if vecnorm_path_main.exists():
-                    vecnorm_path = vecnorm_path_main
-                elif vecnorm_path_secondary.exists():
-                    vecnorm_path = vecnorm_path_secondary
-                else:
-                    raise FileNotFoundError(
-                        f"Fichier vecnormalize.pkl introuvable pour {worker_id}. "
-                        f"Cherché dans : {vecnorm_path_main} et {vecnorm_path_secondary}"
-                    )
-                
-                logger.info(f"   Chargement depuis : {vecnorm_path}")
-                
-                # Charger les statistiques de normalisation
+                # Charger les statistiques de normalisation figées de l'entraînement
                 env = VecNormalize.load(str(vecnorm_path), dummy_env)
                 
-                # CRITIQUE : Désactiver le mode training
-                # En mode training, les statistiques continuent d'être mises à jour
-                # En mode inférence, on veut utiliser les statistiques FIGÉES de l'entraînement
+                # IMPORTANT: Figer l'apprentissage du normalisateur
                 env.training = False
-                env.norm_reward = False  # Pas besoin de normaliser les rewards en inférence
+                env.norm_reward = False
                 
-                # Stocker l'environnement
                 self.worker_envs[worker_id] = env
+                logger.info(f"   ✅ {worker_id} synchronisé avec l'entraînement.")
                 
-                logger.info(f"   ✅ VecNormalize chargé pour {worker_id}")
-                logger.info(f"      training={env.training}, norm_reward={env.norm_reward}")
-                
-            except FileNotFoundError as e:
-                logger.error(f"   ❌ Fichier vecnormalize.pkl manquant pour {worker_id}: {e}")
-                raise
             except Exception as e:
-                logger.error(f"   ❌ Erreur chargement VecNormalize pour {worker_id}: {e}")
-                logger.error(f"      Type: {type(e).__name__}")
-                raise
+                logger.error(f"❌ ÉCHEC CRITIQUE {worker_id}: {e}")
+                sys.exit(1)  # Arrêt immédiat
         
-        logger.info(f"✅ {len(self.worker_envs)} environnements de normalisation chargés")
+        logger.info(f"✅ {len(self.worker_envs)} environnements chargés depuis models/ local.")
 
     def _get_current_tier(self):
         """Retourne le tier de capital actuel basé sur le balance"""
@@ -640,36 +627,45 @@ class RealPaperTradingMonitor:
             )
             
             # 3. Load Workers - Force load all 4 workers (w1, w2, w3, w4)
-            # 🔧 PORTABILITY FIX - Use dynamic base_dir
-            checkpoint_dir = self.base_dir / "checkpoints"
+            # ISOLATION CRITIQUE: Charger STRICTEMENT depuis models/ local
+            logger.info("🧠 Chargement des Experts PPO depuis models/ local...")
             
-            # Fallback for local testing if checkpoints don't exist in structure
-            if not checkpoint_dir.exists():
-                checkpoint_dir = Path("checkpoints")
-                
-            logger.info(f"📂 Loading models from: {checkpoint_dir}")
-            worker_ids = ['w1', 'w2', 'w3', 'w4']  # Force all 4 workers
+            base_path = Path("models")  # Chemin fixe et autonome
             
-            for wid in worker_ids:
-                # Find latest checkpoint
-                w_dir = checkpoint_dir / wid
-                if not w_dir.exists():
-                    logger.error(f"❌ Worker directory not found: {w_dir}")
-                    continue
+            for wid in self.worker_ids:
+                try:
+                    # Priorité au nom standard
+                    model_path = base_path / wid / f"{wid}_model_final.zip"
                     
-                checkpoints = list(w_dir.glob(f"{wid}_model_*.zip"))
-                if not checkpoints:
-                    logger.error(f"❌ No checkpoint for {wid} in {w_dir}")
-                    continue
-                latest = max(checkpoints, key=lambda p: p.stat().st_mtime)
+                    # Fallback minimal (mais local)
+                    if not model_path.exists():
+                        model_path = base_path / wid / "model.zip"
+                    
+                    if not model_path.exists():
+                        logger.error(f"❌ Modèle manquant pour {wid} dans {base_path / wid}")
+                        return False
+                    
+                    logger.info(f"   Chargement {wid} depuis {model_path}")
+                    self.workers[wid] = PPO.load(str(model_path))
+                    logger.info(f"   ✅ {wid} chargé avec succès")
                 
-                logger.info(f"📦 Loading {wid} from {latest.name}")
-                self.workers[wid] = PPO.load(latest)
-                logger.info(f"   ✅ {wid} loaded successfully")
+                except Exception as e:
+                    logger.error(f"❌ Erreur chargement {wid}: {e}")
+                    return False
             
-            if len(self.workers) != 4:
-                logger.error(f"❌ Expected 4 workers, got {len(self.workers)}")
-                return False
+            # Chargement config ADAN (optionnel mais isolé)
+            ensemble_path = base_path / "ensemble" / "adan_ensemble_config.json"
+            if ensemble_path.exists():
+                try:
+                    with open(ensemble_path) as f:
+                        config = json.load(f)
+                    self.worker_weights = config.get('weights', self.worker_weights)
+                    logger.info(f"⚖️  Poids ADAN chargés depuis local : {self.worker_weights}")
+                except Exception as e:
+                    logger.warning(f"⚠️  Erreur lecture config ensemble: {e}")
+                    logger.warning(f"   Utilisation des poids équilibrés par défaut")
+            else:
+                logger.warning("⚠️  Config ensemble absente – poids équilibrés par défaut.")
                 
             logger.info(f"✅ Pipeline Ready: {len(self.workers)} workers loaded (w1, w2, w3, w4)")
             return True
@@ -681,7 +677,8 @@ class RealPaperTradingMonitor:
     def fetch_data(self):
         """
         Fetch 5m OHLCV data for all pairs and resample to higher timeframes.
-        🔧 SOLUTION DONNÉES INSUFFISANTES - Utilise les données préchargées en cas d'échec
+        🚀 COLD START AGRESSIF + MULTI-PASS - Télécharge 2000 bougies 5m (2x1000)
+        pour garantir ~40 bougies 4h (> 28 requis) et des indicateurs vivants.
         """
         data = {}
         base_tf = '5m'
@@ -690,19 +687,42 @@ class RealPaperTradingMonitor:
         for pair in self.pairs:
             data[pair] = {}
             try:
-                # 1. Fetch base timeframe data (5m)
-                # Augmenté 1000→1500: 1500×5min = 125h → ~31 bougies 4h (>28 requis)
-                limit = 1500  # Garantit assez de données pour resampling 4h
-                ohlcv = self.exchange.fetch_ohlcv(pair, timeframe=base_tf, limit=limit)
-                df_5m = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+                # 🚀 MULTI-PASS: Télécharger 2000 bougies 5m (2 requêtes de 1000)
+                logger.info(f"🚀 Téléchargement multi-pass {pair} 5m: 2000 bougies (2x1000)...")
+                
+                # 1ère requête: 1000 bougies récentes
+                ohlcv1 = self.exchange.fetch_ohlcv(pair, timeframe=base_tf, limit=1000)
+                
+                if not ohlcv1:
+                    logger.error(f"❌ Impossible de télécharger {pair} {base_tf}")
+                    return None
+                
+                # 2ème requête: 1000 bougies précédentes (si la 1ère a 1000 bougies)
+                ohlcv_all = ohlcv1
+                if len(ohlcv1) == 1000:
+                    # Calculer le timestamp de la première bougie
+                    since = ohlcv1[0][0] - (1000 * 5 * 60 * 1000)  # 1000 bougies en arrière
+                    ohlcv2 = self.exchange.fetch_ohlcv(pair, timeframe=base_tf, since=since, limit=1000)
+                    
+                    if ohlcv2 and len(ohlcv2) > 0:
+                        # Concaténer et éliminer les doublons
+                        ohlcv_all = ohlcv2 + ohlcv1
+                        logger.info(f"   ✅ 2ème pass: {len(ohlcv2)} bougies supplémentaires")
+                
+                df_5m = pd.DataFrame(ohlcv_all, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
                 df_5m['timestamp'] = pd.to_datetime(df_5m['timestamp'], unit='ms')
                 df_5m.set_index('timestamp', inplace=True)
                 
-                # 🔧 VÉRIFICATION DONNÉES SUFFISANTES
-                if len(df_5m) < 28:
-                    logger.warning(f"⚠️  Données insuffisantes pour {pair} {base_tf}: {len(df_5m)} < 28")
-                    logger.info("🔄 Utilisation des données préchargées...")
-                    return self.use_preloaded_data()
+                # Éliminer les doublons
+                df_5m = df_5m[~df_5m.index.duplicated(keep='first')]
+                df_5m = df_5m.sort_index()
+                
+                logger.info(f"   ✅ {len(df_5m)} bougies 5m téléchargées (après déduplication)")
+                
+                # Vérification critique
+                if len(df_5m) < 100:
+                    logger.error(f"❌ Données insuffisantes: {len(df_5m)} < 100 (impossible de calculer indicateurs)")
+                    return None
                 
                 # Store the base timeframe data
                 data[pair][base_tf] = df_5m.reset_index()
@@ -719,61 +739,47 @@ class RealPaperTradingMonitor:
                 for tf in target_tfs:
                     df_resampled = df_5m.resample(tf).agg(agg_rules).dropna()
                     
-                    # 🔧 VÉRIFICATION DONNÉES SUFFISANTES APRÈS RESAMPLING
-                    if len(df_resampled) < 28:
-                        logger.warning(f"⚠️  Données insuffisantes après resampling {pair} {tf}: {len(df_resampled)} < 28")
-                        
-                        # 🔄 WARMUP MODE: Compléter avec historique au lieu de tout abandonner
-                        if self.warmup_mode:
-                            logger.info("🔄 Warmup activé: complétion avec données historiques...")
-                            df_resampled = self.complete_with_historical(df_resampled, tf)
-                            
-                            # Vérifier si complétion a réussi
-                            if len(df_resampled) < 28:
-                                # Impossible de compléter, fallback traditionnel
-                                logger.warning("   ⚠️  Impossible de compléter même avec warmup")
-                                logger.info("🔄 Utilisation des données préchargées...")
-                                return self.use_preloaded_data()
-                        else:
-                            # Warmup désactivé, fallback traditionnel
-                            logger.info("🔄 Utilisation des données préchargées...")
-                            return self.use_preloaded_data()
+                    logger.info(f"   ✅ {len(df_resampled)} bougies {tf} après resampling")
+                    
+                    # Vérification critique - Accepter 20+ bougies (suffisant pour indicateurs)
+                    min_required = 20
+                    if len(df_resampled) < min_required:
+                        logger.error(f"❌ Resampling {pair} {tf}: {len(df_resampled)} < {min_required} (données insuffisantes)")
+                        logger.error("   → Impossible de continuer. Vérifiez la connexion Binance.")
+                        return None
                     
                     data[pair][tf] = df_resampled.reset_index()
-                    logger.debug(f"Resampled {pair} from {base_tf} to {tf}, resulting in {len(df_resampled)} candles.")
 
+                # 3. Calculate indicators for all timeframes
                 for tf in self.timeframes:
                     df_tf = data[pair][tf]
-                    # 3. Calculate indicators directly using the corrected IndicatorCalculator
                     try:
                         indicators = self.indicator_calculator.calculate_all(df_tf)
+                        
                         # Merge indicators into the dataframe
                         for key, value in indicators.items():
-                            # Assign the single scalar value to the last row
                             df_tf.loc[df_tf.index[-1], key] = value
                         
-                        # Log calculated indicators for verification
-                        if tf == '1h':
-                            logger.debug(f"📊 Indicators {pair} {tf}: RSI={indicators.get('rsi', 0):.2f}, ADX={indicators.get('adx', 0):.2f}, ATR={indicators.get('atr', 0):.2f}")
+                        # 🔍 VÉRIFICATION INDICATEURS VIVANTS
+                        rsi = indicators.get('rsi', 0)
+                        adx = indicators.get('adx', 0)
+                        
+                        if rsi == 50.0 and adx == 25.0:
+                            logger.warning(f"⚠️  INDICATEURS FIGÉS {pair} {tf}: RSI={rsi:.2f}, ADX={adx:.2f}")
+                            logger.warning("   → Les données ne sont pas calculées correctement")
+                        else:
+                            logger.info(f"📊 {pair} {tf}: RSI={rsi:.2f}, ADX={adx:.2f}, ATR={indicators.get('atr', 0):.2f}")
+                        
                     except Exception as e:
-                        logger.warning(f"⚠️  Indicator calculation failed for {pair} {tf} in fetch_data: {e}")
-                        # 🔧 EN CAS D'ÉCHEC CALCUL INDICATEURS - Utiliser données préchargées
-                        logger.info("🔄 Utilisation des données préchargées suite à échec calcul indicateurs...")
-                        return self.use_preloaded_data()
+                        logger.error(f"❌ Calcul indicateurs {pair} {tf}: {e}")
+                        return None
                     
                     data[pair][tf] = df_tf
 
             except Exception as e:
-                logger.error(f"Error fetching or resampling data for {pair}: {e}")
-                # 🔧 EN CAS D'ÉCHEC TOTAL - Utiliser données préchargées
-                logger.info("🔄 Utilisation des données préchargées suite à échec fetch...")
-                return self.use_preloaded_data()
-        
-        # 🔄 WARMUP: Vérifier si tous les timeframes sont stabilisés
-        if self.warmup_mode and all(self.warmup_timeframes.values()):
-            logger.info("✅ Warmup terminé: tous les timeframes ont ≥28 bougies temps réel")
-            logger.info(f"   - 5m: {self.warmup_timeframes['5m']}, 1h: {self.warmup_timeframes['1h']}, 4h: {self.warmup_timeframes['4h']}")
-            self.warmup_mode = False
+                logger.error(f"❌ Erreur fetch/resample {pair}: {e}")
+                traceback.print_exc()
+                return None
         
         return data
 
@@ -1166,7 +1172,7 @@ class RealPaperTradingMonitor:
         normalized_observation = {}
         for key, value in observation.items():
             if isinstance(value, np.ndarray):
-                if key == 'portfolio_state':
+                if key == 'portfolio_state' and self.normalizer:
                     # Normaliser portfolio_state (dimension 20) via ObservationNormalizer
                     normalized_observation[key] = self.normalizer.normalize(value)
                 else:
@@ -1179,14 +1185,15 @@ class RealPaperTradingMonitor:
         if 'portfolio_state' in observation:
             self.drift_detector.add_observation(observation['portfolio_state'])
         
-        # Vérifier la dérive
-        drift_result = self.drift_detector.check_drift(
-            self.normalizer.mean,
-            self.normalizer.var
-        )
-        
-        if drift_result['drift_detected']:
-            logger.warning(f"⚠️  Dérive détectée: {drift_result}")
+        # Vérifier la dérive (si normalisateur disponible)
+        if self.normalizer:
+            drift_result = self.drift_detector.check_drift(
+                self.normalizer.mean,
+                self.normalizer.var
+            )
+            
+            if drift_result['drift_detected']:
+                logger.warning(f"⚠️  Dérive détectée: {drift_result}")
         
         worker_votes = {}  # Maps worker_id -> confidence score
         worker_actions = {}  # Maps worker_id -> action (0, 1, 2)
@@ -2165,7 +2172,7 @@ class RealPaperTradingMonitor:
                     "database_status": "OK",
                     "uptime_seconds": 0,
                     "normalization": {
-                        "active": self.normalizer.is_loaded,
+                        "active": isinstance(self.normalizer, dict) and self.normalizer.get('dimensions') == 20,
                         "drift_detected": self.drift_detector.get_drift_summary()['total_drifts'] > 0 if hasattr(self, 'drift_detector') else False
                     }
                 }

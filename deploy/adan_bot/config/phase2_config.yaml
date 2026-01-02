@@ -1,0 +1,221 @@
+# Phase 2 Configuration: Evaluation, Backtesting & Paper Trading
+
+# Training Completion Settings
+training:
+  target_steps: 350000
+  checkpoint_dir: /mnt/new_data/t10_training/checkpoints
+  check_interval: 300  # seconds
+  workers: [w1, w2, w3, w4]
+
+# Evaluation Settings
+evaluation:
+  enabled: true
+  per_worker: true
+  metrics:
+    - win_rate
+    - profit_factor
+    - sharpe_ratio
+    - max_drawdown
+    - risk_adjusted_returns
+    - capital_tier_progression
+    - dbe_effectiveness
+
+# Ensemble Model Settings
+ensemble:
+  enabled: true
+  name: ADAN_Final
+  voting_strategy: majority
+  confidence_weighting: true
+  hyperparameter_merge:
+    learning_rate: average
+    n_steps: consensus
+    dbe_params: merged
+
+# Backtesting Settings
+backtesting:
+  enabled: true
+  model: ADAN_Final
+  data_source: historical
+  date_range:
+    start: 2024-06-01
+    end: 2025-12-12
+  trading_pairs:
+    - BTCUSDT
+    - ETHUSDT
+    - BNBUSDT
+  metrics:
+    - total_return
+    - sharpe_ratio
+    - max_drawdown
+    - win_rate
+    - profit_factor
+    - calmar_ratio
+    - sortino_ratio
+
+# Paper Trading Settings
+paper_trading:
+  enabled: true
+  exchange: binance
+  testnet: true
+  model: ADAN_Final
+  
+  # Trading Configuration
+  trading:
+    pairs: [BTCUSDT, ETHUSDT, BNBUSDT]
+    position_size: 0.1
+    risk_per_trade: 0.02
+    max_concurrent_positions: 3
+    
+  # Risk Management
+  risk_management:
+    max_drawdown: 0.20
+    stop_loss_pct: 0.02
+    take_profit_pct: 0.03
+    trailing_stop: true
+    
+  # Execution
+  execution:
+    order_type: market
+    time_in_force: GTC
+    update_frequency: 5m  # 5 minutes
+
+# Monitoring Settings
+monitoring:
+  enabled: true
+  
+  # Metrics Collection
+  metrics:
+    interval: 60  # seconds
+    retention: 30  # days
+    
+  # Reporting
+  reporting:
+    daily: true
+    weekly: true
+    monthly: true
+    
+  # Alerts
+  alerts:
+    enabled: true
+    channels:
+      - log
+      - email
+      - dashboard
+    thresholds:
+      max_drawdown: 0.20
+      min_win_rate: 0.50
+      error_rate: 0.05
+      api_latency: 1000  # ms
+
+# Output Settings
+output:
+  base_dir: /mnt/new_data/t10_training/phase2_results
+  
+  # Evaluation Output
+  evaluation:
+    format: json
+    include_charts: true
+    
+  # Backtest Output
+  backtest:
+    format: json
+    include_equity_curve: true
+    include_drawdown_chart: true
+    
+  # Paper Trading Output
+  paper_trading:
+    trade_log: csv
+    position_history: csv
+    daily_pnl: csv
+    
+  # Monitoring Output
+  monitoring:
+    dashboard: html
+    reports: json
+    alerts: log
+
+# Automation Settings
+automation:
+  enabled: true
+  
+  # Auto-start on training completion
+  auto_start: true
+  
+  # Auto-recovery
+  auto_recovery:
+    enabled: true
+    max_retries: 3
+    retry_delay: 300  # seconds
+    
+  # Auto-shutdown
+  auto_shutdown:
+    enabled: false
+    condition: max_drawdown_exceeded
+    
+  # Scheduled Tasks
+  scheduled_tasks:
+    - name: daily_report
+      schedule: "0 0 * * *"  # Daily at midnight
+      action: generate_report
+    - name: weekly_analysis
+      schedule: "0 0 * * 0"  # Weekly on Sunday
+      action: analyze_performance
+    - name: checkpoint_backup
+      schedule: "0 */6 * * *"  # Every 6 hours
+      action: backup_checkpoints
+
+# Logging Settings
+logging:
+  level: INFO
+  format: "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+  files:
+    orchestrator: phase2_orchestrator.log
+    monitor: paper_trading_monitor.log
+    backtest: backtest.log
+    trades: trades.log
+
+# API Settings
+api:
+  binance:
+    testnet: true
+    base_url: https://testnet.binance.vision
+    timeout: 30
+    rate_limit: 1200  # requests per minute
+    
+# Database Settings
+database:
+  type: sqlite
+  path: /mnt/new_data/t10_training/phase2_results/phase2.db
+  
+  # Tables
+  tables:
+    - trades
+    - positions
+    - metrics
+    - alerts
+    - reports
+
+# Notification Settings
+notifications:
+  enabled: true
+  
+  email:
+    enabled: false
+    recipients: []
+    
+  slack:
+    enabled: false
+    webhook_url: ""
+    
+  telegram:
+    enabled: false
+    bot_token: ""
+    chat_id: ""
+
+# Performance Targets
+targets:
+  win_rate: 0.55
+  profit_factor: 1.25
+  sharpe_ratio: 1.5
+  max_drawdown: 0.15
+  monthly_return: 0.05

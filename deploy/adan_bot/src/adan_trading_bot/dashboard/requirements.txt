@@ -1,0 +1,10 @@
+# ADAN BTC/USDT Terminal Dashboard Requirements
+
+# Core dependencies
+rich>=14.0.0          # Terminal UI with colors and tables
+python-dateutil>=2.8.2  # Date/time utilities
+
+# Optional but recommended
+pytest>=7.0.0         # Testing framework
+pytest-cov>=4.0.0     # Coverage reporting
+hypothesis>=6.0.0     # Property-based testing
