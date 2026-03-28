@@ -1091,6 +1091,26 @@ class StateBuilder:
         except Exception:
             observations["portfolio_state"] = np.zeros(self.get_portfolio_state_dim(), dtype=np.float32)
 
+        # Build context_vector for FiLM Meta-RL modulation
+        # Flatten data to {tf: DataFrame} for build_context_vector compatibility
+        try:
+            flat_data = None
+            if data is not None:
+                flat_data = {}
+                for asset_key, asset_data in data.items():
+                    if isinstance(asset_data, dict):
+                        for tf, df in asset_data.items():
+                            if tf not in flat_data and isinstance(df, pd.DataFrame) and not df.empty:
+                                flat_data[tf] = df
+            observations["context_vector"] = self.build_context_vector(
+                data=flat_data,
+                current_idx=current_idx,
+                portfolio_manager=portfolio_manager,
+            )
+        except Exception as e:
+            logger.warning(f"Error building context_vector in build_observation: {e}")
+            observations["context_vector"] = np.zeros(5, dtype=np.float32)
+
         return observations
     def build_adaptive_observation(
         self,

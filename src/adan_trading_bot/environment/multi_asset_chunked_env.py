@@ -1740,6 +1740,11 @@ class MultiAssetChunkedEnv(gym.Env):
                 low=-np.inf, high=np.inf, shape=(portfolio_dim,), dtype=np.float32
             )
 
+            # Context vector for FiLM Meta-RL modulation (5 dims: volatility, trend, ADX, regime_score, drawdown)
+            obs_spaces["context_vector"] = spaces.Box(
+                low=-1.0, high=1.0, shape=(5,), dtype=np.float32
+            )
+
             self.observation_space = spaces.Dict(obs_spaces)
             logger.info(
                 f"Espace d'observation reconfiguré pour CNN multi-échelle: {self.observation_space}"

@@ -664,7 +664,15 @@ class TemporalFusionExtractor(BaseFeaturesExtractor):
     """
     Extracteur de features qui combine un CNN multi-timeframe avec une couche de fusion.
     Prend en entrée un dictionnaire d'observations (une par timeframe).
+
+    Supports FiLM (Feature-wise Linear Modulation) when a 'context_vector' key
+    is present in the observation dict.  The context encodes high-level market
+    regime info (volatility, trend, ADX, regime_score, drawdown) and is used to
+    dynamically modulate the CNN features before fusion with the portfolio state.
     """
+    CONTEXT_KEY = "context_vector"
+    DEFAULT_CONTEXT_DIM = 5
+
     def __init__(self, observation_space: gym.spaces.Dict, features_dim: int = 128):
         super().__init__(observation_space, features_dim)
 
@@ -690,11 +698,21 @@ class TemporalFusionExtractor(BaseFeaturesExtractor):
         self.multitimeframe_cnn = MultiTimeframeCNN(n_timeframes, n_features, window_sizes)
 
         # Calculer la dimension de sortie du CNN
-        # Chaque CNN sort (64 features * 16 positions temporelles) = 1024
         cnn_output_dim = n_timeframes * 64
 
         # Dimension de l'état du portefeuille
         portfolio_state_dim = observation_space.spaces[self.portfolio_state_key].shape[0]
+
+        # --- FiLM contextual modulation ---
+        if self.CONTEXT_KEY in observation_space.spaces:
+            self.context_dim = observation_space.spaces[self.CONTEXT_KEY].shape[0]
+        else:
+            self.context_dim = self.DEFAULT_CONTEXT_DIM
+        self.film_layer = FiLMLayer(
+            context_dim=self.context_dim,
+            feature_dim=cnn_output_dim,
+            hidden_dim=128,
+        )
 
         # Couche de fusion intermédiaire pour apprendre les interactions entre les timeframes
         self.inter_timeframe_fusion_layer = nn.Sequential(
@@ -718,6 +736,13 @@ class TemporalFusionExtractor(BaseFeaturesExtractor):
         """
         Le forward pass de l'extracteur.
         `observations` est un dictionnaire de tenseurs, une clé par timeframe.
+
+        Pipeline:
+        1. Per-timeframe CNN encoding.
+        2. FiLM modulation with context_vector (zeros if absent).
+        3. Inter-timeframe fusion.
+        4. Concatenation with portfolio_state.
+        5. Final fusion FC head.
         """
         # Séparer les observations du marché de l'état du portefeuille
         market_observations = {k: observations[k] for k in self.timeframe_keys}
@@ -726,17 +751,31 @@ class TemporalFusionExtractor(BaseFeaturesExtractor):
         # 1. Extraction des features par les CNNs pour chaque timeframe
         cnn_features = self.multitimeframe_cnn(market_observations)
 
-        # 2. Fusion intermédiaire des features des différents timeframes
+        # 2. FiLM modulation with context vector
+        if self.CONTEXT_KEY in observations:
+            context = observations[self.CONTEXT_KEY].to(dtype=th.float32)
+            if context.dim() == 1:
+                context = context.unsqueeze(0)
+        else:
+            # Generate zero context on the correct device
+            context = th.zeros(
+                (cnn_features.shape[0], self.context_dim),
+                device=cnn_features.device,
+                dtype=th.float32,
+            )
+        cnn_features = self.film_layer(cnn_features, context)
+
+        # 3. Fusion intermédiaire des features des différents timeframes
         timeframe_fused_features = self.inter_timeframe_fusion_layer(cnn_features)
 
-        # 3. Concaténer les features fusionnées avec l'état du portefeuille
+        # 4. Concaténer les features fusionnées avec l'état du portefeuille
         # Assurer que portfolio_state a une dimension de batch si elle est manquante
         if portfolio_state.dim() == 1:
             portfolio_state = portfolio_state.unsqueeze(0)
             
         combined_features = th.cat([timeframe_fused_features, portfolio_state], dim=1)
 
-        # 3. Fusion des features
+        # 5. Fusion des features
         fused_features = self.fusion_layer(combined_features)
 
         return fused_features
