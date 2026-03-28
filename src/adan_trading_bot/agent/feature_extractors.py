@@ -820,18 +820,70 @@ class FiLMLayer(nn.Module):
         return features * (1.0 + gamma) + beta
 
 
+class HierarchicalCrossAttention(nn.Module):
+    """Hierarchical cross-attention for multi-timeframe fusion.
+
+    Uses the shortest timeframe (5m) features as **Query** and the longer
+    timeframes (1h, 4h) as **Key / Value**.  This lets the model learn which
+    higher-timeframe context is relevant for each fast-timeframe feature,
+    replacing the naive ``torch.cat`` that threw away temporal hierarchy.
+
+    Args:
+        embed_dim:  Dimension of per-timeframe CNN embeddings.
+        num_heads:  Number of attention heads (must divide embed_dim).
+        dropout:    Dropout on attention weights.
+    """
+
+    def __init__(self, embed_dim: int, num_heads: int = 4, dropout: float = 0.1) -> None:
+        super().__init__()
+        self.attn = nn.MultiheadAttention(
+            embed_dim=embed_dim,
+            num_heads=num_heads,
+            dropout=dropout,
+            batch_first=True,
+        )
+        self.norm_q = nn.LayerNorm(embed_dim)
+        self.norm_kv = nn.LayerNorm(embed_dim)
+        self.norm_out = nn.LayerNorm(embed_dim)
+        self.ffn = nn.Sequential(
+            nn.Linear(embed_dim, embed_dim * 2),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(embed_dim * 2, embed_dim),
+            nn.Dropout(dropout),
+        )
+
+    def forward(self, query: Tensor, key_value: Tensor) -> Tensor:
+        """
+        Args:
+            query:     [B, 1, D] – fast-timeframe (5m) embedding.
+            key_value: [B, N_kv, D] – slower-timeframe embeddings (1h, 4h).
+
+        Returns:
+            [B, D] – attended output (squeezed from seq-len 1).
+        """
+        q = self.norm_q(query)
+        kv = self.norm_kv(key_value)
+        attn_out, _ = self.attn(q, kv, kv)
+        x = query + attn_out                 # residual
+        x = x + self.ffn(self.norm_out(x))   # FFN residual
+        return x.squeeze(1)                   # [B, D]
+
+
 class ContextualTemporalFusionExtractor(BaseFeaturesExtractor):
     """State-of-the-art feature extractor for ADAN.
 
-    Combines:
-    * **Multi-timeframe CNN** – separate 1-D convolutional encoders per
-      timeframe (5 m / 1 h / 4 h) with BatchNorm and adaptive pooling.
-    * **Meta-RL via FiLM** – the market context (volatility, trend strength,
-      ADX, regime score, drawdown) modulates the CNN features so the agent
-      learns *when* to trust which features instead of relying on hard-coded
-      DBE rules.
-    * **Portfolio fusion** – the portfolio state is projected and concatenated
-      with the modulated price features before the final FC head.
+    Architecture (v2 – hierarchical cross-attention):
+    1. **Per-timeframe CNN encoders** produce a fixed-size embedding per
+       timeframe.
+    2. **Hierarchical cross-attention**: the 5m embedding queries the
+       1h / 4h embeddings so the model learns *which* higher-timeframe
+       context matters for each fast bar.
+    3. **FiLM modulation**: the cross-attention output is modulated by the
+       market context vector (volatility, trend, ADX, regime, drawdown).
+    4. **Portfolio fusion**: the modulated representation is concatenated
+       with projected portfolio state + context vector and passed through a
+       final FC head.
 
     Expected observation keys (``gym.spaces.Dict``):
         ``'5m'``             : [B, window_5m, n_features]
@@ -892,12 +944,18 @@ class ContextualTemporalFusionExtractor(BaseFeaturesExtractor):
                 nn.Flatten(),
             )
 
-        cnn_out_dim = cnn_hidden * len(self.timeframe_keys)
+        # ---- Hierarchical cross-attention ----
+        # 5m = Query, [1h, 4h] = Key/Value
+        self.cross_attention = HierarchicalCrossAttention(
+            embed_dim=cnn_hidden,
+            num_heads=4,
+            dropout=dropout,
+        )
 
-        # ---- FiLM contextual modulation ----
+        # ---- FiLM contextual modulation (on cross-attn output) ----
         self.film_layer = FiLMLayer(
             context_dim=self.context_dim,
-            feature_dim=cnn_out_dim,
+            feature_dim=cnn_hidden,
             hidden_dim=128,
         )
 
@@ -917,7 +975,7 @@ class ContextualTemporalFusionExtractor(BaseFeaturesExtractor):
         )
 
         # ---- Final fusion head ----
-        fusion_in = cnn_out_dim + 64 + 32
+        fusion_in = cnn_hidden + 64 + 32  # cross-attn + portfolio + context
         self.fusion = nn.Sequential(
             nn.Linear(fusion_in, 512),
             nn.LayerNorm(512),
@@ -944,52 +1002,64 @@ class ContextualTemporalFusionExtractor(BaseFeaturesExtractor):
 
     # ------------------------------------------------------------------
     def forward(self, observations: dict) -> Tensor:
-        """Forward pass.
+        """Forward pass with hierarchical cross-attention.
 
-        1. Encode each timeframe with its CNN.
-        2. Concatenate CNN outputs.
-        3. FiLM-modulate with market context.
-        4. Fuse with portfolio + context projection.
+        1. Encode each timeframe with its CNN  -> [B, cnn_hidden] each.
+        2. Use 5m embedding as Query; stack 1h/4h as Key/Value.
+        3. Cross-attention produces a single [B, cnn_hidden] vector.
+        4. FiLM-modulate with market context.
+        5. Fuse with portfolio + context projection.
         """
         # 1. Per-timeframe CNN encoding
-        tf_feats = []
+        tf_embeddings: Dict[str, Tensor] = {}
         for tf in self.timeframe_keys:
             x = observations[tf]
             if x.dim() == 2:
                 x = x.unsqueeze(0)
-            # sanitise
             x = th.nan_to_num(x, nan=0.0, posinf=1.0, neginf=-1.0)
-            # Conv1d expects [B, C, L] – observations are [B, L, C]
-            x = x.permute(0, 2, 1).to(dtype=th.float32)
-            tf_feats.append(self.cnn_layers[tf](x))
+            x = x.permute(0, 2, 1).to(dtype=th.float32)  # [B, C, L]
+            tf_embeddings[tf] = self.cnn_layers[tf](x)    # [B, cnn_hidden]
 
-        cnn_combined = th.cat(tf_feats, dim=1)  # [B, cnn_out_dim]
+        # 2. Hierarchical cross-attention
+        #    Query = fastest timeframe (5m), KV = slower (1h, 4h)
+        query_key = self.timeframe_keys[0]       # "5m"
+        kv_keys = self.timeframe_keys[1:]        # ["1h", "4h"]
 
-        # 2. Context vector
+        query_emb = tf_embeddings[query_key].unsqueeze(1)  # [B, 1, D]
+
+        if len(kv_keys) > 0:
+            kv_list = [tf_embeddings[k].unsqueeze(1) for k in kv_keys]
+            kv_emb = th.cat(kv_list, dim=1)      # [B, N_kv, D]
+            attended = self.cross_attention(query_emb, kv_emb)  # [B, D]
+        else:
+            # Fallback: only one timeframe available
+            attended = query_emb.squeeze(1)
+
+        # 3. Context vector
         if self.context_key in observations:
             context = observations[self.context_key].to(dtype=th.float32)
             if context.dim() == 1:
                 context = context.unsqueeze(0)
         else:
             context = th.zeros(
-                (cnn_combined.shape[0], self.context_dim),
-                device=cnn_combined.device,
+                (attended.shape[0], self.context_dim),
+                device=attended.device,
                 dtype=th.float32,
             )
 
-        # 3. FiLM modulation
-        modulated = self.film_layer(cnn_combined, context)
+        # 4. FiLM modulation
+        modulated = self.film_layer(attended, context)
 
-        # 4. Portfolio
+        # 5. Portfolio
         portfolio = observations[self.portfolio_key].to(dtype=th.float32)
         if portfolio.dim() == 1:
             portfolio = portfolio.unsqueeze(0)
         portfolio = th.nan_to_num(portfolio, nan=0.0, posinf=1.0, neginf=-1.0)
         portfolio_emb = self.portfolio_proj(portfolio)
 
-        # 5. Context projection (additive information branch)
+        # 6. Context projection (additive information branch)
         context_emb = self.context_proj(context)
 
-        # 6. Fuse
+        # 7. Fuse
         fused = th.cat([modulated, portfolio_emb, context_emb], dim=1)
         return self.fusion(fused)

@@ -205,19 +205,25 @@ class StateBuilder:
                     "open", "high", "low", "close", "volume",
                     "rsi_14", "macd_12_26_9", "bb_percent_b_20_2",
                     "atr_14", "atr_20", "atr_50",
-                    "volume_ratio_20", "ema_20_ratio", "stoch_k_14_3_3", "price_action"
+                    "volume_ratio_20", "ema_20_ratio", "stoch_k_14_3_3", "price_action",
+                    "spread_bps", "liquidity_score",
+                    "log_return", "close_ema20_ratio"
                 ],
                 "1h": [
                     "open", "high", "low", "close", "volume",
                     "rsi_21", "macd_21_42_9", "bb_width_20_2", "adx_14",
                     "atr_20", "atr_50", "obv_ratio_20", "ema_50_ratio",
-                    "ichimoku_base", "fib_ratio", "price_ema_ratio_50"
+                    "ichimoku_base", "fib_ratio", "price_ema_ratio_50",
+                    "spread_bps", "liquidity_score",
+                    "log_return", "close_ema20_ratio"
                 ],
                 "4h": [
                     "open", "high", "low", "close", "volume",
                     "rsi_28", "macd_26_52_18", "supertrend_10_3",
                     "atr_20", "atr_50", "volume_sma_20_ratio", "ema_100_ratio",
-                    "pivot_level", "donchian_width_20", "market_structure", "volatility_ratio_14_50"
+                    "pivot_level", "donchian_width_20", "market_structure", "volatility_ratio_14_50",
+                    "spread_bps", "liquidity_score",
+                    "log_return", "close_ema20_ratio"
                 ],
             }
         self.features_config = features_config
@@ -1039,6 +1045,29 @@ class StateBuilder:
                     logger.warning(f"NaN values found in {tf} data, using forward fill then zero fill")
                     window_data = window_data.ffill().fillna(0)
 
+                # --- Compute relative price features (avoids leakage) ---
+                window_data = window_data.copy()  # avoid SettingWithCopy warnings
+                if "close" in window_data.columns:
+                    close_series = window_data["close"].astype(np.float64)
+                    # log-return: ln(close_t / close_{t-1})
+                    window_data["log_return"] = np.log(
+                        close_series / close_series.shift(1).replace(0, np.nan)
+                    ).fillna(0.0).astype(np.float32)
+                    # close-EMA20 ratio: (close - EMA20) / EMA20
+                    ema20 = close_series.ewm(span=20, min_periods=1).mean()
+                    window_data["close_ema20_ratio"] = (
+                        (close_series - ema20) / ema20.replace(0, np.nan)
+                    ).fillna(0.0).astype(np.float32)
+                else:
+                    window_data["log_return"] = 0.0
+                    window_data["close_ema20_ratio"] = 0.0
+
+                # --- L2 order-book proxy features (defaults if absent) ---
+                if "spread_bps" not in window_data.columns:
+                    window_data["spread_bps"] = 0.0
+                if "liquidity_score" not in window_data.columns:
+                    window_data["liquidity_score"] = 0.0
+
                 # Ensure all required features are present (case-insensitive)
                 req_lower = [f.lower() for f in features]
                 for fl in req_lower:
@@ -1046,8 +1075,7 @@ class StateBuilder:
                         logger.warning(
                             f"Feature '{fl}' not found in {tf} data, adding zeros"
                         )
-                        window_data = window_data.copy()
-                    window_data.loc[:, fl] = 0.0
+                        window_data[fl] = 0.0
 
                 # Select only the required features in the correct order
                 try:
