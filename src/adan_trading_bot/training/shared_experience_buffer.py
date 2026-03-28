@@ -79,19 +79,17 @@ class SharedExperienceBuffer:
     def add(self, experience: Dict[str, Any], priority: Optional[float] = None) -> None:
         """
         Ajoute une expérience au buffer de manière thread-safe.
+        Handles complex dict observations (5m, 1h, 4h, portfolio_state, context_vector).
 
         Args:
-            experience: Dictionnaire contenant les données d'expérience
+            experience: Dictionnaire contenant les données d'expérience.
+                        'state' and 'next_state' may be dicts of arrays.
             priority: Priorité de l'expérience (optionnel)
-
-        Returns:
-            int: Taille actuelle du buffer après ajout
         """
         with self._lock:
             if priority is None:
                 priority = self._shared_state['max_priority']
             else:
-                # Appliquer la même transformation que dans update_priorities
                 priority = (abs(priority) + self.epsilon) ** self.alpha
 
             # S'assurer que l'expérience est sérialisable
@@ -100,22 +98,18 @@ class SharedExperienceBuffer:
             if len(self.buffer) < self.buffer_size:
                 idx = len(self.buffer)
                 self.buffer.append(exp_copy)
-                self.priorities.append(priority)  # Initialisé à 0, mis à jour ci-dessous
+                self.priorities.append(priority)
             else:
                 idx = self._shared_state['pos']
                 self.buffer[idx] = exp_copy
                 self.priorities[idx] = priority
-
-                # Mettre à jour la position pour le prochain ajout
                 self._shared_state['pos'] = (idx + 1) % self.buffer_size
-            self._shared_state['max_priority'] = max(self._shared_state['max_priority'], priority)
 
-            # Mettre à jour les compteurs et horodatages
+            self._shared_state['max_priority'] = max(self._shared_state['max_priority'], priority)
             self._shared_state['num_additions'] += 1
             self._shared_state['total_added'] += 1
             self._shared_state['last_add_time'] = time.time()
 
-            # Notifier l'orchestrateur du nouvel ajout
             if hasattr(self, 'orchestrator'):
                 self.orchestrator.metrics['buffer_additions'] += 1
 
@@ -309,6 +303,7 @@ class SharedExperienceBuffer:
     def _make_serializable(self, obj: Any) -> Any:
         """
         Convertit un objet en une forme sérialisable pour le partage entre processus.
+        Handles complex dict observations (5m, 1h, 4h, portfolio_state, context_vector).
 
         Args:
             obj: L'objet à sérialiser
@@ -324,7 +319,13 @@ class SharedExperienceBuffer:
             return {k: self._make_serializable(v) for k, v in obj.items()}
         if isinstance(obj, (int, float, str, bool, type(None))):
             return obj
-        # Essayer de convertir en type natif Python
+        # torch.Tensor support
+        try:
+            import torch
+            if isinstance(obj, torch.Tensor):
+                return obj.detach().cpu().numpy().tolist()
+        except ImportError:
+            pass
         try:
             return float(obj)
         except (TypeError, ValueError):

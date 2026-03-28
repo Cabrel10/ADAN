@@ -21,7 +21,8 @@ from pathlib import Path
 
 from stable_baselines3 import PPO
 from stable_baselines3.common.vec_env import DummyVecEnv
-from adan_trading_bot.environment.multi_asset_chunked_env import MultiAssetChunkedEnv as AdanTradingEnv, VecNormalize, VecFrameStack
+from adan_trading_bot.environment.multi_asset_chunked_env import MultiAssetChunkedEnv as AdanTradingEnv
+from stable_baselines3.common.vec_env import VecNormalize, VecFrameStack
 from stable_baselines3.common.callbacks import BaseCallback, CheckpointCallback
 from stable_baselines3.common.type_aliases import GymEnv, MaybeCallback, Schedule
 from stable_baselines3.common.buffers import ReplayBuffer, RolloutBuffer, DictReplayBuffer
@@ -32,113 +33,120 @@ from stable_baselines3.common.utils import get_schedule_fn, update_learning_rate
 
 from .common.utils import get_logger, load_config, create_directories
 from .environment.multi_asset_chunked_env import MultiAssetChunkedEnv
-from .models.feature_extractors import CustomCNNFeatureExtractor
+
+try:
+    from .agent.feature_extractors import CustomCNNFeatureExtractor
+except ImportError:
+    CustomCNNFeatureExtractor = None
 
 logger = get_logger()
 
 class PrioritizedReplayBuffer:
     """Prioritized Experience Replay buffer for efficient learning.
-    
-    Implements proportional prioritization for experience replay.
+
+    Supports both flat numpy arrays *and* complex dict observations
+    (e.g. {'5m': ..., '1h': ..., '4h': ..., 'portfolio_state': ..., 'context_vector': ...}).
+    Dict states are stored as-is; sampling stacks each key independently.
     """
-    
-    def __init__(self, buffer_size: int, batch_size: int, alpha: float = 0.6, beta: float = 0.4, 
+
+    def __init__(self, buffer_size: int, batch_size: int, alpha: float = 0.6, beta: float = 0.4,
                  beta_increment: float = 0.001, epsilon: float = 1e-6):
-        """
-        Initialize the prioritized replay buffer.
-        
-        Args:
-            buffer_size: Maximum number of experiences to store
-            batch_size: Number of experiences to sample in a batch
-            alpha: Controls the amount of prioritization (0 = uniform, 1 = full prioritization)
-            beta: Controls the importance sampling weight (0 = no correction, 1 = full correction)
-            beta_increment: Rate at which to increase beta towards 1.0
-            epsilon: Small constant to ensure all experiences have a non-zero probability
-        """
         self.buffer_size = buffer_size
         self.batch_size = batch_size
         self.alpha = alpha
         self.beta = beta
         self.beta_increment = beta_increment
         self.epsilon = epsilon
-        
-        # Use a list of NamedTuples for efficient storage
-        self.experience = namedtuple("Experience", 
-                                   field_names=["state", "action", "reward", "next_state", "done", "td_error"])
-        self.memory = []
+
+        self.experience = namedtuple("Experience",
+                                     field_names=["state", "action", "reward", "next_state", "done", "td_error"])
+        self.memory: list = []
         self.priorities = np.zeros((buffer_size,), dtype=np.float32)
         self.pos = 0
         self.full = False
-    
-    def add(self, state: np.ndarray, action: np.ndarray, reward: float, next_state: np.ndarray, done: bool, 
+
+    # ------------------------------------------------------------------
+    # helpers for dict observations
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _to_numpy(obj):
+        """Convert a state (dict of arrays or plain array) to a storable form."""
+        if isinstance(obj, dict):
+            return {k: np.asarray(v) for k, v in obj.items()}
+        return np.asarray(obj)
+
+    @staticmethod
+    def _stack_states(states):
+        """Stack a list of states.  If dict, stack per-key; otherwise np.vstack."""
+        if len(states) == 0:
+            return states
+        if isinstance(states[0], dict):
+            keys = states[0].keys()
+            return {k: np.stack([s[k] for s in states]) for k in keys}
+        return np.vstack(states)
+
+    # ------------------------------------------------------------------
+    def add(self, state, action, reward, next_state, done,
             td_error: Optional[float] = None) -> None:
-        """Add a new experience to memory."""
+        """Add a new experience to memory (supports dict states)."""
         if td_error is None:
-            # Initialize with maximum priority to ensure all experiences are sampled at least once
-            max_priority = self.priorities.max() if not self.is_empty() else 1.0
+            max_priority = float(self.priorities.max()) if not self.is_empty() else 1.0
             td_error = max_priority
-            
-        # Create experience tuple
-        e = self.experience(state, action, reward, next_state, done, td_error)
-        
-        # Store in memory
+
+        e = self.experience(
+            self._to_numpy(state),
+            np.asarray(action),
+            float(reward),
+            self._to_numpy(next_state),
+            bool(done),
+            float(td_error),
+        )
+
         if len(self.memory) < self.buffer_size:
             self.memory.append(e)
         else:
             self.memory[self.pos] = e
-            
-        # Update priorities
+
         priority = (abs(td_error) + self.epsilon) ** self.alpha
         self.priorities[self.pos] = priority
-        
-        # Update position
         self.pos = (self.pos + 1) % self.buffer_size
         if self.pos == 0:
             self.full = True
-    
-    def sample(self) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-        """Sample a batch of experiences from memory."""
+
+    def sample(self):
+        """Sample a batch.  Returns (states, actions, rewards, next_states, dones, indices, weights)."""
         if self.is_empty():
             raise ValueError("Cannot sample from an empty memory buffer")
-            
-        # Update beta
+
         self.beta = min(1.0, self.beta + self.beta_increment)
-        
-        # Get priorities and compute sampling probabilities
-        priorities = self.priorities[:len(self.memory)] if not self.full else self.priorities
-        probs = priorities / priorities.sum()
-        
-        # Sample indices based on priorities
-        indices = np.random.choice(len(self.memory), size=min(self.batch_size, len(self.memory)), 
-                                 p=probs, replace=False)
-        
-        # Compute importance sampling weights
-        weights = (len(self.memory) * probs[indices]) ** (-self.beta)
-        weights = weights / weights.max()
-        
-        # Get experiences
+        n = len(self.memory)
+        priorities = self.priorities[:n] if not self.full else self.priorities
+        probs = priorities / (priorities.sum() + 1e-12)
+
+        batch_n = min(self.batch_size, n)
+        indices = np.random.choice(n, size=batch_n, p=probs, replace=False)
+
+        weights = (n * probs[indices]) ** (-self.beta)
+        weights = weights / (weights.max() + 1e-12)
+
         experiences = [self.memory[idx] for idx in indices]
-        
-        # Unpack experiences
-        states = np.vstack([e.state for e in experiences])
-        actions = np.vstack([e.action for e in experiences])
-        rewards = np.vstack([e.reward for e in experiences])
-        next_states = np.vstack([e.next_state for e in experiences])
-        dones = np.vstack([e.done for e in experiences])
-        
+
+        states = self._stack_states([e.state for e in experiences])
+        actions = np.vstack([np.atleast_1d(e.action) for e in experiences])
+        rewards = np.array([e.reward for e in experiences], dtype=np.float32).reshape(-1, 1)
+        next_states = self._stack_states([e.next_state for e in experiences])
+        dones = np.array([e.done for e in experiences], dtype=np.float32).reshape(-1, 1)
+
         return states, actions, rewards, next_states, dones, indices, weights
-    
+
     def update_priorities(self, indices: np.ndarray, td_errors: np.ndarray) -> None:
-        """Update the priorities for the given indices."""
         for idx, td_error in zip(indices, td_errors):
             self.priorities[idx] = (abs(td_error) + self.epsilon) ** self.alpha
-    
+
     def is_empty(self) -> bool:
-        """Check if the buffer is empty."""
         return len(self.memory) == 0
-    
+
     def __len__(self) -> int:
-        """Return the current size of the buffer."""
         return len(self.memory)
 
 class ExperienceBuffer:
@@ -172,97 +180,111 @@ class ExperienceBuffer:
 
 class EWCRegularizer:
     """Elastic Weight Consolidation (EWC) regularizer to prevent catastrophic forgetting.
-    
-    Implements the EWC algorithm from "Overcoming Catastrophic Forgetting in Neural Networks"
-    by Kirkpatrick et al. (2017).
+
+    Implements the diagonal Fisher approximation from Kirkpatrick et al. (2017).
+    Explicitly covers **all** trainable parameters, including the new
+    HierarchicalCrossAttention and FiLM layers in ContextualTemporalFusionExtractor.
     """
-    
+
+    # Layer-name substrings that belong to the cross-attention / FiLM modules.
+    CROSS_ATTN_KEYS = ("cross_attention", "film_layer", "film_gen")
+
     def __init__(self, model: nn.Module, ewc_lambda: float = 0.1, fisher_samples: int = 100):
-        """
-        Initialize the EWC regularizer.
-        
-        Args:
-            model: The model to apply EWC to
-            ewc_lambda: Strength of the EWC regularization
-            fisher_samples: Number of samples to use for estimating the Fisher information matrix
-        """
         self.model = model
         self.ewc_lambda = ewc_lambda
         self.fisher_samples = fisher_samples
-        
-        # Store initial parameters and Fisher information
-        self.params = {n: p.detach().clone() for n, p in self.model.named_parameters() if p.requires_grad}
-        self.fisher = {n: th.zeros_like(p) for n, p in self.model.named_parameters() if p.requires_grad}
-        
-        # Store current task parameters
-        self.task_params = {n: p.detach().clone() for n, p in self.model.named_parameters() if p.requires_grad}
-    
+
+        # Snapshot *all* trainable params (including cross-attn + FiLM)
+        self.params = {
+            n: p.detach().clone()
+            for n, p in self.model.named_parameters() if p.requires_grad
+        }
+        self.fisher = {
+            n: th.zeros_like(p)
+            for n, p in self.model.named_parameters() if p.requires_grad
+        }
+        self.task_params = {
+            n: p.detach().clone()
+            for n, p in self.model.named_parameters() if p.requires_grad
+        }
+
+        # Verify that cross-attention / FiLM layers are captured
+        ca_count = sum(
+            1 for n in self.params if any(k in n for k in self.CROSS_ATTN_KEYS)
+        )
+        logger.info(
+            f"[EWC] Tracking {len(self.params)} parameters "
+            f"({ca_count} from cross-attention/FiLM layers)"
+        )
+
+    # ------------------------------------------------------------------
+    def _obs_to_tensor(self, obs):
+        """Convert obs (dict or array) to the tensor format the model expects."""
+        device = next(self.model.parameters()).device
+        if isinstance(obs, dict):
+            return {k: th.as_tensor(v, device=device).float().unsqueeze(0)
+                    if not isinstance(v, th.Tensor) else v.float().unsqueeze(0)
+                    for k, v in obs.items()}
+        t = th.as_tensor(obs, device=device).float()
+        if t.dim() == 1:
+            t = t.unsqueeze(0)
+        return t
+
     def compute_fisher(self, env: GymEnv, num_samples: Optional[int] = None) -> None:
-        """
-        Compute the Fisher information matrix for the current task.
-        
-        Args:
-            env: Environment to sample states from
-            num_samples: Number of samples to use for estimation (defaults to self.fisher_samples)
-        """
+        """Compute diagonal Fisher information using the current policy."""
         if num_samples is None:
             num_samples = self.fisher_samples
-            
-        # Reset Fisher information
+
         for n in self.fisher:
             self.fisher[n].zero_()
-        
-        # Set model to evaluation mode
+
         self.model.eval()
-        
-        # Sample states from the environment
-        obs = env.reset()
-        
-        # Compute Fisher information
+        result = env.reset()
+        obs = result[0] if isinstance(result, tuple) else result
+
         for _ in range(num_samples):
-            # Get action distribution
-            with th.no_grad():
-                obs_tensor = th.as_tensor(obs, device=next(self.model.parameters()).device).float()
-                if len(obs_tensor.shape) == 1:
-                    obs_tensor = obs_tensor.unsqueeze(0)
+            obs_tensor = self._obs_to_tensor(obs)
+            try:
                 dist = self.model.get_distribution(obs_tensor)
-                
-            # Sample an action
+            except Exception:
+                break
             action = dist.sample()
-            
-            # Compute log probability
             log_prob = dist.log_prob(action)
-            
-            # Compute gradients
+            if log_prob.dim() > 1:
+                log_prob = log_prob.sum(dim=-1)
+            log_prob = log_prob.mean()
+
             self.model.zero_grad()
             log_prob.backward()
-            
-            # Update Fisher information
+
             for n, p in self.model.named_parameters():
                 if p.grad is not None and n in self.fisher:
                     self.fisher[n] += p.grad.detach() ** 2 / num_samples
-            
-            # Step the environment
-            obs, _, done, _ = env.step(action.cpu().numpy())
-            if done:
-                obs = env.reset()
-    
+
+            try:
+                result = env.step(action.detach().cpu().numpy())
+                obs = result[0] if isinstance(result, tuple) else result
+                done = result[2] if isinstance(result, tuple) else False
+                if done if isinstance(done, bool) else bool(np.any(done)):
+                    result = env.reset()
+                    obs = result[0] if isinstance(result, tuple) else result
+            except Exception:
+                break
+
     def penalty(self) -> th.Tensor:
-        """
-        Compute the EWC penalty term.
-        
-        Returns:
-            The EWC regularization term
-        """
-        penalty = 0.0
+        """EWC penalty — covers cross-attention + FiLM parameters automatically."""
+        penalty = th.tensor(0.0, device=next(self.model.parameters()).device)
         for n, p in self.model.named_parameters():
             if n in self.fisher and n in self.task_params:
-                penalty += (self.fisher[n] * (p - self.task_params[n]) ** 2).sum()
+                penalty = penalty + (self.fisher[n] * (p - self.task_params[n]) ** 2).sum()
         return 0.5 * self.ewc_lambda * penalty
-    
+
     def update_task_params(self) -> None:
-        """Update the task parameters to the current model parameters."""
-        self.task_params = {n: p.detach().clone() for n, p in self.model.named_parameters() if p.requires_grad}
+        """Snapshot current parameters as reference for the next penalty computation."""
+        self.task_params = {
+            n: p.detach().clone()
+            for n, p in self.model.named_parameters() if p.requires_grad
+        }
 
 class OnlineLearningCallback(BaseCallback):
     """Callback for online learning that updates the model with new experiences."""
