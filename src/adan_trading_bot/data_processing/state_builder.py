@@ -810,6 +810,96 @@ class StateBuilder:
             logger.error(f"Error building portfolio state: {e}")
             return np.zeros(20, dtype=np.float32)  # Return zero-padded portfolio state
 
+    def build_context_vector(
+        self,
+        data: Dict[str, pd.DataFrame] = None,
+        current_idx: int = 0,
+        portfolio_manager: Any = None,
+    ) -> np.ndarray:
+        """Build a market context vector for FiLM Meta-RL modulation.
+
+        The context vector encodes high-level market state information that
+        the FiLM layer in ContextualTemporalFusionExtractor uses to
+        dynamically modulate CNN features.  This replaces hand-coded DBE
+        heuristics with a learnable conditioning mechanism.
+
+        The vector contains five components:
+            [0] volatility  – normalised ATR / price  (0-1)
+            [1] trend       – EMA crossover direction (-1 to 1)
+            [2] adx         – ADX / 100  (0-1)
+            [3] regime_score – composite regime indicator (-1 to 1)
+            [4] drawdown    – current portfolio drawdown (0-1)
+
+        Args:
+            data: Dict mapping timeframes to DataFrames (optional).
+            current_idx: Current bar index in the data.
+            portfolio_manager: Optional portfolio manager for drawdown info.
+
+        Returns:
+            np.ndarray of shape (5,) with dtype float32.
+        """
+        context = np.zeros(5, dtype=np.float32)
+
+        if data is None:
+            return context
+
+        try:
+            for tf in self.timeframes:
+                if tf not in data or data[tf].empty:
+                    continue
+                df = data[tf]
+                idx = min(current_idx, len(df) - 1)
+                if idx < 0:
+                    continue
+
+                # [0] Volatility from ATR if available
+                if "ATR_14" in df.columns and "CLOSE" in df.columns:
+                    atr = df["ATR_14"].iloc[idx]
+                    close = df["CLOSE"].iloc[idx]
+                    if np.isfinite(atr) and np.isfinite(close) and close > 0:
+                        context[0] = float(np.clip(atr / close, 0.0, 1.0))
+
+                # [1] Trend from EMA crossover
+                if "EMA_12" in df.columns and "EMA_26" in df.columns:
+                    ema12 = df["EMA_12"].iloc[idx]
+                    ema26 = df["EMA_26"].iloc[idx]
+                    if np.isfinite(ema12) and np.isfinite(ema26) and ema26 != 0:
+                        diff = (ema12 - ema26) / abs(ema26)
+                        context[1] = float(np.clip(diff * 10, -1.0, 1.0))
+
+                # [2] ADX
+                if "ADX_14" in df.columns:
+                    adx = df["ADX_14"].iloc[idx]
+                    if np.isfinite(adx):
+                        context[2] = float(np.clip(adx / 100.0, 0.0, 1.0))
+
+                # [3] Regime score: positive=trending, negative=volatile
+                if context[2] > 0.25:  # ADX > 25 = trending
+                    context[3] = float(context[2])
+                elif context[0] > 0.03:  # high vol
+                    context[3] = float(-context[0])
+                # else: ranging = 0
+
+                break  # Use first available timeframe
+
+            # [4] Drawdown from portfolio manager
+            if portfolio_manager is not None:
+                try:
+                    if hasattr(portfolio_manager, "get_metrics"):
+                        metrics = portfolio_manager.get_metrics()
+                        dd = metrics.get("drawdown", 0.0)
+                        context[4] = float(np.clip(abs(dd) / 100.0, 0.0, 1.0))
+                    elif hasattr(portfolio_manager, "get_state_vector"):
+                        state = portfolio_manager.get_state_vector()
+                        if len(state) > 4:
+                            context[4] = float(np.clip(abs(state[4]) / 100.0, 0.0, 1.0))
+                except Exception:
+                    pass
+
+        except Exception as e:
+            logger.warning(f"Error building context vector: {e}. Returning zeros.")
+
+        return context
 
 
     def _get_column_mapping(self, df: pd.DataFrame, tf: str):

@@ -741,3 +741,216 @@ class TemporalFusionExtractor(BaseFeaturesExtractor):
 
         return fused_features
 
+
+# ==============================================================================
+# META-RL: FiLM Layer + Contextual Temporal Fusion Extractor
+# ==============================================================================
+
+class FiLMLayer(nn.Module):
+    """Feature-wise Linear Modulation (FiLM).
+
+    Allows the network to modulate its own feature maps based on a market
+    context vector (regime, volatility, trend, ADX, drawdown).  The network
+    learns Gamma (scale) and Beta (shift) parameters from the context,
+    enabling dynamic feature adaptation without hand-crafted rules.
+
+    Reference: Perez et al., "FiLM: Visual Reasoning with a General
+    Conditioning Layer", AAAI 2018.
+    """
+
+    def __init__(self, context_dim: int, feature_dim: int, hidden_dim: int = 128) -> None:
+        super().__init__()
+        self.film_gen = nn.Sequential(
+            nn.Linear(context_dim, hidden_dim),
+            nn.SiLU(),
+            nn.Linear(hidden_dim, feature_dim * 2),  # *2 for gamma + beta
+        )
+
+    def forward(self, features: Tensor, context: Tensor) -> Tensor:
+        """Modulate *features* with gamma/beta derived from *context*.
+
+        Args:
+            features: [B, feature_dim] – CNN output features.
+            context:  [B, context_dim] – market context vector.
+
+        Returns:
+            Modulated features: F' = F * (1 + gamma) + beta
+        """
+        film_params = self.film_gen(context)
+        gamma, beta = th.chunk(film_params, 2, dim=-1)
+        return features * (1.0 + gamma) + beta
+
+
+class ContextualTemporalFusionExtractor(BaseFeaturesExtractor):
+    """State-of-the-art feature extractor for ADAN.
+
+    Combines:
+    * **Multi-timeframe CNN** – separate 1-D convolutional encoders per
+      timeframe (5 m / 1 h / 4 h) with BatchNorm and adaptive pooling.
+    * **Meta-RL via FiLM** – the market context (volatility, trend strength,
+      ADX, regime score, drawdown) modulates the CNN features so the agent
+      learns *when* to trust which features instead of relying on hard-coded
+      DBE rules.
+    * **Portfolio fusion** – the portfolio state is projected and concatenated
+      with the modulated price features before the final FC head.
+
+    Expected observation keys (``gym.spaces.Dict``):
+        ``'5m'``             : [B, window_5m, n_features]
+        ``'1h'``             : [B, window_1h, n_features]
+        ``'4h'``             : [B, window_4h, n_features]
+        ``'portfolio_state'``: [B, portfolio_dim]
+        ``'context_vector'`` : [B, context_dim]  *(optional – zeros if absent)*
+    """
+
+    # Class-level defaults for the observation contract.
+    STRICT_TIMEFRAME_KEYS = ("5m", "1h", "4h")
+    DEFAULT_CONTEXT_DIM = 5
+
+    def __init__(
+        self,
+        observation_space: gym.spaces.Dict,
+        features_dim: int = 256,
+        context_dim: int = 5,
+        cnn_hidden: int = 128,
+        dropout: float = 0.2,
+    ) -> None:
+        super().__init__(observation_space, features_dim)
+
+        # ---- discover available keys ----
+        self.timeframe_keys = [
+            k for k in self.STRICT_TIMEFRAME_KEYS
+            if k in observation_space.spaces
+        ]
+        assert len(self.timeframe_keys) > 0, (
+            "At least one timeframe key ('5m', '1h', '4h') must be present "
+            "in observation_space."
+        )
+        self.portfolio_key = "portfolio_state"
+        self.context_key = "context_vector"
+
+        # ---- dimensions ----
+        sample_shape = observation_space.spaces[self.timeframe_keys[0]].shape
+        n_features = sample_shape[-1]  # last dim = feature count per bar
+        portfolio_dim = observation_space.spaces[self.portfolio_key].shape[0]
+
+        # Context dimension: use observation space if present, else default.
+        if self.context_key in observation_space.spaces:
+            self.context_dim = observation_space.spaces[self.context_key].shape[0]
+        else:
+            self.context_dim = context_dim
+
+        # ---- Per-timeframe CNN encoders ----
+        self.cnn_layers = nn.ModuleDict()
+        for tf in self.timeframe_keys:
+            self.cnn_layers[tf] = nn.Sequential(
+                nn.Conv1d(n_features, 64, kernel_size=3, padding=1),
+                nn.BatchNorm1d(64),
+                nn.LeakyReLU(inplace=True),
+                nn.Conv1d(64, cnn_hidden, kernel_size=3, padding=1),
+                nn.BatchNorm1d(cnn_hidden),
+                nn.LeakyReLU(inplace=True),
+                nn.AdaptiveAvgPool1d(1),
+                nn.Flatten(),
+            )
+
+        cnn_out_dim = cnn_hidden * len(self.timeframe_keys)
+
+        # ---- FiLM contextual modulation ----
+        self.film_layer = FiLMLayer(
+            context_dim=self.context_dim,
+            feature_dim=cnn_out_dim,
+            hidden_dim=128,
+        )
+
+        # ---- Portfolio projector ----
+        self.portfolio_proj = nn.Sequential(
+            nn.Linear(portfolio_dim, 64),
+            nn.LayerNorm(64),
+            nn.SiLU(),
+            nn.Dropout(dropout),
+        )
+
+        # ---- Context projector (additive branch) ----
+        self.context_proj = nn.Sequential(
+            nn.Linear(self.context_dim, 32),
+            nn.LayerNorm(32),
+            nn.SiLU(),
+        )
+
+        # ---- Final fusion head ----
+        fusion_in = cnn_out_dim + 64 + 32
+        self.fusion = nn.Sequential(
+            nn.Linear(fusion_in, 512),
+            nn.LayerNorm(512),
+            nn.ReLU(inplace=True),
+            nn.Dropout(dropout),
+            nn.Linear(512, features_dim),
+            nn.LayerNorm(features_dim),
+            nn.ReLU(inplace=True),
+        )
+
+        # weight init
+        self._init_weights()
+
+    # ------------------------------------------------------------------
+    def _init_weights(self) -> None:
+        for m in self.modules():
+            if isinstance(m, (nn.Conv1d, nn.Linear)):
+                nn.init.kaiming_normal_(m.weight, mode="fan_out", nonlinearity="relu")
+                if m.bias is not None:
+                    nn.init.zeros_(m.bias)
+            elif isinstance(m, (nn.BatchNorm1d, nn.LayerNorm)):
+                nn.init.ones_(m.weight)
+                nn.init.zeros_(m.bias)
+
+    # ------------------------------------------------------------------
+    def forward(self, observations: dict) -> Tensor:
+        """Forward pass.
+
+        1. Encode each timeframe with its CNN.
+        2. Concatenate CNN outputs.
+        3. FiLM-modulate with market context.
+        4. Fuse with portfolio + context projection.
+        """
+        # 1. Per-timeframe CNN encoding
+        tf_feats = []
+        for tf in self.timeframe_keys:
+            x = observations[tf]
+            if x.dim() == 2:
+                x = x.unsqueeze(0)
+            # sanitise
+            x = th.nan_to_num(x, nan=0.0, posinf=1.0, neginf=-1.0)
+            # Conv1d expects [B, C, L] – observations are [B, L, C]
+            x = x.permute(0, 2, 1).to(dtype=th.float32)
+            tf_feats.append(self.cnn_layers[tf](x))
+
+        cnn_combined = th.cat(tf_feats, dim=1)  # [B, cnn_out_dim]
+
+        # 2. Context vector
+        if self.context_key in observations:
+            context = observations[self.context_key].to(dtype=th.float32)
+            if context.dim() == 1:
+                context = context.unsqueeze(0)
+        else:
+            context = th.zeros(
+                (cnn_combined.shape[0], self.context_dim),
+                device=cnn_combined.device,
+                dtype=th.float32,
+            )
+
+        # 3. FiLM modulation
+        modulated = self.film_layer(cnn_combined, context)
+
+        # 4. Portfolio
+        portfolio = observations[self.portfolio_key].to(dtype=th.float32)
+        if portfolio.dim() == 1:
+            portfolio = portfolio.unsqueeze(0)
+        portfolio = th.nan_to_num(portfolio, nan=0.0, posinf=1.0, neginf=-1.0)
+        portfolio_emb = self.portfolio_proj(portfolio)
+
+        # 5. Context projection (additive information branch)
+        context_emb = self.context_proj(context)
+
+        # 6. Fuse
+        fused = th.cat([modulated, portfolio_emb, context_emb], dim=1)
+        return self.fusion(fused)
