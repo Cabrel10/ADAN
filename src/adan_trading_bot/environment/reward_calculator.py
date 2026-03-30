@@ -155,10 +155,85 @@ class RewardCalculator:
         self._ratio_cache = dict()
         self._last_calculation_time = 0
 
+        # OMEGA-3 CH3: Early exit bonus for dynamic exits
+        self.early_exit_bonus_weight = self.config.get("early_exit_bonus", 0.5)
+
         logger.info(
             "RewardCalculator initialized with "
             "multi-objective optimization and detailed logging."
         )
+
+    def _calculate_early_exit_bonus(
+        self,
+        portfolio_metrics: Optional[Dict[str, Any]] = None,
+        *,
+        trade_pnl: Optional[float] = None,
+        trade_reason: Optional[str] = None,
+    ) -> float:
+        """Calculate a bonus for profitable early exits (dynamic agent closes).
+
+        Can be called in two modes:
+        1. Batch mode (from step reward): pass *portfolio_metrics* containing
+           a ``closed_positions`` list.
+        2. Single-trade mode (unit tests / direct call): pass *trade_pnl* and
+           *trade_reason* directly.
+
+        Only triggers when:
+        - Close reason is AGENT_CLOSE (not SL/TP/MaxDuration)
+        - Trade PnL > 0
+
+        Returns:
+            float: early exit bonus (positive) or 0.0
+        """
+        # --- Single-trade shortcut (unit-test / direct call) ----------------
+        if trade_pnl is not None and trade_reason is not None:
+            reason = str(trade_reason).upper()
+            if reason not in ("AGENT_CLOSE", "AGENT_REQUEST_CLOSE"):
+                return 0.0
+            if trade_pnl <= 0:
+                return 0.0
+            return float(self.early_exit_bonus_weight * np.tanh(trade_pnl * 10.0))
+
+        # --- Batch mode (full portfolio_metrics) ----------------------------
+        if portfolio_metrics is None:
+            portfolio_metrics = {}
+
+        bonus = 0.0
+        closed_trades = portfolio_metrics.get("closed_positions", [])
+        min_hold = self.config.get("reward_shaping", {}).get(
+            "min_holding_period_steps", 6
+        )
+
+        for trade in closed_trades:
+            reason = str(trade.get("close_reason", "")).upper()
+            if reason not in ("AGENT_CLOSE", "AGENT_REQUEST_CLOSE"):
+                continue
+
+            pnl = float(trade.get("pnl", 0.0))
+            if pnl <= 0:
+                continue
+
+            # Check holding period
+            hold_steps = int(
+                trade.get("hold_steps", trade.get("duration_steps", 0))
+            )
+            if hold_steps < min_hold:
+                continue
+
+            # Check net PnL > 2 x estimated fees
+            notional = float(
+                trade.get("notional", trade.get("size_usd", 0.0))
+            )
+            estimated_fees = 0.001 * notional * 2  # 0.1% x notional x 2
+            if pnl <= estimated_fees * 2:
+                continue
+
+            trade_bonus = self.early_exit_bonus_weight * float(
+                np.tanh(pnl * 10.0)
+            )
+            bonus += trade_bonus
+
+        return bonus
 
     def _calculate_tutor_bonus(
         self, portfolio_metrics: Dict[str, Any]
@@ -410,6 +485,10 @@ class RewardCalculator:
 
             # Calculate final reward with tutor bonus
             final_reward += self._calculate_tutor_bonus(portfolio_metrics)
+
+            # OMEGA-3 CH3: Early exit bonus for dynamic exits
+            early_exit_bonus = self._calculate_early_exit_bonus(portfolio_metrics)
+            final_reward += early_exit_bonus
             
             # Update DBE parameters and episode tracking
             self._update_dbe_parameters(portfolio_metrics)

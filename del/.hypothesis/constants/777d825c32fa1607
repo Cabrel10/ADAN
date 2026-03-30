@@ -1,4 +1,0 @@
-# file: /home/morningstar/Documents/trading/bot/src/adan_trading_bot/dashboard/log_storage.py
-# hypothesis_version: 6.138.3
-
-[0.0, 100, 'ENTRY', 'EXIT', 'a', 'avg_pnl', 'events.jsonl', 'logs/storage', 'losing_trades', 'metrics.jsonl', 'r', 'realized_pnl_usd', 'timestamp', 'total_pnl', 'total_trades', 'trades.jsonl', 'type', 'w', 'win_rate', 'winning_trades']

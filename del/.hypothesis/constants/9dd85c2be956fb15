@@ -1,4 +1,0 @@
-# file: /home/morningstar/Documents/trading/bot/src/adan_trading_bot/data_processing/data_loader.py
-# hypothesis_version: 6.138.3
-
-[0.01, 0.1, -999, 111, 242, 5328, 10000000, ', ', '-', '/', '1h', '4h', '5m', 'CLOSE', 'Close', "Détails de l'erreur:", 'High', 'Low', 'Open', 'VOLUME', 'Volume', '_', 'assets', 'base', 'bbands_lower', 'bbands_upper', 'bfill', 'btcusdt', 'chunk_sizes', 'close', 'data', 'data_dirs', 'data_loader', 'data_split', 'data_split_override', 'ema_12', 'environment', 'features_config', 'ffill', 'high', 'index', 'indicators', 'inf', 'linear', 'low', 'macd', 'open', 'paths', 'price', 'processed_data_dir', 'rsi_14', 'sma_20', 'timeframes', 'timestamp', 'train', 'volume']

@@ -1,4 +1,0 @@
-# file: /home/morningstar/Documents/trading/bot/src/adan_trading_bot/data_processing/parallel_processor.py
-# hypothesis_version: 6.138.3
-
-[100, 'Processing', 'R', 'T', 'chunk', 'processes', 'threads']

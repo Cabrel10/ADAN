@@ -1,4 +1,0 @@
-# file: /home/morningstar/Documents/trading/bot/src/adan_trading_bot/risk_management/risk_assessor.py
-# hypothesis_version: 6.138.3
-
-[0.0, 0.02, 0.05, 0.1, 0.2, 0.95, 100, 252, 10000, 'asset', 'cvar', 'drawdown', 'entry_price', 'equity', 'highest_price', 'leverage', 'margin_ratio', 'max_drawdown', 'max_portfolio_risk', 'max_position_risk', 'max_position_size', 'positions', 'prices', 'risk_level', 'risk_management', 'size', 'spreads', 'stop_loss', 'timestamp', 'total_equity', 'total_value', 'trailing_stop_pct', 'used_margin', 'value', 'var', 'var_confidence', 'var_horizon', 'volumes']

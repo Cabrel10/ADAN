@@ -1,4 +1,0 @@
-# file: /home/morningstar/Documents/trading/bot/src/adan_trading_bot/dashboard/app.py
-# hypothesis_version: 6.138.3
-
-[2.0, '[bold red]ERROR[/]', 'bold cyan', 'bold red', 'bold yellow', 'dim cyan', 'dim red', 'dim white', 'dim yellow', 'magenta', 'red', '❌ Dashboard Error\n\n', '📊 Initializing...\n']

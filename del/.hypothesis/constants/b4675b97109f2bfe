@@ -1,4 +1,0 @@
-# file: /home/morningstar/Documents/trading/bot/src/adan_trading_bot/data_processing/preprocessing_cache.py
-# hypothesis_version: 6.138.3
-
-[100, '**/*', '.adan_trading_bot', '.lock', '.pkl', '.tmp', '::', 'preprocessing_cache', 'tobytes', 'utf-8', 'zlib']

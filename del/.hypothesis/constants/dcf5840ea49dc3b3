@@ -1,4 +1,0 @@
-# file: /home/morningstar/Documents/trading/bot/src/adan_trading_bot/common/custom_logger.py
-# hypothesis_version: 6.138.3
-
-[1024, '%Y-%m-%d %H:%M:%S', 'INFO', 'adan_trading_bot', 'adan_trading_bot.log', 'backup_count', 'bold blue', 'bold green', 'bold purple', 'bold red', 'bold white on red', 'compress_backups', 'critical', 'enable_console_logs', 'enable_json_logs', 'error', 'green', 'info', 'json_log_file', 'level', 'log_dir', 'log_file', 'logs', 'loss', 'matplotlib', 'max_log_size', 'profit', 'r', 'requests', 'success', 'trade_buy', 'trade_sell', 'urllib3', 'utf-8', 'warning', 'yellow']

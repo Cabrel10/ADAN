@@ -1,4 +1,0 @@
-# file: /home/morningstar/Documents/trading/bot/src/adan_trading_bot/performance/unified_metrics.py
-# hypothesis_version: 6.138.3
-
-[0.0, 0.02, 10000.0, 252, '=', 'action', 'calmar_ratio', 'consistency', 'consistent', 'daily_return', 'database_summary', 'db_consistency', 'drawdown', 'drawdown_range', 'max_drawdown', 'metrics', 'metrics.db', 'pnl', 'portfolio_value', 'price', 'profit_factor', 'quantity', 'recent_metrics', 'recent_trades', 'recent_validations', 'sharpe', 'sharpe_range', 'sharpe_ratio', 'summary', 'symbol', 'total_return', 'total_trades', 'unified_metrics', 'win_rate', 'win_rate_range', '✅ COHÉRENCE:', '📈 RÉSUMÉ:', '📊 MÉTRIQUES:']

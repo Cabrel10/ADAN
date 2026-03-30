@@ -1,4 +1,0 @@
-# file: /home/morningstar/Documents/trading/bot/src/adan_trading_bot/performance/unified_metrics_db.py
-# hypothesis_version: 6.138.3
-
-[100, 'action', 'check_name', 'consistency', 'consistent', 'database', 'details', 'drawdown', 'error', 'id', 'latest_metrics', 'max_drawdown', 'metrics', 'metrics.db', 'name', 'passed', 'pnl', 'price', 'quantity', 'recent_trades', 'recent_validations', 'sharpe', 'sharpe_ratio', 'source', 'status', 'symbol', 'timestamp', 'trades', 'unknown', 'validations', 'value', 'win_rate', '✅ OK']

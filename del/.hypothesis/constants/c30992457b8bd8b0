@@ -1,4 +1,0 @@
-# file: /home/morningstar/Documents/trading/bot/src/adan_trading_bot/common/json_log_handler.py
-# hypothesis_version: 6.138.3
-
-[1024, '.', 'Z', '[', ']', 'a', 'args', 'asctime', 'context', 'correlation_id', 'created', 'details', 'event_type', 'exc_info', 'exc_text', 'exception', 'filename', 'funcName', 'function', 'general', 'id', 'level', 'levelname', 'levelno', 'line', 'lineno', 'message', 'module', 'msecs', 'msg', 'name', 'pathname', 'process', 'processName', 'rb', 'relativeCreated', 'source', 'stack_info', 'thread', 'threadName', 'thread_name', 'timestamp', 'wb']

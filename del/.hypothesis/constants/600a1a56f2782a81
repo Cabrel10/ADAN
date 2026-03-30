@@ -1,4 +1,0 @@
-# file: /home/morningstar/Documents/trading/bot/src/adan_trading_bot/dashboard/models.py
-# hypothesis_version: 6.138.3
-
-[0.0, 0.01, 1.0, 100, 'BUY', 'Breakout', 'CRITICAL', 'HOLD', 'High', 'INFO', 'LONG', 'Low', 'Manual', 'Medium', 'Neutral', 'OK', 'Overbought', 'Oversold', 'Ranging', 'SELL', 'SL Hit', 'TP Hit', 'Time', 'Trending', 'inf']

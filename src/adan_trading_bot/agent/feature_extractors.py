@@ -671,7 +671,7 @@ class TemporalFusionExtractor(BaseFeaturesExtractor):
     dynamically modulate the CNN features before fusion with the portfolio state.
     """
     CONTEXT_KEY = "context_vector"
-    DEFAULT_CONTEXT_DIM = 5
+    DEFAULT_CONTEXT_DIM = 6
 
     def __init__(self, observation_space: gym.spaces.Dict, features_dim: int = 128):
         super().__init__(observation_space, features_dim)
@@ -895,7 +895,7 @@ class ContextualTemporalFusionExtractor(BaseFeaturesExtractor):
 
     # Class-level defaults for the observation contract.
     STRICT_TIMEFRAME_KEYS = ("5m", "1h", "4h")
-    DEFAULT_CONTEXT_DIM = 5
+    DEFAULT_CONTEXT_DIM = 6
 
     def __init__(
         self,

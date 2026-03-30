@@ -398,8 +398,12 @@ class DataValidator:
             return tf_info
 
         # Vérifier si le chunk a suffisamment de données après valid_from
-        effective_start = max(chunk_start, valid_from)
-        if effective_start >= chunk_end:
+        # Normalize tz-awareness for comparison
+        _cs = chunk_start.tz_localize(None) if hasattr(chunk_start, 'tz') and chunk_start.tz is not None else chunk_start
+        _ce = chunk_end.tz_localize(None) if hasattr(chunk_end, 'tz') and chunk_end.tz is not None else chunk_end
+        _vf = valid_from.tz_localize(None) if hasattr(valid_from, 'tz') and valid_from.tz is not None else valid_from
+        effective_start = max(_cs, _vf)
+        if effective_start >= _ce:
             tf_info['rejection_reason'] = f'valid_from_too_late_{effective_start}_vs_{chunk_end}'
             return tf_info
 

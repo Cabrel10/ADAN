@@ -1,4 +1,0 @@
-# file: /home/morningstar/Documents/trading/bot/src/adan_trading_bot/dashboard/aggregator.py
-# hypothesis_version: 6.138.3
-
-[0.0, 100, 'available_capital', 'avg_pnl_percent', 'best_trade', 'best_trade_pnl', 'count', 'inf', 'loss_count', 'position_count', 'profit_factor', 'total_pnl', 'total_size', 'total_trades', 'total_value', 'trade_count', 'win_count', 'win_rate', 'worst_trade', 'worst_trade_pnl']

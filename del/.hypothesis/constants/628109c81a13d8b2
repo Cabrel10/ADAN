@@ -1,4 +1,0 @@
-# file: /home/morningstar/Documents/trading/bot/src/adan_trading_bot/dashboard/sections/__init__.py
-# hypothesis_version: 6.138.3
-
-['render_closed_trades', 'render_header', 'render_performance', 'render_positions', 'render_system_health']

@@ -1,4 +1,0 @@
-# file: /home/morningstar/Documents/trading/bot/src/adan_trading_bot/environment/reward_shaper.py
-# hypothesis_version: 6.138.3
-
-[-1000000.0, 0.0, 1e-10, 0.1, 1.0, 1000000.0, 'drawdown', 'drawdown_penalty', 'risk_factor', 'sharpe_factor', 'sharpe_ratio', 'volatility', 'volatility_factor']

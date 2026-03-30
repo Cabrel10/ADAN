@@ -549,8 +549,15 @@ class ChunkedDataLoader:
                             )
 
                 if all_timestamps:
-                    chunk_start = min(all_timestamps)
-                    chunk_end = max(all_timestamps)
+                    # Normalize tz-awareness: make all tz-naive for comparison
+                    normalized_ts = []
+                    for ts in all_timestamps:
+                        if hasattr(ts, 'tz') and ts.tz is not None:
+                            normalized_ts.append(ts.tz_localize(None))
+                        else:
+                            normalized_ts.append(ts)
+                    chunk_start = min(normalized_ts)
+                    chunk_end = max(normalized_ts)
                 else:
                     # Fallback to current time if no data available
                     chunk_start = pd.Timestamp.now() - pd.Timedelta(hours=24)

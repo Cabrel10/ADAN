@@ -829,12 +829,13 @@ class StateBuilder:
         dynamically modulate CNN features.  This replaces hand-coded DBE
         heuristics with a learnable conditioning mechanism.
 
-        The vector contains five components:
+        The vector contains six components:
             [0] volatility  – normalised ATR / price  (0-1)
             [1] trend       – EMA crossover direction (-1 to 1)
             [2] adx         – ADX / 100  (0-1)
             [3] regime_score – composite regime indicator (-1 to 1)
             [4] drawdown    – current portfolio drawdown (0-1)
+            [5] candle_progress_pct – progress within current candle (0-1)
 
         Args:
             data: Dict mapping timeframes to DataFrames (optional).
@@ -842,9 +843,9 @@ class StateBuilder:
             portfolio_manager: Optional portfolio manager for drawdown info.
 
         Returns:
-            np.ndarray of shape (5,) with dtype float32.
+            np.ndarray of shape (6,) with dtype float32.
         """
-        context = np.zeros(5, dtype=np.float32)
+        context = np.zeros(6, dtype=np.float32)
 
         if data is None:
             return context
@@ -901,6 +902,25 @@ class StateBuilder:
                             context[4] = float(np.clip(abs(state[4]) / 100.0, 0.0, 1.0))
                 except Exception:
                     pass
+
+            # [5] Candle progress: position within data chunk (0..1)
+            # In backtest, this represents how far through the episode we are.
+            # In live mode, this would represent intra-candle progress.
+            try:
+                for tf in self.timeframes:
+                    if tf in data and not data[tf].empty:
+                        total_len = len(data[tf])
+                        if total_len > 1:
+                            context[5] = float(np.clip(
+                                current_idx / (total_len - 1), 0.0, 1.0
+                            ))
+                        else:
+                            context[5] = 1.0
+                        break
+                else:
+                    context[5] = 1.0  # fallback
+            except Exception:
+                context[5] = 1.0
 
         except Exception as e:
             logger.warning(f"Error building context vector: {e}. Returning zeros.")
@@ -1137,7 +1157,7 @@ class StateBuilder:
             )
         except Exception as e:
             logger.warning(f"Error building context_vector in build_observation: {e}")
-            observations["context_vector"] = np.zeros(5, dtype=np.float32)
+            observations["context_vector"] = np.zeros(6, dtype=np.float32)
 
         return observations
     def build_adaptive_observation(

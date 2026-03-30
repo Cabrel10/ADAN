@@ -1,4 +1,0 @@
-# file: /home/morningstar/Documents/trading/bot/src/adan_trading_bot/exchange_api/websocket_manager.py
-# hypothesis_version: 6.138.3
-
-['SUBSCRIBE', 'id', 'method', 'params']

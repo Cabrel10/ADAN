@@ -58,33 +58,33 @@ class DynamicBehaviorEngine:
             logger.info(message)
 
         # Initialisation des paramètres de trading (suite)
-        self.current_position_size_multiplier = 1.0
+        # NOTE: This block is legacy init code that runs inside log_info.
+        # Using .get() with safe defaults to prevent KeyError.
+        if not hasattr(self, '_legacy_init_done'):
+            self._legacy_init_done = True
+            self.current_position_size_multiplier = 1.0
 
-        # Log available config keys for debugging
-        if "position_sizing" not in self.config:
-            logger.error(
-                f"'position_sizing' key not found in DBE config. Available keys: {list(self.config.keys())}"
+            pos_sizing = self.config.get("position_sizing", {})
+
+            self.max_position_size = pos_sizing.get("max_position_size", 0.9)
+
+            # Paramètres de lissage
+            self.smoothing_factor = self.config.get("smoothing", {}).get(
+                "initial_factor", 0.1
             )
+            self.smoothed_params = {
+                "sl_pct": pos_sizing.get("initial_sl_pct", 0.02),
+                "tp_pct": pos_sizing.get("initial_tp_pct", 0.04),
+                "position_size": pos_sizing.get(
+                    "initial_position_size", 0.1
+                ),
+                "risk_level": 1.0,
+            }
 
-        self.max_position_size = self.config["position_sizing"]["max_position_size"]
-
-        # Paramètres de lissage
-        self.smoothing_factor = self.config.get("smoothing", {}).get(
-            "initial_factor", 0.1
-        )
-        self.smoothed_params = {
-            "sl_pct": self.config["position_sizing"].get("initial_sl_pct", 0.02),
-            "tp_pct": self.config["position_sizing"].get("initial_tp_pct", 0.04),
-            "position_size": self.config["position_sizing"].get(
-                "initial_position_size", 0.1
-            ),
-            "risk_level": 1.0,
-        }
-
-        # Configuration de fréquence des positions
-        self.frequency_config = self.config.get("trading_rules", {}).get(
-            "frequency", {}
-        )
+            # Configuration de fréquence des positions
+            self.frequency_config = self.config.get("trading_rules", {}).get(
+                "frequency", {}
+            )
 
         # Initialisation du logger personnalisé
         self.logger = logging.getLogger(f"dbe.{self.__class__.__name__}")
@@ -317,6 +317,10 @@ class DynamicBehaviorEngine:
             f"Aucun palier de capital trouvé pour un portefeuille de {portfolio_value:.2f} USDT."
         )
         return None
+
+    def get_capital_tier(self, portfolio_value: float) -> Optional[Dict[str, Any]]:
+        """Public alias for _get_capital_tier (OMEGA compatibility)."""
+        return self._get_capital_tier(portfolio_value)
 
     def update_risk_parameters(
         self,

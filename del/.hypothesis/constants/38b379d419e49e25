@@ -1,4 +1,0 @@
-# file: /home/morningstar/Documents/trading/bot/src/adan_trading_bot/exchange_api/connector.py
-# hypothesis_version: 6.138.3
-
-[1200, 30000, 'ADA/USDT', 'BTC/USDT', 'ETH/USDT', '_TESTNET', 'active', 'apiKey', 'balance_accessible', 'base', 'default', 'defaultType', 'errors', 'exchange', 'exchange_id', 'fees', 'future', 'limits', 'live', 'margin', 'market_count', 'markets_loaded', 'options', 'paper_trading', 'precision', 'quote', 'rateLimit', 'sandbox', 'secret', 'server_time', 'set_sandbox_mode', 'spot', 'symbol', 'testnet', 'testnet_mode', 'timeout', 'total', 'type', 'use_testnet', 'ws_url']

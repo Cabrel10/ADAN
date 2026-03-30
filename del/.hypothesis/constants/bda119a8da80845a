@@ -1,4 +1,0 @@
-# file: /home/morningstar/Documents/trading/bot/src/adan_trading_bot/dashboard/sections/performance.py
-# hypothesis_version: 6.138.3
-
-[0.0, 1.0, 1.5, 100, 3600, 'Avg Holding Time', 'Best Trade', 'Gross Loss', 'Gross Profit', 'Max Drawdown', 'Metric', 'Profit Factor', 'Sharpe Ratio', 'Sortino Ratio', 'Total Trades', 'Value', 'Win Rate', 'Worst Trade', '[dim]0.0%[/]', '[dim]0.00[/]', '[dim]0[/]', '[dim]N/A[/]', 'bold cyan', 'bold white', 'green', 'inf', 'magenta', 'red', 'yellow', '∞']

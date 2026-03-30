@@ -1,4 +1,0 @@
-# file: /home/morningstar/Documents/trading/bot/src/adan_trading_bot/dashboard/cache.py
-# hypothesis_version: 6.138.3
-
-['fresh_entries', 'health', 'is_stale', 'keys', 'market', 'portfolio', 'positions', 'signal', 'stale_entries', 'timestamp', 'total_entries', 'trades', 'ttl', 'value']

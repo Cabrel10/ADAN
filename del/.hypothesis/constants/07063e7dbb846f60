@@ -1,4 +1,0 @@
-# file: /home/morningstar/Documents/trading/bot/src/adan_trading_bot/dashboard/sections/system_health.py
-# hypothesis_version: 6.138.3
-
-[0.0, 4.0, 100, 150, 200, 500, 1000, 'API', 'CPU', 'CRITICAL', 'Component', 'Data Feed', 'Database', 'INFO', 'Memory', 'Model', 'Status', 'Threads', 'Unknown alert', 'Uptime', 'WARNING', 'alerts', 'api_latency_ms', 'api_status', 'bold cyan', 'bold red', 'bold white', 'bold yellow', 'cpu_percent', 'db_status', 'feed_lag_ms', 'feed_status', 'green', 'memory_gb', 'memory_total_gb', 'message', 'model_latency_ms', 'model_status', 'red', 'severity', 'threads', 'uptime_percent', 'violet', 'yellow', 'ℹ️', '🔴', '🟡']

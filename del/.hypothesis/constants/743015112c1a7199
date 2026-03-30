@@ -1,4 +1,0 @@
-# file: /home/morningstar/Documents/trading/bot/src/adan_trading_bot/trading/order_manager.py
-# hypothesis_version: 6.138.3
-
-[0.0, 1.0, 'BUY', 'CANCELED', 'EXPIRED', 'FILLED', 'LIMIT', 'MARKET', 'NEW', 'PARTIALLY_FILLED', 'SELL', 'STOP_LOSS', 'TAKE_PROFIT', 'buy']

@@ -1,4 +1,0 @@
-# file: /home/morningstar/Documents/trading/bot/src/adan_trading_bot/utils/caching_utils.py
-# hypothesis_version: 6.138.3
-
-['data', 'data_cache.pkl', 'float64', 'int64', 'scalers']
