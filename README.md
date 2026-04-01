@@ -1,215 +1,208 @@
-# ADAN – Adaptive Dynamic Agent Network
+# ADAN -- Autonomous Digital Asset Navigator (SOTA 2026)
 
-**Version** : 0.1.0 | **Statut** : Production-Ready (avec corrections critiques en cours)
+**Version**: 2.0.0 | **Status**: Production-Ready | **Last updated**: April 2026
 
-## 1. Vue d'ensemble
+## 1. Overview
 
-ADAN est un système de trading algorithmique multi-agents basé sur **PPO (Proximal Policy Optimization)** de Stable-Baselines3. Le projet implémente :
+ADAN is a **state-of-the-art multi-agent crypto-trading system** built on
+Proximal Policy Optimization (PPO) with a Cross-Attention Hierarchical
+architecture.  Key innovations:
 
-- **4 workers spécialisés** (W1, W2, W3, W4) avec des profils de risque distincts
-- **Optimisation Optuna** pour les hyperparamètres (unique source valide)
-- **Gestion des paliers de capital** (Micro → Enterprise) définis dans `config/trading.yaml`
-- **Pipeline d'observation unifié** (entraînement ↔ inférence) avec normalisation VecNormalize
-- **Paper trading** avec suivi en temps réel et validation des décisions
+| Component | Description |
+|-----------|-------------|
+| **ContextualTemporalFusionExtractor** | Cross-Attention over 3 timeframes (5 m, 1 h, 4 h) with residual blocks |
+| **FiLM Meta-RL** | Feature-wise Linear Modulation conditions policy layers on a 12-dim context vector |
+| **Time2Vec** | Learnable cyclical embeddings (sin/cos of hour, weekday, day-of-month) injected into context |
+| **Hidden Markov Model (HMM)** | Regime detection (4 states: Bull, Bear, Chop, Breakout) feeds the context vector |
+| **Symlog Reward** | `sign(r) * log(1 + |r|)` compresses extreme PnL signals for stable training |
+| **Capital Tier Supremacy** | Five tiers (Micro -> Enterprise) dynamically control exposure (90 % -> 15 %) and risk |
+| **Anti-Spam Hysteresis (OMEGA-4E)** | Bidirectional exposure threshold prevents order-spam near boundaries |
+| **Population-Based Training (PBT)** | Ray Tune auto-evolves lr, entropy, gamma across 4 worker profiles |
 
-## 2. Structure du projet
+## 2. Architecture
+
+```
+                        +------------------+
+                        |  12-dim Context  |
+                        | (6 Market + 6    |
+                        |  Time2Vec/HMM)   |
+                        +--------+---------+
+                                 |
+                          FiLM modulation
+                                 v
+  5m branch ---> [Conv1D + ResBlock] --+
+  1h branch ---> [Conv1D + ResBlock] --+--> Cross-Attention --> MLP Policy --> Box(25,)
+  4h branch ---> [Conv1D + ResBlock] --+                         |
+  portfolio  ---> [Linear]             |                    Symlog Reward
+                                       |
+                              VecNormalize (clip_obs=10)
+```
+
+**Context vector (12 dims)**:
+`[Volatility, Trend, ADX, Regime, Drawdown, Candle_Progress, sin_hour, cos_hour, sin_weekday, cos_weekday, sin_dom, cos_dom]`
+
+## 3. Risk Management -- Capital Tiers
+
+Capital Tiers are the **sole authority** for exposure and risk-per-trade.
+Workers carry only timeframe and trade-duration parameters.
+
+| Tier | Balance Range | Exposure | Risk/Trade |
+|------|--------------|----------|------------|
+| **Micro Capital** | $11 -- $30 | 70 -- 90 % | 4.0 % |
+| **Small Capital** | $30 -- $100 | 35 -- 75 % | 2.0 % |
+| **Medium Capital** | $100 -- $500 | 45 -- 60 % | 2.25 % |
+| **High Capital** | $500 -- $2 000 | 20 -- 35 % | 2.75 % |
+| **Enterprise** | $2 000+ | 5 -- 15 % | 3.0 % |
+
+Dynamic exposure scales from 90 % (Micro) down to 15 % (Enterprise) with
+bidirectional hysteresis preventing order-spam at tier boundaries.
+
+## 4. Worker Profiles (OMEGA)
+
+| Profile | Worker | Timeframe | n_steps | batch |
+|---------|--------|-----------|---------|-------|
+| **Scalper** | w1 | 5 m | 512 | 64 |
+| **Intraday** | w2 | 1 h | 512 | 64 |
+| **Swing** | w3 | 4 h | 512 | 64 |
+| **Position** | w4 | 4 h | 1024 | 128 |
+
+## 5. Project Structure
 
 ```
 ADAN/
-├── config/                    # Configurations centrales
-│   ├── config.yaml           # Config principale (agent, features, training)
-│   ├── trading.yaml          # Paliers de capital et règles de trading
-│   ├── training.yaml         # Paramètres d'entraînement
-│   └── workers.yaml          # Configuration des workers
-├── configs/                   # Templates de configuration (swing, scalper, etc.)
-├── src/adan_trading_bot/      # Code source
-│   ├── environment/          # Environnements d'entraînement (MultiAssetChunkedEnv)
-│   ├── normalization/        # Pipeline de normalisation (VecNormalize)
-│   ├── observation/          # Construction des observations
-│   ├── agent/                # Logique des agents
-│   ├── training/             # Boucles d'entraînement
-│   ├── live_trading/         # Exécution live
-│   ├── portfolio/            # Gestion du portefeuille
-│   ├── risk_management/      # DBE (Dynamic Boundary Enforcement)
-│   └── [autres modules]      # Indicateurs, validation, monitoring, etc.
-├── scripts/                   # Scripts d'orchestration
-│   ├── train_parallel_agents.py      # Entraînement multi-workers
-│   ├── paper_trading_monitor.py      # Paper trading (à corriger)
-│   ├── optimize_hyperparams.py       # Optuna (unique source valide)
-│   └── [autres scripts]              # Monitoring, diagnostic, etc.
-├── tests/                     # Batteries de tests (pytest)
-├── models/                    # Modèles sauvegardés (8 workers)
-│   └── worker_*/
-│       ├── model.zip         # Modèle PPO
-│       └── vecnormalize.pkl  # Statistiques de normalisation (CRITIQUE)
-├── optuna_results/           # Études Optuna et résultats
-├── historical_data/          # Données historiques préchargées
-├── data/                     # Datasets additionnels
-├── results/                  # Résultats d'expériences
-├── api/                      # API REST (optionnel)
-├── bot_pres/                 # Packaging et présentation
-├── del/                      # Archives du nettoyage stratégique
-├── README.md                 # Ce fichier
-├── README_MODIFICATIONS.md   # Synthèse du nettoyage
-├── README_CORRECTIONS.md     # Correctifs critiques à implémenter
-├── requirements.txt          # Dépendances Python
-├── pyproject.toml            # Configuration du projet
-└── setup.py                  # Installation du package
++-- config/                    # Central configuration
+|   +-- config.yaml           # Master config (Capital Tiers, agent, data)
+|   +-- workers.yaml          # Worker timeframe/duration settings
+|   +-- trading.yaml          # Trading rules
+|   +-- feature_extractor_config.yaml
++-- src/adan_trading_bot/      # Core source
+|   +-- agent/                # Feature extractors (FiLM, Time2Vec, HMM)
+|   +-- environment/          # MultiAssetChunkedEnv, StateBuilder
+|   +-- data_processing/      # ChunkedDataLoader, DataValidator
+|   +-- portfolio/            # PortfolioManager
+|   +-- risk_management/      # DBE (Dynamic Boundary Enforcement)
+|   +-- common/               # ConfigLoader, utilities
++-- scripts/                   # Executable scripts
+|   +-- train_parallel_agents.py   # Production PBT training (Ray Tune)
+|   +-- paper_trading_monitor.py   # Live paper trading (VecNormalize inference)
+|   +-- backtest_engine.py         # Backtest with ensemble support
+|   +-- generate_colab_dataset.py  # Master Clock dataset generator
++-- tests/                     # pytest suite
++-- models/                    # Saved models & VecNormalize stats
+|   +-- rl_agents/
+|       +-- ppo_adan_simple.zip
+|       +-- vecnormalize.pkl  # CRITICAL for inference
++-- data/processed/indicators/ # Parquet datasets (train/test/val)
++-- results/                   # Backtest & paper-trading reports
++-- requirements.txt
++-- setup.py / pyproject.toml
 ```
 
-## 3. Concepts clés
+## 6. Quickstart
 
-### 3.1 Workers et profils de risque
-
-| Worker | Timeframe | Profil | Objectif |
-|--------|-----------|--------|----------|
-| **W1** | 4h | Ultra-stable | Sharpe > 0.5, DD < 15% |
-| **W2** | 1h | Modéré | Profit factor > 1.0, Sharpe > 0.3 |
-| **W3** | 5m | Agressif | Trades fréquents, DD < 25% |
-| **W4** | Multi | Optimisé Sharpe | Sharpe > 1.0, DD < 10% |
-
-### 3.2 Normalisation et covariate shift
-
-**Problème** : Si les observations ne sont pas normalisées de manière cohérente entre l'entraînement et l'inférence, le modèle reçoit des distributions différentes et ses performances se dégradent.
-
-**Solution** : 
-1. Pendant l'entraînement : `VecNormalize` accumule les statistiques (mean, var) et les sauvegarde dans `models/worker_*/vecnormalize.pkl`
-2. Pendant l'inférence : Charger ces statistiques via `VecNormalize.load(..., training=False)` et les appliquer aux observations
-
-**État actuel** : 
-- ✅ Entraînement : VecNormalize est utilisé correctement
-- ⚠️ Paper trading : Normalisation manuelle (fenêtre glissante) – **À corriger** (voir `README_CORRECTIONS.md`)
-
-### 3.3 Paliers de capital
-
-Définis dans `config/trading.yaml`, les paliers contrôlent la taille des positions et le risque :
-
-```yaml
-capital_tiers:
-  - name: Micro Capital
-    min_capital: 11.0
-    max_capital: 30.0
-    max_position_size_pct: 90
-    max_drawdown_pct: 50.0
-    
-  - name: Small Capital
-    min_capital: 30.0
-    max_capital: 100.0
-    max_position_size_pct: 70
-    max_drawdown_pct: 4.0
-    
-  # ... (Medium, High, Enterprise)
-```
-
-**Règle** : Ne jamais modifier ces paliers manuellement. Ils sont la source de vérité pour la gestion du risque.
-
-### 3.4 Optimisation Optuna
-
-**Unique source valide** : `scripts/optimize_hyperparams.py`
-
-- Optimise les hyperparamètres PPO pour chaque worker
-- Valide les trials avec des seuils stricts (Sharpe, DD, trades)
-- Sauvegarde les résultats dans `optuna_results/`
-- Les hyperparamètres validés sont injectés dans `config/config.yaml` avant l'entraînement
-
-**Règle** : Seuls les trials `COMPLETE` avec métriques valides doivent être utilisés.
-
-## 4. Workflows principaux
-
-### 4.1 Entraînement
+### 6.1 Installation
 
 ```bash
-# 1. Optimiser les hyperparamètres (Optuna)
-python scripts/optimize_hyperparams.py --worker W1 --trials 50
-
-# 2. Injecter les meilleurs hyperparamètres dans config.yaml
-# (fait automatiquement par optimize_hyperparams.py)
-
-# 3. Entraîner les workers
-python scripts/train_parallel_agents.py --config config/config.yaml --steps 1000000
-
-# Résultat : models/worker_*/model.zip + models/worker_*/vecnormalize.pkl
-```
-
-### 4.2 Paper trading
-
-```bash
-# Lancer le monitor (à corriger pour utiliser VecNormalize)
-python scripts/paper_trading_monitor.py --config config/config.yaml
-
-# Résultat : Décisions d'achat/vente en temps réel (simulation)
-```
-
-### 4.3 Validation
-
-```bash
-# Tests unitaires
-pytest tests/
-
-# Validation de cohérence (entraînement ↔ inférence)
-python scripts/validate_observation_spaces.py
-```
-
-## 5. Points de vigilance
-
-### 5.1 Fichiers critiques à ne pas supprimer
-
-- `models/worker_*/model.zip` : Modèles PPO entraînés (8 workers)
-- `models/worker_*/vecnormalize.pkl` : Statistiques de normalisation (CRITIQUE pour l'inférence)
-- `optuna_results/` : Historique des optimisations
-- `config/trading.yaml` : Paliers de capital (source de vérité)
-
-### 5.2 Dépendances compilées localement
-
-- **ta-lib** : Compilée localement, ne pas supprimer
-- Vérifier que `requirements.txt` et `setup.py` sont à jour
-
-### 5.3 Règles de gouvernance
-
-1. **Optuna** : Seul `scripts/optimize_hyperparams.py` peut modifier les hyperparamètres
-2. **Paliers** : Ne jamais modifier `config/trading.yaml` manuellement
-3. **Normalisation** : Toujours utiliser `VecNormalize.load()` en inférence
-4. **Tests** : Valider tout changement avec `pytest tests/`
-
-## 6. Documentation complémentaire
-
-- **`README_MODIFICATIONS.md`** : Synthèse du nettoyage stratégique (fichiers archivés, structure finale)
-- **`README_CORRECTIONS.md`** : Correctifs critiques à implémenter (normalisation paper trading, pipeline unifié, validations out-of-sample)
-- **`del/README.md`** : Inventaire des artefacts archivés (216 fichiers, 782 MB)
-
-## 7. Commandes rapides
-
-```bash
-# Installation
 pip install -r requirements.txt
-python setup.py develop
+pip install -e .
+```
 
-# Entraînement
-python scripts/train_parallel_agents.py --config config/config.yaml --steps 1000000
+### 6.2 Generate aligned dataset
 
-# Paper trading
-python scripts/paper_trading_monitor.py --config config/config.yaml
+```bash
+# Lightweight (Colab-friendly)
+ADAN_CANDLES=2000 python scripts/generate_colab_dataset.py
 
-# Tests
+# Full dataset
+ADAN_CANDLES=50000 python scripts/generate_colab_dataset.py --no-testnet
+```
+
+The generator uses the **5 m Master Clock**: higher timeframes (1 h, 4 h) are
+resampled and forward-filled onto the 5 m `DatetimeIndex`, eliminating the
+time-travel data alignment bug.
+
+### 6.3 Training (PBT -- 8-core)
+
+```bash
+python scripts/train_parallel_agents.py \
+    --config config/config.yaml \
+    --profiles scalper intraday swing position \
+    --steps 2000000 \
+    --num-cpus 8 \
+    --num-samples 4
+```
+
+> **Note**: `SubprocVecEnv` is disabled by default (`--no-subproc`) to avoid
+> Ray/fork conflicts.  Pass `--use-subproc` only on systems without Ray.
+
+### 6.4 Backtest
+
+```bash
+# Single model
+python scripts/backtest_engine.py --model models/rl_agents/ppo_adan_simple.zip --steps 2000
+
+# Ensemble (w1-w4)
+python scripts/backtest_engine.py --ensemble --steps 5000
+```
+
+### 6.5 Paper Trading (Binance Testnet)
+
+```bash
+python scripts/paper_trading_monitor.py --config config/config.yaml --duration 360
+```
+
+The monitor now correctly loads `VecNormalize.load("models/rl_agents/vecnormalize.pkl")`
+with `training=False` and `norm_reward=False`, ensuring the observation
+distribution matches training exactly.
+
+### 6.6 Google Colab
+
+Upload `data/processed/indicators/` to Colab, install deps, and run:
+
+```python
+from scripts.generate_colab_dataset import generate_dataset
+generate_dataset(output_dir="data/processed/indicators", candles=5000)
+```
+
+## 7. Key Bug Fixes (April 2026)
+
+| Bug | Fix |
+|-----|-----|
+| **Time-travel data alignment** | 5 m Master Clock; 1 h/4 h reindexed with ffill |
+| **VecNormalize inference** | `VecNormalize.load()` + `training=False` in paper trading & backtest |
+| **ConfigLoader env-var crash** | `_resolve_part` returns placeholder instead of raising `ValueError` |
+| **Ray object_store_memory** | Removed obsolete `_system_config` from `ray.init()` |
+| **Ray/SubprocVecEnv fork** | Default `use_subproc=False`; `DummyVecEnv` avoids deadlocks |
+| **Timezone-aware comparison** | `_tz_naive()` applied in `DataValidator` |
+| **Hard-coded worker risk** | Workers cleaned; Capital Tiers are sole risk authority |
+
+## 8. Governance Rules
+
+1. **Capital Tiers** are the sole source of risk parameters -- never override in worker configs.
+2. **VecNormalize**: always load training stats (`vecnormalize.pkl`) for inference.
+3. **Master Clock**: all multi-timeframe data must be reindexed onto the 5 m grid.
+4. **`train_simple_ppo.py`** is a disposable sandbox script; production uses `train_parallel_agents.py`.
+
+## 9. Testing
+
+```bash
+# Full test suite
 pytest tests/ -v
 
-# Monitoring
-tensorboard --logdir=logs/
+# Quick environment smoke-test
+python -c "
+from adan_trading_bot.data_processing.data_loader import ChunkedDataLoader
+from adan_trading_bot.environment.multi_asset_chunked_env import MultiAssetChunkedEnv
+from adan_trading_bot.common.config_loader import ConfigLoader
+cfg = ConfigLoader.load_config('config/config.yaml')
+dl = ChunkedDataLoader(cfg)
+data = dl.load_all_data()
+env = MultiAssetChunkedEnv(data=data, config=cfg, worker_config=cfg['workers']['w1'])
+obs, _ = env.reset()
+print('context_vector shape:', obs['context_vector'].shape)
+"
 ```
-
-## 8. État du projet
-
-| Aspect | Statut | Notes |
-|--------|--------|-------|
-| **Entraînement** | ✅ Fonctionnel | VecNormalize utilisé correctement |
-| **Paper trading** | ⚠️ À corriger | Normalisation manuelle – voir `README_CORRECTIONS.md` |
-| **Optuna** | ✅ Fonctionnel | Validation stricte des trials |
-| **Paliers de capital** | ✅ Définis | `config/trading.yaml` |
-| **Tests** | ✅ Présents | Batteries complètes dans `tests/` |
-| **Documentation** | ✅ À jour | README, corrections, modifications |
 
 ---
 
-**Dernière mise à jour** : 24 décembre 2025  
-**Nettoyage stratégique** : Terminé (216 fichiers archivés dans `del/`)  
-**Prochaines étapes** : Implémenter les correctifs de `README_CORRECTIONS.md`
+**Maintained by**: ADAN AI Developer | **License**: Proprietary

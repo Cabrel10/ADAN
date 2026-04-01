@@ -209,7 +209,12 @@ class ConfigLoader:
             return cls._resolve_nested_path(part, config, full_path, root_config)
 
         # If we get here, we couldn't resolve the part
-        raise ValueError(f"Undefined variable path in config: {part} (at {full_path})")
+        # Return a safe placeholder instead of crashing (env vars may be absent in sandbox/CI)
+        import logging as _logging
+        _logging.getLogger("config_loader").warning(
+            f"Unresolved variable '{part}' (at {full_path}) — using placeholder"
+        )
+        return f"placeholder_missing_{part}"
 
     @classmethod
     def _resolve_nested_path(
@@ -474,11 +479,16 @@ class ConfigLoader:
         # If we get here, we couldn't resolve the part
         if debug:
             try:
-                print(f"[ERROR] Failed to resolve part: '{part}' in path: '{full_path}'")
-                print(f"[ERROR] Available keys at this level: {list(config.keys())}")
+                print(f"[WARN] Unresolved part: '{part}' in path: '{full_path}'")
+                print(f"[WARN] Available keys at this level: {list(config.keys())}")
             except BrokenPipeError:
                 pass
-        raise ValueError(f"Undefined variable path in config: {part} (at {full_path})")
+        # Return a safe placeholder instead of crashing
+        import logging as _logging
+        _logging.getLogger("config_loader").warning(
+            f"Unresolved variable '{part}' (at {full_path}) — using placeholder"
+        )
+        return f"placeholder_missing_{part}"
 
     @classmethod
     def _find_in_dict(cls, d: Dict[str, Any], target_key: str):

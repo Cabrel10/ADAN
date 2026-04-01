@@ -2,8 +2,9 @@
 
 This script trains multiple PPO agents in parallel using Ray Tune's
 PopulationBasedTraining scheduler.  Each trial (worker) instantiates the
-real MultiAssetChunkedEnv wrapped in SubprocVecEnv + VecNormalize, with
-the TemporalFusionExtractor (which now includes FiLM Meta-RL).
+real MultiAssetChunkedEnv wrapped in DummyVecEnv + VecNormalize (SubprocVecEnv
+disabled by default to avoid Ray/fork conflicts), with the
+ContextualTemporalFusionExtractor (which now includes FiLM Meta-RL).
 
 Business-logic components preserved from the original multiprocessing
 implementation:
@@ -69,6 +70,12 @@ try:
     from adan_trading_bot.utils.seed_manager import SeedManager
 except ImportError:
     SeedManager = None
+
+# Feature extractor (SOTA architecture: FiLM Meta-RL, TemporalFusion)
+try:
+    from adan_trading_bot.agent.feature_extractors import ContextualTemporalFusionExtractor
+except ImportError:
+    ContextualTemporalFusionExtractor = None
 
 # Optional imports
 try:
@@ -376,7 +383,7 @@ def make_env(
     config: dict,
     worker_idx: int = 0,
     envs_per_worker: int = 1,
-    use_subproc: bool = True,
+    use_subproc: bool = False,
     preloaded_data: Optional[Dict] = None,
     profile: Optional[str] = None,
 ):
@@ -451,9 +458,10 @@ class ADAN_PBT_Worker(tune.Trainable):
         self.adan_config = config["adan_config"]
         self.worker_idx = config.get("worker_idx", 0)
         self.envs_per_worker = config.get("envs_per_worker", 2)
-        self.use_subproc = config.get("use_subproc", True)
+        self.use_subproc = config.get("use_subproc", False)
         self.interval_timesteps = config.get("interval_timesteps", 10_000)
         self._total_timesteps = 0
+        self._max_iterations = config.get("_max_iterations", 100)
         self.profile = config.get("profile", None)  # scalper / swing / ...
 
         # Mutable hyper-parameters (PBT will perturb these)
@@ -610,6 +618,10 @@ class ADAN_PBT_Worker(tune.Trainable):
         except Exception:
             pass
 
+        # Check if we've exceeded max iterations (self-stop for Ray >= 2.54)
+        _iter = getattr(self, "training_iteration", 0)
+        done = _iter >= self._max_iterations
+
         return {
             "mean_reward": mean_reward,
             "mean_sharpe": mean_sharpe,
@@ -618,6 +630,7 @@ class ADAN_PBT_Worker(tune.Trainable):
             "ent_coef": self.ent_coef,
             "gamma": self.gamma,
             "timesteps_total": self._total_timesteps,
+            "done": done,
         }
 
     def save_checkpoint(self, checkpoint_dir: str) -> str:
@@ -648,7 +661,9 @@ class ADAN_PBT_Worker(tune.Trainable):
 
         vec_path = os.path.join(checkpoint_dir, "vecnormalize.pkl")
         if os.path.exists(vec_path):
-            self.vec_env = VecNormalize.load(vec_path, self.vec_env)
+            # Load onto the underlying venv (not the VecNormalize wrapper)
+            venv = self.vec_env.venv if hasattr(self.vec_env, "venv") else self.vec_env
+            self.vec_env = VecNormalize.load(vec_path, venv)
             self.model.set_env(self.vec_env)
 
         state_path = os.path.join(checkpoint_dir, "worker_state.json")
@@ -678,7 +693,7 @@ def run_pbt(
     num_cpus: int = 8,
     num_samples: int = 4,
     envs_per_worker: int = 2,
-    use_subproc: bool = True,
+    use_subproc: bool = False,
     total_steps: int = 1_000_000,
     interval_timesteps: int = 10_000,
     stop_config: Optional[dict] = None,
@@ -691,8 +706,8 @@ def run_pbt(
         config: Full ADAN config dict (from ConfigLoader).
         num_cpus: CPUs available to Ray.
         num_samples: Number of concurrent PBT trials.
-        envs_per_worker: Sub-envs per trial (SubprocVecEnv).
-        use_subproc: Whether to use SubprocVecEnv.
+        envs_per_worker: Sub-envs per trial (DummyVecEnv by default).
+        use_subproc: Whether to use SubprocVecEnv (default False to avoid Ray/fork conflicts).
         total_steps: Total training timesteps per trial.
         interval_timesteps: Timesteps per PBT iteration.
         stop_config: Optional tune stop dict.
@@ -742,7 +757,11 @@ def run_pbt(
     if stop_config is None:
         stop_config = {"training_iteration": max_iterations}
 
-    # Tuner
+    # Tuner – Ray >= 2.54 removed stop/verbose from RunConfig.
+    # We handle stopping via the Trainable's own iteration counter.
+    # Pass max_iterations through param_space so the worker can self-stop.
+    param_space["_max_iterations"] = max_iterations
+
     tuner = tune.Tuner(
         ADAN_PBT_Worker,
         tune_config=tune.TuneConfig(
@@ -751,11 +770,9 @@ def run_pbt(
             max_concurrent_trials=num_samples,
             reuse_actors=False,
         ),
-        run_config=ray.train.RunConfig(
+        run_config=tune.RunConfig(
             name="adan_pbt_training",
-            storage_path=storage_path,
-            stop=stop_config,
-            verbose=1,
+            storage_path=str(storage_path),
         ),
         param_space=param_space,
     )
@@ -806,7 +823,7 @@ def main(
     num_cpus: int = 8,
     num_samples: int = 4,
     envs_per_worker: int = 2,
-    use_subproc: bool = True,
+    use_subproc: bool = False,
     total_steps: int = 1_000_000,
     interval_timesteps: int = 10_000,
     log_level: str = "INFO",
@@ -836,9 +853,6 @@ def main(
         num_cpus=num_cpus,
         include_dashboard=False,
         ignore_reinit_error=True,
-        _system_config={
-            "object_store_memory": 200 * 1024 * 1024,  # 200 MB
-        },
     )
 
     logger.info("=" * 80)
@@ -889,8 +903,8 @@ if __name__ == "__main__":
     parser.add_argument("--num-cpus", type=int, default=8, help="Number of CPUs for Ray")
     parser.add_argument("--num-samples", type=int, default=4, help="Number of concurrent PBT trials")
     parser.add_argument("--envs-per-worker", type=int, default=2, help="Sub-envs per worker (SubprocVecEnv)")
-    parser.add_argument("--use-subproc", action="store_true", default=True, help="Use SubprocVecEnv")
-    parser.add_argument("--no-subproc", action="store_true", help="Use DummyVecEnv instead")
+    parser.add_argument("--use-subproc", action="store_true", default=False, help="Use SubprocVecEnv (default: off)")
+    parser.add_argument("--no-subproc", action="store_true", help="Use DummyVecEnv (default behaviour)")
     parser.add_argument("--steps", type=int, default=1_000_000, help="Total training timesteps")
     parser.add_argument("--steps-per-iter", type=int, default=10_000, help="Timesteps per PBT iteration")
     parser.add_argument("--log-level", type=str, default="INFO", help="Logging level")
