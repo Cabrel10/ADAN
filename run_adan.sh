@@ -142,16 +142,24 @@ do_backtest() {
 
 do_paper_trading() {
     echo ""
-    echo -e "${BOLD}[4] Paper Trading (Live)${RESET}"
+    echo -e "${BOLD}[4] Paper Trading${RESET}"
     echo ""
     read -rp "Duration in minutes (default: 60): " DURATION
     DURATION="${DURATION:-60}"
 
-    if [ -z "${BINANCE_API_KEY:-}" ]; then
-        echo -e "${YELLOW}WARNING: BINANCE_API_KEY not set. Paper trading needs API keys.${RESET}"
-        echo -e "${YELLOW}Create a .env file from .env.example and fill in your keys.${RESET}"
-        read -rp "Continue anyway? [y/N]: " CONT
-        if [[ "${CONT,,}" != "y" ]]; then return 1; fi
+    read -rp "Mode: [L]ive (Binance testnet) or [O]ffline (local data)? (default: O): " MODE
+    MODE="${MODE:-O}"
+
+    OFFLINE_FLAG=""
+    if [[ "${MODE,,}" == "o" || "${MODE,,}" == "offline" ]]; then
+        OFFLINE_FLAG="--offline"
+    else
+        if [ -z "${BINANCE_API_KEY:-}" ]; then
+            echo -e "${YELLOW}WARNING: BINANCE_API_KEY not set. Paper trading needs API keys.${RESET}"
+            echo -e "${YELLOW}Create a .env file from .env.example and fill in your keys.${RESET}"
+            read -rp "Continue anyway? [y/N]: " CONT
+            if [[ "${CONT,,}" != "y" ]]; then return 1; fi
+        fi
     fi
 
     MODEL="models/rl_agents/ppo_adan_simple.zip"
@@ -162,7 +170,7 @@ do_paper_trading() {
 
     echo ""
     echo -e "${GREEN}Starting paper trading for ${DURATION} minutes...${RESET}"
-    python scripts/paper_trading_monitor.py --duration "$DURATION"
+    python scripts/paper_trading_monitor.py --duration "$DURATION" $OFFLINE_FLAG
 }
 
 # ── Main loop ─────────────────────────────────────────────────────────────
@@ -175,7 +183,7 @@ while true; do
     echo "  [1] Generate Dataset   (synthetic or live, any symbol)"
     echo "  [2] Train Model        (simple PPO, single GPU/CPU)"
     echo "  [3] Run Backtest       (on trained model)"
-    echo "  [4] Paper Trading      (live Binance testnet)"
+    echo "  [4] Paper Trading      (live or offline replay)"
     echo "  [q] Quit"
     echo ""
     read -rp "Choice: " CHOICE

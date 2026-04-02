@@ -90,12 +90,19 @@ def interpret_target_weight_action(action_raw, has_position: bool) -> dict:
     """Interpret the continuous Target-Weight action vector.
 
     Returns dict with keys: signal, size_raw, confidence.
+
+    ``action_raw`` may arrive as:
+      - shape (25,) -- single-env predict
+      - shape (1, 25) -- batched predict (VecEnv)
+    We flatten to 1-D before interpretation.
     """
-    if hasattr(action_raw, "__len__"):
-        signal_raw = float(action_raw[0])
-        size_raw = float(action_raw[1]) if len(action_raw) > 1 else 0.0
+    import numpy as _np
+    arr = _np.asarray(action_raw).flatten()
+    if arr.size > 0:
+        signal_raw = float(arr[0])
+        size_raw = float(arr[1]) if arr.size > 1 else 0.0
     else:
-        signal_raw = float(action_raw)
+        signal_raw = 0.0
         size_raw = 0.0
 
     # Dynamic exit: agent signals negative while already long
@@ -111,22 +118,37 @@ def interpret_target_weight_action(action_raw, has_position: bool) -> dict:
 
 
 class PaperTradingMonitor:
-    """Real-time paper trading monitor for ADAN on Binance Testnet."""
+    """Real-time paper trading monitor for ADAN on Binance Testnet.
 
-    def __init__(self, config_path="config/config.yaml", api_key=None, api_secret=None):
+    Supports two modes:
+      - Live:    connects to Binance Testnet via ccxt, fetches real OHLCV.
+      - Offline:  uses locally generated parquet data (from generate_colab_dataset.py)
+                  and replays it step-by-step through the environment.
+
+    The offline mode lets you validate the full inference pipeline
+    (VecNormalize, StateBuilder, model.predict) without network access.
+    """
+
+    def __init__(self, config_path="config/config.yaml", api_key=None, api_secret=None,
+                 offline=False):
         self.config = ConfigLoader.load_config(config_path)
         self.api_key = api_key or os.getenv("BINANCE_API_KEY", "")
         self.api_secret = api_secret or os.getenv("BINANCE_SECRET_KEY", "")
         self.testnet = os.getenv("BINANCE_TESTNET", "true").lower() == "true"
         self.symbol = os.getenv("TRADING_PAIR", "BTC/USDT")
         self.initial_balance = float(os.getenv("INITIAL_BALANCE", "25"))
+        self.offline = offline
 
         self.virtual_balance = self.initial_balance
         self.active_position = None  # {side, entry_price, tp, sl, timestamp}
         self.trades = []
         self.timeframes = ["5m", "1h", "4h"]
-        self.analysis_interval = 300  # 5 minutes (match training)
-        self.tp_sl_check_interval = 30  # seconds
+        self.analysis_interval = 5  # 5s in offline mode, 300s live
+        self.tp_sl_check_interval = 2  # seconds (2s offline, 30s live)
+
+        if not self.offline:
+            self.analysis_interval = 300
+            self.tp_sl_check_interval = 30
 
         # Capital tiers from config
         self.capital_tiers = self.config.get("capital_tiers", [])
@@ -141,13 +163,27 @@ class PaperTradingMonitor:
         self.last_tp_sl_check = 0
         self.latest_data = None
 
-        logger.info(f"Paper Trading Monitor initialized")
+        # Offline replay state
+        self._offline_vec_env = None
+        self._offline_obs = None
+        self._offline_step = 0
+
+        mode_str = "OFFLINE (local data)" if self.offline else "LIVE (Binance Testnet)"
+        logger.info(f"Paper Trading Monitor initialized -- {mode_str}")
         logger.info(f"  Symbol: {self.symbol}")
         logger.info(f"  Balance: ${self.initial_balance}")
         logger.info(f"  Testnet: {self.testnet}")
 
     def setup_exchange(self):
-        """Initialize ccxt exchange connection."""
+        """Initialize ccxt exchange connection.
+
+        In offline mode, skip connection entirely and load local data instead.
+        If the exchange is unreachable, automatically fall back to offline mode.
+        """
+        if self.offline:
+            logger.info("Offline mode: skipping exchange connection")
+            return self._setup_offline_env()
+
         try:
             import ccxt
             self.exchange = ccxt.binance({
@@ -164,7 +200,59 @@ class PaperTradingMonitor:
             logger.info("Exchange connected (Binance Testnet)")
             return True
         except Exception as e:
-            logger.error(f"Exchange setup failed: {e}")
+            logger.warning(f"Exchange setup failed: {e}")
+            logger.info("Falling back to offline mode with local data")
+            self.offline = True
+            return self._setup_offline_env()
+
+    def _setup_offline_env(self):
+        """Build vectorised env from local parquet data for offline replay."""
+        try:
+            wc = copy.deepcopy(self.config.get("workers", {}).get("w1", {}))
+            wc["worker_id"] = 0
+
+            loader = ChunkedDataLoader(self.config, worker_config=wc, worker_id=0)
+            data = loader.load_chunk(0)
+
+            if not data:
+                logger.error("No local data found. Run generate_colab_dataset.py first.")
+                return False
+
+            raw_env = MultiAssetChunkedEnv(
+                data=data, config=self.config, worker_config=wc,
+                worker_id=0, live_mode=False,
+            )
+            dummy = DummyVecEnv([lambda: raw_env])
+
+            vecnorm_path = PROJECT_ROOT / "models" / "rl_agents" / "vecnormalize.pkl"
+            if vecnorm_path.exists():
+                self._offline_vec_env = VecNormalize.load(str(vecnorm_path), dummy)
+                self._offline_vec_env.training = False
+                self._offline_vec_env.norm_reward = False
+                logger.info(f"VecNormalize loaded from {vecnorm_path} (training=False)")
+            else:
+                gamma = self.config.get("agent", {}).get("gamma", 0.99)
+                self._offline_vec_env = VecNormalize(
+                    dummy, norm_obs=True, norm_reward=False,
+                    clip_obs=10.0, gamma=gamma, training=False,
+                )
+                logger.warning("VecNormalize stats not found -- identity normalisation")
+
+            self._offline_obs = self._offline_vec_env.reset()
+            self._offline_step = 0
+
+            # Cache data for get_current_price
+            self.latest_data = data
+
+            asset = self.symbol.replace("/", "")
+            rows = 0
+            for tf, df in data.get(asset, {}).items():
+                rows = max(rows, len(df))
+            logger.info(f"Offline env ready: {rows} rows for {asset}, 3 timeframes")
+            return True
+
+        except Exception as e:
+            logger.error(f"Offline env setup failed: {e}", exc_info=True)
             return False
 
     def load_model(self, model_path=None):
@@ -359,14 +447,19 @@ class PaperTradingMonitor:
             self._close_position(price, reason="SELL_SIGNAL")
 
     def run_analysis_cycle(self):
-        """One analysis cycle: fetch data → build obs → predict → execute.
+        """One analysis cycle: fetch data -> build obs -> predict -> execute.
 
         Inference pipeline:
-          1. Wrap data in MultiAssetChunkedEnv → DummyVecEnv.
+          1. Wrap data in MultiAssetChunkedEnv -> DummyVecEnv.
           2. Load VecNormalize stats from training (training=False, norm_reward=False).
           3. StateBuilder.build_observation() produces the 12-dim context_vector.
-          4. model.predict(obs, deterministic=True) → interpret target-weight action.
+          4. model.predict(obs, deterministic=True) -> interpret target-weight action.
+
+        In offline mode the environment is already built; we simply step through it.
         """
+        if self.offline:
+            return self._run_offline_cycle()
+
         data = self.fetch_live_data()
         if not data:
             return
@@ -387,7 +480,7 @@ class PaperTradingMonitor:
             )
             dummy_env = DummyVecEnv([lambda: raw_env])
 
-            # ── VecNormalize: load training stats for inference ──────────
+            # -- VecNormalize: load training stats for inference
             vecnorm_path = PROJECT_ROOT / "models" / "rl_agents" / "vecnormalize.pkl"
             if vecnorm_path.exists():
                 vec_env = VecNormalize.load(str(vecnorm_path), dummy_env)
@@ -400,37 +493,17 @@ class PaperTradingMonitor:
                     dummy_env, norm_obs=True, norm_reward=False,
                     clip_obs=10.0, gamma=gamma, training=False,
                 )
-                logger.warning("VecNormalize stats not found — using identity normalisation")
+                logger.warning("VecNormalize stats not found -- identity normalisation")
 
             obs = vec_env.reset()
+            self._log_context_vector(obs)
 
-            # Context vector verification
-            if isinstance(obs, dict):
-                cv = obs.get("context_vector")
-            else:
-                cv = None
-            if cv is not None:
-                cv_flat = cv[0] if cv.ndim > 1 else cv
-                logger.info(
-                    f"Context vector (12D): "
-                    f"vol={cv_flat[0]:.3f} trend={cv_flat[1]:.3f} adx={cv_flat[2]:.3f} "
-                    f"regime={cv_flat[3]:.3f} dd={cv_flat[4]:.3f} candle={cv_flat[5]:.3f} "
-                    f"sinH={cv_flat[6]:.3f} cosH={cv_flat[7]:.3f}"
-                )
-
-            # Predict with loaded model
             action, _ = self.model.predict(obs, deterministic=True)
             action_info = interpret_target_weight_action(
                 action, has_position=self.active_position is not None
             )
+            self._log_prediction(action, action_info)
 
-            logger.info(
-                f"PREDICTION: {action_info['signal']} "
-                f"(confidence={action_info['confidence']:.3f}, "
-                f"raw[0]={float(action[0]):.4f})"
-            )
-
-            # Execute
             if action_info["signal"] != "HOLD":
                 self.execute_signal(action_info, price)
 
@@ -439,10 +512,88 @@ class PaperTradingMonitor:
         except Exception as e:
             logger.error(f"Analysis cycle failed: {e}", exc_info=True)
 
+    # ---- Offline replay helpers ------------------------------------------
+
+    def _run_offline_cycle(self):
+        """Step through the pre-built offline env and predict."""
+        if self._offline_vec_env is None or self._offline_obs is None:
+            logger.error("Offline env not initialised")
+            return
+
+        try:
+            obs = self._offline_obs
+            self._log_context_vector(obs)
+
+            action, _ = self.model.predict(obs, deterministic=True)
+            action_info = interpret_target_weight_action(
+                action, has_position=self.active_position is not None
+            )
+
+            # Derive simulated price from context or latest data
+            price = self.get_current_price()
+            if price <= 0:
+                price = 65000.0  # fallback
+
+            self._log_prediction(action, action_info)
+
+            if action_info["signal"] != "HOLD":
+                self.execute_signal(action_info, price)
+
+            # Step the environment forward
+            obs_next, reward, done, info = self._offline_vec_env.step(action)
+            self._offline_step += 1
+
+            if done[0]:
+                logger.info(f"Offline episode ended at step {self._offline_step}, resetting")
+                obs_next = self._offline_vec_env.reset()
+                self._offline_step = 0
+
+            self._offline_obs = obs_next
+
+            logger.info(
+                f"[offline step {self._offline_step}] "
+                f"reward={reward[0]:.4f}, balance=${self.virtual_balance:.2f}"
+            )
+
+        except Exception as e:
+            logger.error(f"Offline analysis cycle failed: {e}", exc_info=True)
+
+    # ---- Logging helpers -------------------------------------------------
+
+    def _log_context_vector(self, obs):
+        """Log the 12-D context vector from the observation."""
+        if isinstance(obs, dict):
+            cv = obs.get("context_vector")
+        else:
+            cv = None
+        if cv is not None:
+            cv_flat = cv[0] if cv.ndim > 1 else cv
+            logger.info(
+                f"Context vector (12D): "
+                f"vol={cv_flat[0]:.3f} trend={cv_flat[1]:.3f} adx={cv_flat[2]:.3f} "
+                f"regime={cv_flat[3]:.3f} dd={cv_flat[4]:.3f} candle={cv_flat[5]:.3f} "
+                f"sinH={cv_flat[6]:.3f} cosH={cv_flat[7]:.3f}"
+            )
+
+    def _log_prediction(self, action, action_info):
+        """Log model prediction details."""
+        raw0 = float(action[0][0]) if action.ndim > 1 else float(action[0])
+        logger.info(
+            f"PREDICTION: {action_info['signal']} "
+            f"(confidence={action_info['confidence']:.3f}, "
+            f"raw[0]={raw0:.4f})"
+        )
+
     def run(self, duration_minutes: int = 360):
-        """Main event loop."""
+        """Main event loop.
+
+        In offline mode the loop sleep is shortened so the full duration
+        runs through many environment steps in wall-clock time.
+        """
         logger.info("=" * 70)
         logger.info("ADAN Paper Trading Monitor v2 (FiLM + context_vector)")
+        mode_str = "OFFLINE" if self.offline else "LIVE"
+        logger.info(f"  Mode: {mode_str}")
         logger.info(f"  Duration: {duration_minutes} min")
         logger.info(f"  Analysis interval: {self.analysis_interval}s")
         logger.info(f"  Balance: ${self.virtual_balance:.2f}")
@@ -454,29 +605,30 @@ class PaperTradingMonitor:
             return
 
         end_time = time.time() + duration_minutes * 60
+        loop_sleep = 1 if self.offline else 10
 
         while time.time() < end_time:
             try:
                 now = time.time()
 
-                # TP/SL check (every 30s)
+                # TP/SL check
                 if now - self.last_tp_sl_check > self.tp_sl_check_interval:
                     self.check_tp_sl()
                     self.last_tp_sl_check = now
 
-                # Analysis cycle (every 5 min)
+                # Analysis cycle
                 if now - self.last_analysis_time > self.analysis_interval:
                     self.run_analysis_cycle()
                     self.last_analysis_time = now
 
-                time.sleep(10)
+                time.sleep(loop_sleep)
 
             except KeyboardInterrupt:
                 logger.info("Stopping paper trading...")
                 break
             except Exception as e:
                 logger.error(f"Loop error: {e}", exc_info=True)
-                time.sleep(30)
+                time.sleep(5)
 
         # Final report
         logger.info("=" * 70)
@@ -508,12 +660,17 @@ def main():
     parser.add_argument("--api-key", default=None)
     parser.add_argument("--api-secret", default=None)
     parser.add_argument("--duration", type=int, default=360, help="Duration in minutes")
+    parser.add_argument(
+        "--offline", action="store_true",
+        help="Run in offline mode using local parquet data (no exchange needed)",
+    )
     args = parser.parse_args()
 
     monitor = PaperTradingMonitor(
         config_path=args.config,
         api_key=args.api_key,
         api_secret=args.api_secret,
+        offline=args.offline,
     )
     if args.model:
         monitor.load_model(args.model)
